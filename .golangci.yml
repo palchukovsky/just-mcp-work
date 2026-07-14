@@ -1,0 +1,70 @@
+version: "2"
+
+# Draft configuration. Adjust the enabled rules after the public API settles.
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - durationcheck
+    - errcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - forcetypeassert
+    - gocheckcompilerdirectives
+    - gochecknoglobals
+    - gochecknoinits
+    - gocritic
+    - gocyclo
+    - godoclint
+    - gosec
+    - govet
+    - ineffassign
+    - makezero
+    - misspell
+    - modernize
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - predeclared
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - testifylint
+    - tparallel
+    - unconvert
+    - unused
+    - wastedassign
+    - wrapcheck
+
+  settings:
+    errcheck:
+      check-blank: true
+      check-type-assertions: true
+    gocyclo:
+      min-complexity: 15
+    govet:
+      enable-all: true
+
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+    warn-unused: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true

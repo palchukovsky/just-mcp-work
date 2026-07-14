@@ -1,0 +1,9 @@
+/bin/
+/dist/
+/.tmp/
+/.venv/
+/.just-mcp-work/
+__pycache__/
+*.test
+coverage.out
+coverage.html

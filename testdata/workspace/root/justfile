@@ -1,0 +1,8 @@
+alias h := hello
+
+hello name="world":
+    @echo "hello {{name}}"
+
+[private]
+private-task:
+    @echo private

@@ -1,0 +1,12 @@
+default:
+    @echo nested
+
+fail:
+    @echo failure >&2
+    @exit 7
+
+many +items:
+    @echo {{items}}
+
+optional *items:
+    @echo {{items}}
