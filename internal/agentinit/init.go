@@ -32,9 +32,12 @@ const Prompt = `This workspace exposes its runnable tasks through the just-mcp-w
   reading build files.
 - Run tasks with ` + "`run_task`" + ` (project_path, task_id, arguments) — do not shell out
   to the underlying tool or bash directly.
-- Results are compact: success returns a run_id, exit code, and duration, not
-  full output. Fetch output with ` + "`get_run_logs`" + ` using the run_id (stdout/
-  stderr, offset/limit paging).
+- Results are compact. Treat ` + "`ok: true`" + ` and exit code 0 as the primary success
+  signal. Do not call ` + "`get_run_logs`" + ` after a successful run just to
+  double-check output.
+- If more context is needed, first use ` + "`stdout_tail`" + ` and ` + "`stderr_tail`" + ` from the
+  receipt. Fetch full logs with ` + "`get_run_logs`" + ` only when explicitly requested
+  or when diagnosing a failure and the tail is insufficient.
 - Prefer existing tasks; do not edit build files unless asked.`
 
 // Options controls agent instruction injection.
@@ -59,6 +62,10 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve workspace directory: %w", err)
 	}
+	scope, err := findScopeRoot(dir)
+	if err != nil {
+		return Result{}, err
+	}
 	if len(options.Agents) == 0 {
 		options.Agents = []string{"claude", "codex", "cursor"}
 	}
@@ -68,7 +75,7 @@ func Apply(options Options) (Result, error) {
 		if !ok {
 			return Result{}, fmt.Errorf("unsupported agent %q", agent)
 		}
-		path, err := findAgentInstruction(dir, target)
+		path, err := findAgentInstruction(scope, target)
 		if err != nil {
 			return Result{}, err
 		}
@@ -100,7 +107,7 @@ func Apply(options Options) (Result, error) {
 		}
 	}
 	if options.WriteMCPConfig {
-		path, err := findMCPConfig(dir)
+		path, err := findMCPConfig(scope)
 		if err != nil {
 			return Result{}, err
 		}
@@ -124,12 +131,12 @@ func Apply(options Options) (Result, error) {
 				}
 			}
 		}
-		codexPath := filepath.Join(dir, codexConfig)
+		codexPath := filepath.Join(scope, codexConfig)
 		codexBefore, readErr := os.ReadFile(codexPath)
 		if readErr != nil && !os.IsNotExist(readErr) {
 			return Result{}, fmt.Errorf("read %s: %w", codexPath, readErr)
 		}
-		codexAfter, mergeErr := mergeCodexConfig(codexBefore, dir)
+		codexAfter, mergeErr := mergeCodexConfig(codexBefore, scope)
 		if mergeErr != nil {
 			return Result{}, mergeErr
 		}
@@ -147,6 +154,27 @@ func Apply(options Options) (Result, error) {
 		}
 	}
 	return result, nil
+}
+
+// findScopeRoot uses the nearest existing MCP config as the workspace boundary.
+// Without one, dir is a standalone project and owns all generated files.
+func findScopeRoot(dir string) (string, error) {
+	for current := dir; ; current = filepath.Dir(current) {
+		path := filepath.Join(current, mcpConfig)
+		info, err := os.Lstat(path)
+		if err == nil {
+			if !info.Mode().IsRegular() {
+				return "", fmt.Errorf("mcp config %s is not a regular file", path)
+			}
+			return current, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", fmt.Errorf("inspect %s: %w", path, err)
+		}
+		if filepath.Dir(current) == current {
+			return dir, nil
+		}
+	}
 }
 
 // findAgentInstruction finds the closest selected instruction file at or above dir.

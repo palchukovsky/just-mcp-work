@@ -8,8 +8,10 @@ package mcpserver
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/executor"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
+	"github.com/palchukovsky/just-mcp-work/internal/updatecheck"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
@@ -28,6 +31,7 @@ type Config struct {
 	Timeout   time.Duration
 	Retention time.Duration
 	Logger    *slog.Logger
+	Updates   *updatecheck.Checker
 }
 
 // Server owns MCP handlers and their workspace dependencies.
@@ -35,6 +39,7 @@ type Server struct {
 	workspace *workspace.Registry
 	runners   *runner.Registry
 	store     *runstore.Store
+	updates   *updatecheck.Checker
 	config    Config
 }
 
@@ -57,13 +62,30 @@ func New(
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
-	return &Server{workspace: workspaceRegistry, runners: runners, store: store, config: config}, nil
+	if config.Updates == nil {
+		config.Updates = updatecheck.New(
+			updatecheck.Config{
+				StatePath:      filepath.Join(store.StateRoot(), "version.json"),
+				CurrentVersion: version.Current(),
+				Logger:         config.Logger,
+			},
+		)
+	}
+	return &Server{
+		workspace: workspaceRegistry,
+		runners:   runners,
+		store:     store,
+		updates:   config.Updates,
+		config:    config,
+	}, nil
 }
 
 // Run serves only STDIO MCP traffic. Logs are handled by the configured logger.
 func (s *Server) Run(ctx context.Context) error {
+	s.updates.Start(ctx)
+	defer s.updates.Close()
 	server := mcp.NewServer(
-		&mcp.Implementation{Name: "just-mcp-work", Version: version.Version},
+		&mcp.Implementation{Name: "just-mcp-work", Version: version.Current().Display()},
 		&mcp.ServerOptions{Logger: s.config.Logger},
 	)
 	mcp.AddTool(
@@ -72,7 +94,7 @@ func (s *Server) Run(ctx context.Context) error {
 			Name:        "list_projects",
 			Description: "List task projects discovered below the workspace root.",
 		},
-		recoverTool(s.listProjects),
+		recoverTool(withUpdateNotification(s, s.listProjects)),
 	)
 	mcp.AddTool(
 		server,
@@ -80,7 +102,7 @@ func (s *Server) Run(ctx context.Context) error {
 			Name:        "list_tasks",
 			Description: "List runner-neutral tasks for one discovered project.",
 		},
-		recoverTool(s.listTasks),
+		recoverTool(withUpdateNotification(s, s.listTasks)),
 	)
 	mcp.AddTool(
 		server,
@@ -89,12 +111,12 @@ func (s *Server) Run(ctx context.Context) error {
 			Description: "Run one discovered task with separate argv arguments and " +
 				"return a compact receipt.",
 		},
-		recoverTool(s.runTask),
+		recoverTool(withUpdateNotification(s, s.runTask)),
 	)
 	mcp.AddTool(
 		server,
 		&mcp.Tool{Name: "get_run", Description: "Get persisted metadata for one task run."},
-		recoverTool(s.getRun),
+		recoverTool(withUpdateNotification(s, s.getRun)),
 	)
 	mcp.AddTool(
 		server,
@@ -102,12 +124,30 @@ func (s *Server) Run(ctx context.Context) error {
 			Name:        "get_run_logs",
 			Description: "Read a paged stdout or stderr range from a persisted task run.",
 		},
-		recoverTool(s.getRunLogs),
+		recoverTool(withUpdateNotification(s, s.getRunLogs)),
+	)
+	mcp.AddTool(
+		server,
+		&mcp.Tool{
+			Name:        "version_status",
+			Description: "Check the installed version against the latest stable GitHub release tag.",
+		},
+		recoverTool(s.versionStatus),
 	)
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		return fmt.Errorf("run MCP transport: %w", err)
 	}
 	return nil
+}
+
+type versionStatusInput struct{}
+
+func (s *Server) versionStatus(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	_ versionStatusInput,
+) (*mcp.CallToolResult, updatecheck.Status, error) {
+	return nil, s.updates.CheckNow(ctx), nil
 }
 
 type listProjectsInput struct{}
@@ -382,6 +422,44 @@ func toolErrorResult(err error) *mcp.CallToolResult {
 func (s *Server) cleanup() {
 	if err := s.store.Cleanup(s.config.Retention); err != nil {
 		s.config.Logger.Warn("run log cleanup failed", "error", err)
+	}
+}
+
+func withUpdateNotification[In, Out any](
+	s *Server,
+	handler mcp.ToolHandlerFor[In, Out],
+) mcp.ToolHandlerFor[In, Out] {
+	return func(
+		ctx context.Context,
+		request *mcp.CallToolRequest,
+		input In,
+	) (*mcp.CallToolResult, Out, error) {
+		s.updates.Observe()
+		result, output, err := handler(ctx, request, input)
+		if err != nil {
+			return result, output, err
+		}
+		notification := s.updates.Notification()
+		if notification == nil {
+			return result, output, nil
+		}
+		if result == nil {
+			data, marshalErr := json.Marshal(output)
+			if marshalErr != nil {
+				s.config.Logger.Warn("marshal primary MCP result for update notice failed", "error", marshalErr)
+				return nil, output, nil
+			}
+			result = &mcp.CallToolResult{
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: string(data)},
+				},
+			}
+		}
+		result.Content = append(
+			result.Content,
+			&mcp.TextContent{Text: notification.Message()},
+		)
+		return result, output, nil
 	}
 }
 

@@ -63,10 +63,11 @@ type Meta struct {
 //
 //nolint:govet // Field order keeps synchronization state next to the active-run map.
 type Store struct {
-	root    string
-	logRoot string
-	mu      sync.Mutex
-	active  map[string]struct{}
+	root      string
+	stateRoot string
+	logRoot   string
+	mu        sync.Mutex
+	active    map[string]struct{}
 }
 
 // New creates the state and log directories below root.
@@ -84,11 +85,15 @@ func New(root string) (*Store, error) {
 		return nil, fmt.Errorf("create log root: %w", err)
 	}
 	return &Store{
-		root:    filepath.Clean(absRoot),
-		logRoot: logRoot,
-		active:  make(map[string]struct{}),
+		root:      filepath.Clean(absRoot),
+		stateRoot: stateRoot,
+		logRoot:   logRoot,
+		active:    make(map[string]struct{}),
 	}, nil
 }
+
+// StateRoot returns the directory containing durable service state.
+func (s *Store) StateRoot() string { return s.stateRoot }
 
 // LogRoot returns the directory containing all run directories.
 func (s *Store) LogRoot() string { return s.logRoot }

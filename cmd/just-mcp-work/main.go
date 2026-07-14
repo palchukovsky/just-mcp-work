@@ -42,7 +42,7 @@ func run(args []string) error {
 	case "init":
 		return initCommand(args[1:])
 	case "version":
-		fmt.Printf("just-mcp-work %s (%s)\n", version.Version, version.Commit)
+		fmt.Printf("just-mcp-work %s (%s)\n", version.Current().Display(), version.Commit)
 		return nil
 	case "help", "--help", "-h":
 		printUsage(os.Stdout)

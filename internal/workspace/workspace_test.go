@@ -72,6 +72,7 @@ func TestDiscoverSkipsJustfileIncludedByParentProject(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "justfile"), "root")
 	writeFile(t, filepath.Join(root, "nested", "justfile"), "nested")
+	writeFile(t, filepath.Join(root, "invalid", "justfile"), "invalid")
 	runners, err := runner.NewRegistry(includingFakeJustRunner{
 		included: filepath.Join(root, "nested"),
 	})
@@ -86,8 +87,12 @@ func TestDiscoverSkipsJustfileIncludedByParentProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if paths := []string{projects[0].RelPath}; !reflect.DeepEqual(paths, []string{"."}) {
-		t.Fatalf("project paths = %#v, want root only", paths)
+	paths := make([]string, 0, len(projects))
+	for _, project := range projects {
+		paths = append(paths, project.RelPath)
+	}
+	if want := []string{".", "invalid"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("project paths = %#v, want %#v", paths, want)
 	}
 }
 

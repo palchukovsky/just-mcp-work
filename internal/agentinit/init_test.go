@@ -157,6 +157,16 @@ func TestApplyMergesNearestMCPConfig(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(project, mcpConfig)); !os.IsNotExist(statErr) {
 		t.Fatalf("child MCP config unexpectedly exists: %v", statErr)
 	}
+	if _, statErr := os.Stat(filepath.Join(project, "AGENTS.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("child agent instructions unexpectedly exist: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(workspace, "AGENTS.md")); statErr != nil {
+		t.Fatalf("workspace agent instructions were not created: %v", statErr)
+	}
+	assertCodexMCPConfig(t, filepath.Join(workspace, codexConfig), workspace)
+	if _, statErr := os.Stat(filepath.Join(project, codexConfig)); !os.IsNotExist(statErr) {
+		t.Fatalf("child Codex config unexpectedly exists: %v", statErr)
+	}
 
 	// #nosec G304 -- configPath is created in this test's temporary directory.
 	data, err := os.ReadFile(configPath)

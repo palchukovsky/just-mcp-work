@@ -61,6 +61,7 @@ The server discovers nested projects on demand. Use `init --help` and
 | `run_task` | Start a selected task with separate argument values. |
 | `get_run` | Read stored run metadata. |
 | `get_run_logs` | Page stdout or stderr by byte offset. |
+| `version_status` | Compare this binary with the latest stable GitHub tag. |
 
 Task IDs are runner-qualified, for example `just:build`. `run_task` returns a
 short receipt; read output separately with `get_run_logs`.
