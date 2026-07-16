@@ -18,6 +18,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/mcpserver"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
+	cmakerunner "github.com/palchukovsky/just-mcp-work/internal/runner/cmake"
 	justrunner "github.com/palchukovsky/just-mcp-work/internal/runner/just"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
@@ -41,7 +42,7 @@ func run(args []string) error {
 		return serve(args[1:])
 	case "init":
 		return initCommand(args[1:])
-	case "version":
+	case "version", "--version", "-version":
 		fmt.Printf("just-mcp-work %s (%s)\n", version.Current().Display(), version.Commit)
 		return nil
 	case "help", "--help", "-h":
@@ -87,7 +88,10 @@ func serve(args []string) error {
 		return fmt.Errorf("serve accepts no positional arguments")
 	}
 
-	registry, err := runner.NewRegistry(justrunner.New(""))
+	registry, err := runner.NewRegistry(
+		justrunner.New(""),
+		cmakerunner.New(""),
+	)
 	if err != nil {
 		return fmt.Errorf("create runner registry: %w", err)
 	}
