@@ -32,6 +32,9 @@ const Prompt = `This workspace exposes its runnable tasks through the just-mcp-w
   reading build files.
 - Run tasks with ` + "`run_task`" + ` (project_path, task_id, arguments) — do not shell out
   to the underlying tool or bash directly.
+- Use ` + "`run_shell_command`" + ` for an arbitrary shell command that is not represented by a
+  discovered task. Set ` + "`working_directory`" + ` to a workspace-relative directory (default
+  ` + "`.`" + `); do not use it instead of ` + "`run_task`" + ` for an existing task.
 - Results are compact. Treat ` + "`ok: true`" + ` and exit code 0 as the primary success
   signal. Do not call ` + "`get_run_logs`" + ` after a successful run just to
   double-check output.

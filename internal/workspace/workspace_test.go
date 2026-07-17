@@ -68,6 +68,37 @@ func TestFindRejectsPathsOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestResolveDir(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "nested", "fixture"), "fixture")
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := registry.ResolveDir("nested")
+	if err != nil || resolved != filepath.Join(root, "nested") {
+		t.Fatalf("ResolveDir(nested) = %q, %v", resolved, err)
+	}
+	resolved, err = registry.ResolveDir("")
+	if err != nil || resolved != root {
+		t.Fatalf("ResolveDir(root) = %q, %v", resolved, err)
+	}
+	for _, relPath := range []string{"../outside", "nested/fixture", "missing"} {
+		if _, err := registry.ResolveDir(relPath); err == nil {
+			t.Errorf("ResolveDir(%q) succeeded", relPath)
+		}
+	}
+
+	external := t.TempDir()
+	if err := os.Symlink(external, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if _, err := registry.ResolveDir("linked"); err == nil {
+		t.Fatal("ResolveDir followed a directory symlink")
+	}
+}
+
 func TestDiscoverSkipsJustfileIncludedByParentProject(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "justfile"), "root")

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -146,6 +147,101 @@ func TestMCPServerHelperProcess(_ *testing.T) {
 	//nolint:errcheck // The helper exits immediately when test output is unavailable.
 	_, _ = os.Stderr.WriteString("helper stderr")
 	os.Exit(0)
+}
+
+func TestRunShellCommandFromNonProjectDirectory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "nested"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	server := newShellTestServer(t, root)
+	command := shellOutputCommand()
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: command, WorkingDirectory: "nested"},
+	)
+	if err != nil || !receipt.OK || receipt.Status != runstore.StatusOK {
+		t.Fatalf("runShellCommand = %#v, %v", receipt, err)
+	}
+	assertShellRun(t, server, receipt.RunID, root)
+	_, rejected, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: command, WorkingDirectory: "../outside"},
+	)
+	if err != nil || rejected.OK || rejected.Status != runstore.StatusSpawnError {
+		t.Fatalf("rejected shell command = %#v, %v", rejected, err)
+	}
+}
+
+func TestRunShellCommandDefaultsToWorkspaceRoot(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: shellOutputCommand()},
+	)
+	if err != nil || !receipt.OK || receipt.Status != runstore.StatusOK {
+		t.Fatalf("runShellCommand = %#v, %v", receipt, err)
+	}
+	_, run, err := server.getRun(context.Background(), nil, getRunInput{RunID: receipt.RunID})
+	if err != nil || run.Run.ProjectPath != "." || run.Run.CWD != root {
+		t.Fatalf("root shell run metadata = %#v, %v", run.Run, err)
+	}
+}
+
+func newShellTestServer(t *testing.T, root string) *Server {
+	t.Helper()
+	runners, err := runner.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(workspaceRegistry, runners, store, Config{
+		Timeout:   5 * time.Second,
+		Retention: time.Hour,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+func shellOutputCommand() string {
+	command := "printf shell-output"
+	if runtime.GOOS == "windows" {
+		command = "echo shell-output"
+	}
+	return command
+}
+
+func assertShellRun(t *testing.T, server *Server, runID, root string) {
+	t.Helper()
+	_, run, err := server.getRun(context.Background(), nil, getRunInput{RunID: runID})
+	if err != nil ||
+		run.Run.Runner != "shell" ||
+		run.Run.ProjectPath != "nested" ||
+		run.Run.CWD != filepath.Join(root, "nested") {
+		t.Fatalf("shell run metadata = %#v, %v", run.Run, err)
+	}
+	_, stdout, err := server.getRunLogs(
+		context.Background(),
+		nil,
+		getRunLogsInput{RunID: runID, Stream: "stdout"},
+	)
+	if err != nil || !strings.Contains(stdout.Data, "shell-output") {
+		t.Fatalf("shell stdout = %#v, %v", stdout, err)
+	}
 }
 
 //nolint:gocyclo // This test keeps the normal-result and status-tool contracts together.

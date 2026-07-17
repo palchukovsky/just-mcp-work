@@ -46,6 +46,14 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	}
 }
 
+func TestPromptDescribesShellCommand(t *testing.T) {
+	for _, expected := range []string{"run_shell_command", "working_directory", "run_task"} {
+		if !strings.Contains(Prompt, expected) {
+			t.Errorf("Prompt does not mention %q", expected)
+		}
+	}
+}
+
 func TestApplyReplacesModifiedManagedBlock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "CLAUDE.md")

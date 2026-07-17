@@ -11,7 +11,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -112,6 +115,15 @@ func (s *Server) Run(ctx context.Context) error {
 				"return a compact receipt.",
 		},
 		recoverTool(withUpdateNotification(s, s.runTask)),
+	)
+	mcp.AddTool(
+		server,
+		&mcp.Tool{
+			Name: "run_shell_command",
+			Description: "Run a shell command from a workspace-relative directory and return a " +
+				"compact receipt.",
+		},
+		recoverTool(withUpdateNotification(s, s.runShellCommand)),
 	)
 	mcp.AddTool(
 		server,
@@ -305,6 +317,86 @@ func (s *Server) runTask(
 		)
 	}
 	return nil, runTaskOutput{Result: result}, nil
+}
+
+type runShellCommandInput struct {
+	Command          string `json:"command" jsonschema:"command text interpreted by the operating system shell"`
+	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"workspace-relative directory, default root"`
+}
+
+func (s *Server) runShellCommand(
+	ctx context.Context,
+	_ *mcp.CallToolRequest,
+	input runShellCommandInput,
+) (*mcp.CallToolResult, runTaskOutput, error) {
+	go s.cleanup()
+	workingDirectory := input.WorkingDirectory
+	if workingDirectory == "" {
+		workingDirectory = "."
+	}
+	handle, err := s.store.Begin(
+		runstore.Meta{
+			ProjectPath: workingDirectory,
+			TaskID:      "shell:command",
+			Args:        []string{input.Command},
+		},
+	)
+	if err != nil {
+		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+	}
+	dir, err := s.workspace.ResolveDir(workingDirectory)
+	if err != nil {
+		return nil, runTaskOutput{Result: s.reject(handle, err)}, nil
+	}
+	handle.Meta.Runner = "shell"
+	handle.Meta.CWD = dir
+	if persistErr := handle.PersistRunning(); persistErr != nil {
+		return nil, runTaskOutput{Result: s.reject(handle, persistErr)}, nil
+	}
+	cmd, err := shellCommand(ctx, dir, input.Command)
+	if err != nil {
+		return nil, runTaskOutput{Result: s.reject(handle, err)}, nil
+	}
+	result, executeErr := executor.Execute(
+		ctx,
+		cmd,
+		handle,
+		executor.Config{Timeout: s.config.Timeout},
+	)
+	if executeErr != nil {
+		s.config.Logger.Error(
+			"shell command ledger finalization failed",
+			"run_id",
+			result.RunID,
+			"error",
+			executeErr,
+		)
+	}
+	return nil, runTaskOutput{Result: result}, nil
+}
+
+func shellCommand(ctx context.Context, dir, command string) (*exec.Cmd, error) {
+	if strings.TrimSpace(command) == "" {
+		return nil, fmt.Errorf("command must not be empty")
+	}
+	if runtime.GOOS == "windows" {
+		shell := os.Getenv("ComSpec")
+		if shell == "" {
+			shell = "cmd.exe"
+		}
+		// #nosec G702 -- command text is intentionally interpreted by the requested shell tool.
+		cmd := exec.CommandContext(ctx, shell, "/D", "/S", "/C", command)
+		cmd.Dir = dir
+		return cmd, nil
+	}
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+	// #nosec G702 -- command text is intentionally interpreted by the requested shell tool.
+	cmd := exec.CommandContext(ctx, shell, "-c", command)
+	cmd.Dir = dir
+	return cmd, nil
 }
 
 func (s *Server) reject(handle *runstore.Handle, reason error) executor.Result {

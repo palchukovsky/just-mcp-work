@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -147,6 +148,35 @@ func (r *Registry) Find(ctx context.Context, relPath string) (Project, error) {
 		}
 	}
 	return Project{}, fmt.Errorf("unknown project_path %q", relPath)
+}
+
+// ResolveDir resolves a workspace-relative directory without following symlinks.
+// An empty path resolves to the workspace root.
+func (r *Registry) ResolveDir(relPath string) (string, error) {
+	if relPath == "" {
+		relPath = "."
+	}
+	if !validRelPath(relPath) {
+		return "", fmt.Errorf("invalid working directory %q", relPath)
+	}
+	path := r.root
+	if relPath == "." {
+		return path, nil
+	}
+	for component := range strings.SplitSeq(filepath.Clean(relPath), string(filepath.Separator)) {
+		path = filepath.Join(path, component)
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "", fmt.Errorf("inspect working directory %q: %w", relPath, err)
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return "", fmt.Errorf("working directory %q contains a symlink", relPath)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("working directory %q is not a directory", relPath)
+		}
+	}
+	return path, nil
 }
 
 func (r *Registry) inspect(ctx context.Context, dir string) (Project, bool, error) {
