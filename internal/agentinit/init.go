@@ -26,7 +26,7 @@ const (
 
 // Prompt is the canonical agent instruction managed by init.
 const Prompt = `This workspace exposes its runnable tasks through the just-mcp-work MCP server
-(currently the ` + "`just`" + ` and ` + "`CMake`" + ` runners). When running project tasks:
+(currently the ` + "`just`" + `, ` + "`CMake`" + `, and ` + "`Make`" + ` runners). When running project tasks:
 
 - Discover tasks with ` + "`list_projects`" + ` and ` + "`list_tasks`" + ` instead of
   reading build files.
@@ -38,9 +38,6 @@ const Prompt = `This workspace exposes its runnable tasks through the just-mcp-w
 - If more context is needed, first use ` + "`stdout_tail`" + ` and ` + "`stderr_tail`" + ` from the
   receipt. Fetch full logs with ` + "`get_run_logs`" + ` only when explicitly requested
   or when diagnosing a failure and the tail is insufficient.
-- In this workspace, the ` + "`jmw/testdata/workspace/invalid`" + ` project is expected
-  to appear in ` + "`list_projects`" + ` with an error status. It is part of this
-  project and must stay available for tests.
 - Prefer existing tasks; do not edit build files unless asked.`
 
 // Options controls agent instruction injection.

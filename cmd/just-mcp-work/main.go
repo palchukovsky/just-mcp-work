@@ -20,6 +20,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	cmakerunner "github.com/palchukovsky/just-mcp-work/internal/runner/cmake"
 	justrunner "github.com/palchukovsky/just-mcp-work/internal/runner/just"
+	makerunner "github.com/palchukovsky/just-mcp-work/internal/runner/make"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
@@ -91,6 +92,7 @@ func serve(args []string) error {
 	registry, err := runner.NewRegistry(
 		justrunner.New(""),
 		cmakerunner.New(""),
+		makerunner.New(""),
 	)
 	if err != nil {
 		return fmt.Errorf("create runner registry: %w", err)

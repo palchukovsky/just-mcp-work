@@ -27,6 +27,7 @@ Extract the matching archive and place `just-mcp-work` (or
 
 [`just`](https://github.com/casey/just) must be available on `PATH` for Just
 projects. [CMake](https://cmake.org/) must be available for CMake projects.
+[GNU Make](https://www.gnu.org/software/make/) must be available for Make projects.
 
 ```console
 go install github.com/palchukovsky/just-mcp-work@latest
@@ -64,9 +65,10 @@ The server discovers nested projects on demand. Use `init --help` and
 | `get_run_logs` | Page stdout or stderr by byte offset. |
 | `version_status` | Compare this binary with the latest stable GitHub tag. |
 
-Task IDs are runner-qualified, for example `just:build` or
-`cmake:build:debug`. `run_task` returns a short receipt; read output separately
-with `get_run_logs`.
+Task IDs are runner-qualified, for example `just:build`, `cmake:build:debug`,
+or `make:test`. Make projects expose their explicit targets without running
+recipes during task discovery. `run_task` returns a short receipt; read output
+separately with `get_run_logs`.
 
 ## Configuration
 
