@@ -49,6 +49,16 @@ func TestNotificationOnlyReportsMinorAndMajorUpdates(t *testing.T) {
 	}
 }
 
+func TestDefaultInstallCommandTargetsExecutablePackage(t *testing.T) {
+	t.Parallel()
+	checker := New(Config{})
+	got := checker.installCommand("v1.2.3")
+	want := "go install github.com/palchukovsky/just-mcp-work/cmd/just-mcp-work@v1.2.3"
+	if got != want {
+		t.Fatalf("installCommand() = %q, want %q", got, want)
+	}
+}
+
 func TestNotificationThrottleSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "version.json")
 	clock := newTestClock()

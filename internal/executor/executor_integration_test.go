@@ -6,9 +6,11 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -89,6 +91,36 @@ func TestExecuteCancellation(t *testing.T) {
 	}
 }
 
+func TestExecutePreCancelledDoesNotStartProcess(t *testing.T) {
+	root := t.TempDir()
+	store, err := runstore.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(runstore.Meta{TaskID: "test:pre-cancel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markerPath := filepath.Join(root, "marker")
+	cmd := helperCommand("marker", "")
+	cmd.Env = append(cmd.Env, "JMW_EXECUTOR_MARKER="+markerPath)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := Execute(ctx, cmd, handle, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != runstore.StatusCancelled {
+		t.Fatalf("result = %#v, want cancelled", result)
+	}
+	if cmd.Process != nil {
+		t.Fatalf("process started with PID %d", cmd.Process.Pid)
+	}
+	if _, statErr := os.Stat(markerPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("marker stat error = %v, want not exist", statErr)
+	}
+}
+
 func TestExecutorHelperProcess(_ *testing.T) {
 	mode := os.Getenv("JMW_EXECUTOR_HELPER")
 	if mode == "" {
@@ -103,6 +135,12 @@ func TestExecutorHelperProcess(_ *testing.T) {
 		return
 	case "nonzero":
 		os.Exit(7)
+	case "marker":
+		// #nosec G304,G703 -- the test controls its temporary marker path.
+		if err := os.WriteFile(os.Getenv("JMW_EXECUTOR_MARKER"), []byte("started"), 0o600); err != nil {
+			os.Exit(2)
+		}
+		return
 	case "child":
 		configureHelperChild()
 		for {

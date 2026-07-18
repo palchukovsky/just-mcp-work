@@ -18,10 +18,12 @@ the agent only the part it asked for.
 
 ## Security
 
-`just-mcp-work` runs tasks that already exist in your project - a `just` recipe,
-a `make` target, etc. - never arbitrary shell. They run with your privileges,
-unsandboxed: trust a project's tasks like you trust its build scripts. Need
-isolation? Run `just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
+`run_task` executes an existing `just` recipe, CMake target, or Make target with
+arguments kept separate. `run_shell_command` intentionally passes command text
+to the operating system shell. Both run with your privileges and without a
+sandbox: trust the selected task or command like you trust a project's build
+scripts. Need isolation? Run `just-mcp-work` in a container. See
+[SECURITY.md](SECURITY.md).
 
 ## Install
 
@@ -51,7 +53,7 @@ Extract the matching archive and place `just-mcp-work` (or
 ### Sources
 
 ```console
-go install github.com/palchukovsky/just-mcp-work@latest
+go install github.com/palchukovsky/just-mcp-work/cmd/just-mcp-work@latest
 just-mcp-work version
 ```
 
@@ -71,6 +73,10 @@ just-mcp-work init
 
 Run `init` again after updating `just-mcp-work` to a new version so the
 managed agent instructions and MCP entry are refreshed.
+
+`init` does not overwrite a manually configured Codex
+`[mcp_servers.just-mcp-work]` table. Remove that table before running `init` so
+the generated managed block can take ownership of the entry.
 
 Pass `--write-mcp-config=false` to print the resolved server entry instead of
 writing it.

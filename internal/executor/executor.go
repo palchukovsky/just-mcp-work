@@ -51,6 +51,24 @@ func Execute(
 	if cmd == nil || handle == nil {
 		return Result{}, fmt.Errorf("command and run handle are required")
 	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		finalErr := handle.Finish(
+			runstore.StatusCancelled,
+			-1,
+			ctxErr.Error(),
+			false,
+			false,
+		)
+		return compact(
+			handle.Meta,
+			false,
+			-1,
+			runstore.StatusCancelled,
+			"Task cancelled",
+			"",
+			"",
+		), finalErr
+	}
 	if config.Timeout <= 0 {
 		config.Timeout = 15 * time.Minute
 	}
@@ -86,6 +104,7 @@ func Execute(
 		), errors.Join(err, finalErr)
 	}
 	handle.Meta.PID = cmd.Process.Pid
+	handle.Meta.ProcessIdentity = runstore.ProcessIdentity(handle.Meta.PID)
 	if err := handle.PersistRunning(); err != nil {
 		if warningErr := writeExecutorWarning(
 			handle,
@@ -95,13 +114,33 @@ func Execute(
 		}
 	}
 	cleanup, killTree, attachErr := attach(cmd)
+	if attachErr != nil {
+		if killTree != nil {
+			killTree()
+		} else if cmd.Process != nil {
+			//nolint:errcheck // The setup failure remains the actionable error.
+			_ = cmd.Process.Kill()
+		}
+		waitErr := cmd.Wait()
+		finalErr := handle.Finish(
+			runstore.StatusSpawnError,
+			-1,
+			attachErr.Error(),
+			stdoutTail.Truncated(),
+			stderrTail.Truncated(),
+		)
+		return compact(
+			handle.Meta,
+			false,
+			-1,
+			runstore.StatusSpawnError,
+			"Failed to prepare task process",
+			stderrTail.String(),
+			stdoutTail.String(),
+		), errors.Join(attachErr, waitErr, finalErr)
+	}
 	if cleanup != nil {
 		defer cleanup()
-	}
-	if attachErr != nil {
-		if warningErr := writeExecutorWarning(handle, attachErr); warningErr != nil {
-			handle.Meta.Error = warningErr.Error()
-		}
 	}
 
 	done := make(chan error, 1)

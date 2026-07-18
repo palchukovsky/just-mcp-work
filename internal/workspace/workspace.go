@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -58,7 +59,6 @@ func (r *Registry) Root() string { return r.root }
 // Discover scans the root and returns projects sorted by relative path.
 func (r *Registry) Discover(ctx context.Context) ([]Project, error) {
 	projects := make([]Project, 0)
-	included := make(map[string]struct{})
 	err := filepath.WalkDir(r.root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -75,9 +75,6 @@ func (r *Registry) Discover(ctx context.Context) ([]Project, error) {
 		if path != r.root && r.excluded(path) {
 			return filepath.SkipDir
 		}
-		if _, ok := included[filepath.Clean(path)]; ok {
-			return filepath.SkipDir
-		}
 
 		project, found, err := r.inspect(ctx, path)
 		if err != nil {
@@ -85,23 +82,38 @@ func (r *Registry) Discover(ctx context.Context) ([]Project, error) {
 		}
 		if found {
 			projects = append(projects, project)
-			if includeErr := r.markIncluded(ctx, project, included); includeErr != nil {
-				return includeErr
-			}
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("scan workspace: %w", err)
 	}
+	included := make(map[includedProject]struct{})
+	for _, project := range projects {
+		if err := r.markIncluded(ctx, project, included); err != nil {
+			return nil, err
+		}
+	}
+	filtered := projects[:0]
+	for _, project := range projects {
+		if suppressIncluded(&project, included) {
+			filtered = append(filtered, project)
+		}
+	}
+	projects = filtered
 	sort.Slice(projects, func(i, j int) bool { return projects[i].RelPath < projects[j].RelPath })
 	return projects, nil
+}
+
+type includedProject struct {
+	dir    string
+	runner string
 }
 
 func (r *Registry) markIncluded(
 	ctx context.Context,
 	project Project,
-	included map[string]struct{},
+	included map[includedProject]struct{},
 ) error {
 	for _, name := range project.Runners {
 		if _, failed := project.Errors[name]; failed {
@@ -126,11 +138,38 @@ func (r *Registry) markIncluded(
 				continue
 			}
 			if clean != project.Dir {
-				included[clean] = struct{}{}
+				included[includedProject{dir: clean, runner: name}] = struct{}{}
 			}
 		}
 	}
 	return nil
+}
+
+func suppressIncluded(project *Project, included map[includedProject]struct{}) bool {
+	runners := project.Runners[:0]
+	for _, name := range project.Runners {
+		key := includedProject{dir: filepath.Clean(project.Dir), runner: name}
+		if _, ok := included[key]; ok {
+			delete(project.Tasks, name)
+			delete(project.Errors, name)
+			continue
+		}
+		runners = append(runners, name)
+	}
+	project.Runners = runners
+	for key := range included {
+		if key.dir == filepath.Clean(project.Dir) {
+			delete(project.Errors, key.runner)
+		}
+	}
+	if len(project.Runners) == 0 && len(project.Errors) == 0 {
+		return false
+	}
+	project.Status = "ready"
+	if len(project.Errors) > 0 {
+		project.Status = "error"
+	}
+	return true
 }
 
 // Find discovers projects and looks up one relative project path.
@@ -243,7 +282,7 @@ func (r *Registry) excluded(path string) bool {
 		if name == pattern {
 			return true
 		}
-		matched, matchErr := filepath.Match(pattern, filepath.ToSlash(rel))
+		matched, matchErr := pathpkg.Match(pattern, filepath.ToSlash(rel))
 		if matchErr == nil && matched {
 			return true
 		}

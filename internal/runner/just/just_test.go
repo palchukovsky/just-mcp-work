@@ -17,6 +17,27 @@ import (
 	justrunner "github.com/palchukovsky/just-mcp-work/internal/runner/just"
 )
 
+func TestDetectAcceptsOnlyRegularJustfile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dir, "recipes.just"),
+		[]byte("task:\n    @echo task\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("recipes.just", filepath.Join(dir, "justfile")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	detected, err := justrunner.New("").Detect(dir)
+	if err != nil {
+		t.Fatalf("Detect: %v", err)
+	}
+	if detected {
+		t.Fatal("Detect accepted a symlinked justfile")
+	}
+}
+
 func TestListTasksMapsRealDump(t *testing.T) {
 	requireJust(t)
 

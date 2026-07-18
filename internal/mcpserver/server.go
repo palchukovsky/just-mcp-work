@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/palchukovsky/just-mcp-work/internal/executor"
@@ -33,6 +34,7 @@ import (
 type Config struct {
 	Timeout   time.Duration
 	Retention time.Duration
+	Grace     time.Duration
 	Logger    *slog.Logger
 	Updates   *updatecheck.Checker
 }
@@ -305,7 +307,7 @@ func (s *Server) runTask(
 		ctx,
 		cmd,
 		handle,
-		executor.Config{Timeout: s.config.Timeout},
+		executor.Config{Timeout: s.config.Timeout, Grace: s.config.Grace},
 	)
 	if executeErr != nil {
 		s.config.Logger.Error(
@@ -353,7 +355,7 @@ func (s *Server) runShellCommand(
 	if persistErr := handle.PersistRunning(); persistErr != nil {
 		return nil, runTaskOutput{Result: s.reject(handle, persistErr)}, nil
 	}
-	cmd, err := shellCommand(ctx, dir, input.Command)
+	cmd, err := shellCommand(dir, input.Command)
 	if err != nil {
 		return nil, runTaskOutput{Result: s.reject(handle, err)}, nil
 	}
@@ -361,7 +363,7 @@ func (s *Server) runShellCommand(
 		ctx,
 		cmd,
 		handle,
-		executor.Config{Timeout: s.config.Timeout},
+		executor.Config{Timeout: s.config.Timeout, Grace: s.config.Grace},
 	)
 	if executeErr != nil {
 		s.config.Logger.Error(
@@ -375,7 +377,7 @@ func (s *Server) runShellCommand(
 	return nil, runTaskOutput{Result: result}, nil
 }
 
-func shellCommand(ctx context.Context, dir, command string) (*exec.Cmd, error) {
+func shellCommand(dir, command string) (*exec.Cmd, error) {
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("command must not be empty")
 	}
@@ -385,7 +387,7 @@ func shellCommand(ctx context.Context, dir, command string) (*exec.Cmd, error) {
 			shell = "cmd.exe"
 		}
 		// #nosec G702 -- command text is intentionally interpreted by the requested shell tool.
-		cmd := exec.CommandContext(ctx, shell, "/D", "/S", "/C", command)
+		cmd := exec.CommandContext(context.Background(), shell, "/D", "/S", "/C", command)
 		cmd.Dir = dir
 		return cmd, nil
 	}
@@ -394,7 +396,7 @@ func shellCommand(ctx context.Context, dir, command string) (*exec.Cmd, error) {
 		shell = "/bin/sh"
 	}
 	// #nosec G702 -- command text is intentionally interpreted by the requested shell tool.
-	cmd := exec.CommandContext(ctx, shell, "-c", command)
+	cmd := exec.CommandContext(context.Background(), shell, "-c", command)
 	cmd.Dir = dir
 	return cmd, nil
 }
@@ -448,8 +450,8 @@ func (s *Server) getRun(
 type getRunLogsInput struct {
 	RunID    string `json:"run_id" jsonschema:"run ID returned by run_task"`
 	Stream   string `json:"stream" jsonschema:"stdout or stderr"`
-	Offset   int64  `json:"offset,omitempty" jsonschema:"byte offset, default zero"`
-	Limit    int64  `json:"limit,omitempty" jsonschema:"maximum bytes, default 65536"`
+	Offset   int64  `json:"offset,omitempty" jsonschema:"raw byte offset, default zero"`
+	Limit    int64  `json:"limit,omitempty" jsonschema:"maximum raw bytes, default 65536"`
 	Encoding string `json:"encoding,omitempty" jsonschema:"utf8 or base64, default utf8"`
 }
 
@@ -481,6 +483,12 @@ func (s *Server) getRunLogs(
 	if err != nil {
 		return toolErrorResult(err), getRunLogsOutput{Error: newToolError(err)}, nil
 	}
+	if encoding == "utf8" {
+		data, err = validUTF8Page(data)
+		if err != nil {
+			return toolErrorResult(err), getRunLogsOutput{Error: newToolError(err)}, nil
+		}
+	}
 	output := getRunLogsOutput{
 		RunID:      input.RunID,
 		Stream:     input.Stream,
@@ -494,6 +502,24 @@ func (s *Server) getRunLogs(
 		output.Data = string(data)
 	}
 	return nil, output, nil
+}
+
+func validUTF8Page(data []byte) ([]byte, error) {
+	if utf8.Valid(data) {
+		return data, nil
+	}
+	for suffixSize := 1; suffixSize < utf8.UTFMax && suffixSize <= len(data); suffixSize++ {
+		split := len(data) - suffixSize
+		if utf8.Valid(data[:split]) && !utf8.FullRune(data[split:]) {
+			if split == 0 {
+				break
+			}
+			return data[:split], nil
+		}
+	}
+	return nil, fmt.Errorf(
+		"log range is not complete valid UTF-8; adjust offset or limit, or use base64",
+	)
 }
 
 type toolError struct {

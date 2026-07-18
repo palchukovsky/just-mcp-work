@@ -99,21 +99,85 @@ def smoke(_: argparse.Namespace) -> None:
             request(process, responses, 1, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "smoke", "version": "dev"}})
             send(process, {"jsonrpc": "2.0", "method": "notifications/initialized"})
             tools = request(process, responses, 2, "tools/list", {})
-            available = {tool["name"] for tool in tools["result"]["tools"]}
-            if {"list_projects", "list_tasks", "run_task", "get_run", "get_run_logs"} - available:
-                raise RuntimeError(f"server did not expose the expected tools: {available!r}")
-            projects = structured(request(process, responses, 3, "tools/call", {"name": "list_projects", "arguments": {}}))
+            tools_by_name = {tool["name"]: tool for tool in tools["result"]["tools"]}
+            expected_tools = {
+                "list_projects",
+                "list_tasks",
+                "run_task",
+                "run_shell_command",
+                "get_run",
+                "get_run_logs",
+                "version_status",
+            }
+            if missing := expected_tools - tools_by_name.keys():
+                raise RuntimeError(f"server did not expose the expected tools: {missing!r}")
+            assert_input_schema(
+                tools_by_name["run_shell_command"],
+                properties={"command", "working_directory"},
+                required={"command"},
+            )
+            assert_input_schema(
+                tools_by_name["version_status"],
+                properties=set(),
+                required=set(),
+            )
+
+            projects = call_tool(process, responses, 3, "list_projects", {})
             project_path = projects["projects"][0]["rel_path"]
-            tasks = structured(request(process, responses, 4, "tools/call", {"name": "list_tasks", "arguments": {"project_path": project_path}}))
+            tasks = call_tool(process, responses, 4, "list_tasks", {"project_path": project_path})
             if not tasks["tasks"]:
                 raise RuntimeError(f"server returned no tasks: projects={projects!r} tasks={tasks!r}")
             task_id = tasks["tasks"][0]["task_id"]
-            receipt = structured(request(process, responses, 5, "tools/call", {"name": "run_task", "arguments": {"project_path": project_path, "task_id": task_id, "arguments": []}}))
+            receipt = call_tool(
+                process,
+                responses,
+                5,
+                "run_task",
+                {"project_path": project_path, "task_id": task_id, "arguments": []},
+            )
             if not receipt["ok"] or "hello" in json.dumps(receipt):
                 raise RuntimeError("task receipt was not compact and successful")
-            logs = structured(request(process, responses, 6, "tools/call", {"name": "get_run_logs", "arguments": {"run_id": receipt["run_id"], "stream": "stdout", "offset": 0, "limit": 64}}))
+            logs = call_tool(
+                process,
+                responses,
+                6,
+                "get_run_logs",
+                {"run_id": receipt["run_id"], "stream": "stdout", "offset": 0, "limit": 64},
+            )
             if logs["data"] != "hello\n":
                 raise RuntimeError(f"unexpected task output: {logs['data']!r}")
+
+            shell_marker = "just-mcp-work-shell-smoke"
+            shell_receipt = call_tool(
+                process,
+                responses,
+                7,
+                "run_shell_command",
+                {"command": "echo " + shell_marker, "working_directory": "."},
+            )
+            if not shell_receipt["ok"] or shell_marker in json.dumps(shell_receipt):
+                raise RuntimeError("shell receipt was not compact and successful")
+            shell_logs = call_tool(
+                process,
+                responses,
+                8,
+                "get_run_logs",
+                {
+                    "run_id": shell_receipt["run_id"],
+                    "stream": "stdout",
+                    "offset": 0,
+                    "limit": 64,
+                },
+            )
+            if shell_logs["data"].strip() != shell_marker:
+                raise RuntimeError(f"unexpected shell output: {shell_logs['data']!r}")
+
+            version_status = call_tool(process, responses, 9, "version_status", {})
+            assert_typed_fields(
+                "version_status",
+                version_status,
+                {"current_version": str, "update_available": bool, "message": str},
+            )
         finally:
             process.terminate()
             try:
@@ -121,6 +185,46 @@ def smoke(_: argparse.Namespace) -> None:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=10)
+
+
+def assert_input_schema(tool: dict[str, object], *, properties: set[str], required: set[str]) -> None:
+    schema = tool.get("inputSchema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise RuntimeError(f"{tool['name']} has an invalid input schema: {schema!r}")
+    actual_properties = schema.get("properties", {})
+    if not isinstance(actual_properties, dict) or properties - actual_properties.keys():
+        raise RuntimeError(f"{tool['name']} input properties changed: {actual_properties!r}")
+    actual_required = schema.get("required", [])
+    if not isinstance(actual_required, list) or set(actual_required) != required:
+        raise RuntimeError(f"{tool['name']} required inputs changed: {actual_required!r}")
+
+
+def assert_typed_fields(name: str, payload: dict[str, object], fields: dict[str, type]) -> None:
+    invalid = {
+        field: payload.get(field)
+        for field, expected_type in fields.items()
+        if not isinstance(payload.get(field), expected_type)
+    }
+    if invalid:
+        raise RuntimeError(f"{name} response fields changed: {invalid!r}")
+
+
+def call_tool(
+    process: subprocess.Popen[str],
+    responses: queue.Queue[str],
+    request_id: int,
+    name: str,
+    arguments: dict[str, object],
+) -> dict[str, object]:
+    return structured(
+        request(
+            process,
+            responses,
+            request_id,
+            "tools/call",
+            {"name": name, "arguments": arguments},
+        )
+    )
 
 
 def release(args: argparse.Namespace) -> None:

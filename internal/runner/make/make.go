@@ -61,26 +61,20 @@ func (*Runner) Detect(projectDir string) (bool, error) {
 	return err == nil, err
 }
 
-// ListTasks discovers explicit Make targets without running their recipes.
-func (r *Runner) ListTasks(ctx context.Context, projectDir string) ([]runner.Task, error) {
+// ListTasks discovers literal explicit Make targets without evaluating the Makefile.
+func (*Runner) ListTasks(ctx context.Context, projectDir string) ([]runner.Task, error) {
 	makefile, err := findMakefile(projectDir)
 	if err != nil {
 		return nil, err
 	}
-	// #nosec G204 -- binary and Makefile are local workspace configuration.
-	cmd := exec.CommandContext(ctx, r.binary, "-rRpn", "-f", makefile)
-	cmd.Dir = projectDir
-	output, err := cmd.Output()
+	// #nosec G304 -- makefile is one of the fixed regular filenames below projectDir.
+	source, err := os.ReadFile(makefile)
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			return nil, fmt.Errorf("list Make targets: %s", strings.TrimSpace(string(exitErr.Stderr)))
-		}
-		return nil, fmt.Errorf("start Make target listing: %w", err)
+		return nil, fmt.Errorf("read Makefile for safe discovery: %w", err)
 	}
-	tasks, err := tasksFromDatabase(string(output), makefile)
+	tasks, err := tasksFromMakefile(ctx, string(source), makefile)
 	if err != nil {
-		return nil, fmt.Errorf("parse Make target listing: %w", err)
+		return nil, fmt.Errorf("safe Make discovery: %w", err)
 	}
 	return tasks, nil
 }
@@ -108,47 +102,153 @@ func (r *Runner) BuildCommand(
 	return cmd, nil
 }
 
-func tasksFromDatabase(database string, makefile string) ([]runner.Task, error) {
-	scanner := bufio.NewScanner(strings.NewReader(database))
-	inFiles := false
-	notTarget := false
-	targets := make(map[string]struct{})
+const maxMakefileLine = 1 << 20
+
+type makefileParser struct {
+	ctx      context.Context
+	targets  map[string]struct{}
+	makefile string
+}
+
+func tasksFromMakefile(
+	ctx context.Context,
+	source string,
+	makefile string,
+) ([]runner.Task, error) {
+	parser := makefileParser{
+		ctx:      ctx,
+		makefile: makefile,
+		targets:  make(map[string]struct{}),
+	}
+	scanner := bufio.NewScanner(strings.NewReader(source))
+	scanner.Buffer(make([]byte, 64<<10), maxMakefileLine)
+	parts := make([]string, 0, 2)
+	lineNumber := 0
+	logicalLine := 0
+	recipeAllowed := false
 	for scanner.Scan() {
+		lineNumber++
 		line := scanner.Text()
-		if line == "# Files" {
-			inFiles = true
+		if len(parts) == 0 {
+			logicalLine = lineNumber
+		}
+		if makeLineContinues(line) {
+			parts = append(parts, line[:len(line)-1])
 			continue
 		}
-		if inFiles && line == "# Implicit Rules" {
-			break
+		parts = append(parts, line)
+		var err error
+		recipeAllowed, err = parser.parseLine(
+			strings.Join(parts, " "),
+			logicalLine,
+			recipeAllowed,
+		)
+		if err != nil {
+			return nil, err
 		}
-		if !inFiles {
-			continue
-		}
-		if line == "# Not a target:" {
-			notTarget = true
-			continue
-		}
-		if strings.HasPrefix(line, "#") || strings.HasPrefix(line, "\t") {
-			continue
-		}
-		target, ok := databaseTarget(line)
-		if !ok {
-			continue
-		}
-		if notTarget {
-			notTarget = false
-			continue
-		}
-		if !isTaskTarget(target, makefile) {
-			continue
-		}
-		targets[target] = struct{}{}
+		parts = parts[:0]
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan Make database: %w", err)
+		return nil, fmt.Errorf("scan Makefile: %w", err)
 	}
+	if len(parts) > 0 {
+		if _, err := parser.parseLine(
+			strings.Join(parts, " "),
+			logicalLine,
+			recipeAllowed,
+		); err != nil {
+			return nil, err
+		}
+	}
+	return makeTasks(parser.targets), nil
+}
 
+func (p *makefileParser) parseLine(
+	line string,
+	lineNumber int,
+	recipeAllowed bool,
+) (bool, error) {
+	if err := p.ctx.Err(); err != nil {
+		return false, fmt.Errorf("parse Makefile: %w", err)
+	}
+	if strings.HasPrefix(line, "	") {
+		if !recipeAllowed {
+			return false, fmt.Errorf("line %d: recipe has no preceding literal rule", lineNumber)
+		}
+		return true, nil
+	}
+	line = strings.TrimSpace(stripMakeComment(line))
+	if line == "" {
+		return recipeAllowed, nil
+	}
+	if directive, unsupported := unsupportedMakeDirective(line); unsupported {
+		return false, fmt.Errorf(
+			"line %d: %s directives are unsupported",
+			lineNumber,
+			directive,
+		)
+	}
+	if strings.Contains(line, "$(eval") || strings.Contains(line, "${eval") {
+		return false, fmt.Errorf("line %d: eval expansion is unsupported", lineNumber)
+	}
+	if name, assignment := makeAssignmentName(line); assignment {
+		if name == ".RECIPEPREFIX" {
+			return false, fmt.Errorf("line %d: custom recipe prefixes are unsupported", lineNumber)
+		}
+		return false, nil
+	}
+	if makeEnvironmentDirective(line) {
+		return false, nil
+	}
+	return p.parseRule(line, lineNumber)
+}
+
+func (p *makefileParser) parseRule(line string, lineNumber int) (bool, error) {
+	left, prerequisites, found := strings.Cut(line, ":")
+	if !found {
+		return false, fmt.Errorf("line %d: unsupported top-level statement", lineNumber)
+	}
+	left = strings.TrimSpace(left)
+	if left == "" {
+		return false, fmt.Errorf("line %d: rule has no target", lineNumber)
+	}
+	if left == ".PHONY" {
+		prerequisites = strings.TrimLeft(prerequisites, ":")
+		if index := strings.IndexAny(prerequisites, ";|"); index >= 0 {
+			prerequisites = prerequisites[:index]
+		}
+		if err := p.addTargets(prerequisites, lineNumber); err != nil {
+			return false, err
+		}
+		return true, nil
+	}
+	if err := p.addTargets(left, lineNumber); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (p *makefileParser) addTargets(expression string, lineNumber int) error {
+	expression = strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(expression), "&"))
+	if expression == "" {
+		return fmt.Errorf("line %d: rule has no literal target", lineNumber)
+	}
+	if strings.ContainsAny(expression, "$\\") {
+		return fmt.Errorf("line %d: dynamic or escaped targets are unsupported", lineNumber)
+	}
+	if strings.ContainsAny(expression, "*?[") {
+		return fmt.Errorf("line %d: wildcard targets are unsupported", lineNumber)
+	}
+	for target := range strings.FieldsSeq(expression) {
+		if strings.Contains(target, "%") || !isTaskTarget(target, p.makefile) {
+			continue
+		}
+		p.targets[target] = struct{}{}
+	}
+	return nil
+}
+
+func makeTasks(targets map[string]struct{}) []runner.Task {
 	names := make([]string, 0, len(targets))
 	for target := range targets {
 		names = append(names, target)
@@ -163,15 +263,103 @@ func tasksFromDatabase(database string, makefile string) ([]runner.Task, error) 
 			Meta:   map[string]any{"target": target},
 		})
 	}
-	return tasks, nil
+	return tasks
 }
 
-func databaseTarget(line string) (string, bool) {
-	target, _, found := strings.Cut(line, ":")
-	if !found || target == "" || strings.ContainsAny(target, " \t") {
+func makeLineContinues(line string) bool {
+	backslashes := 0
+	for index := len(line) - 1; index >= 0 && line[index] == '\\'; index-- {
+		backslashes++
+	}
+	return backslashes%2 != 0
+}
+
+func stripMakeComment(line string) string {
+	backslashes := 0
+	for index, character := range line {
+		if character == '#' && backslashes%2 == 0 {
+			return line[:index]
+		}
+		if character == '\\' {
+			backslashes++
+		} else {
+			backslashes = 0
+		}
+	}
+	return line
+}
+
+func unsupportedMakeDirective(line string) (string, bool) {
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
 		return "", false
 	}
-	return target, true
+	index := 0
+	if fields[index] == "override" || fields[index] == "private" {
+		index++
+		if index == len(fields) {
+			return fields[0], true
+		}
+	}
+	switch fields[index] {
+	case "include", "-include", "sinclude",
+		"define", "endef",
+		"ifeq", "ifneq", "ifdef", "ifndef", "else", "endif",
+		"load":
+		return fields[index], true
+	default:
+		return "", false
+	}
+}
+
+func makeAssignmentName(line string) (string, bool) {
+	line = strings.TrimSpace(line)
+	for {
+		modifier := ""
+		for _, candidate := range []string{"export", "override", "private"} {
+			if makeKeywordPrefix(line, candidate) {
+				modifier = candidate
+				break
+			}
+		}
+		if modifier == "" {
+			break
+		}
+		line = strings.TrimLeft(line[len(modifier):], " \t")
+	}
+	equal := strings.IndexByte(line, '=')
+	if equal < 0 {
+		return "", false
+	}
+	operator := equal
+	for operator > 0 && strings.ContainsRune(":+?!", rune(line[operator-1])) {
+		operator--
+	}
+	if colon := strings.IndexByte(line, ':'); colon >= 0 && colon < operator {
+		return "", false
+	}
+	name := strings.TrimSpace(line[:operator])
+	return name, name != ""
+}
+
+func makeEnvironmentDirective(line string) bool {
+	for _, directive := range []string{"export", "unexport", "undefine", "vpath"} {
+		if makeKeywordPrefix(line, directive) {
+			return true
+		}
+	}
+	return false
+}
+
+func makeKeywordPrefix(line string, keyword string) bool {
+	if !strings.HasPrefix(line, keyword) {
+		return false
+	}
+	if len(line) == len(keyword) {
+		return true
+	}
+	separator := line[len(keyword)]
+	return separator == ' ' || separator == '\t'
 }
 
 func isTaskTarget(target string, makefile ...string) bool {

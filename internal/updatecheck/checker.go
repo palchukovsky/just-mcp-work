@@ -24,7 +24,7 @@ import (
 
 const (
 	defaultEndpoint   = "https://api.github.com/repos/palchukovsky/just-mcp-work/tags?per_page=100"
-	defaultModulePath = "github.com/palchukovsky/just-mcp-work"
+	defaultModulePath = "github.com/palchukovsky/just-mcp-work/cmd/just-mcp-work"
 	defaultInterval   = 24 * time.Hour
 	defaultTimeout    = 5 * time.Second
 	releaseTagPattern = `^v[0-9]+\.[0-9]+\.[0-9]+$`

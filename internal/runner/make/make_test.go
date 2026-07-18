@@ -33,8 +33,7 @@ func TestDetectRecognizesSupportedMakefileNames(t *testing.T) {
 	}
 }
 
-func TestListTasksUsesMakeDatabase(t *testing.T) {
-	requireMake(t)
+func TestListTasksParsesLiteralTargetsWithoutMake(t *testing.T) {
 	dir := t.TempDir()
 	writeMakefile(t, dir, "Makefile")
 
@@ -52,6 +51,138 @@ func TestListTasksUsesMakeDatabase(t *testing.T) {
 	hello := taskID(t, tasks, "make:hello")
 	if hello.Name != "hello" || hello.Meta["target"] != "hello" {
 		t.Fatalf("hello task = %#v", hello)
+	}
+}
+
+func TestListTasksAcceptsMakeWhitespaceInEnvironmentDirectives(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		directive string
+	}{
+		{name: "export with tab", directive: "export\tFOO\n"},
+		{name: "unexport with mixed whitespace", directive: "unexport \t FOO\n"},
+		{name: "undefine with tabs", directive: "undefine\t\tFOO\n"},
+		{name: "vpath with mixed whitespace", directive: "vpath  \t%.c src\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			contents := test.directive + ".PHONY: hello\nhello:\n\t@echo hello\n"
+			if err := os.WriteFile(
+				filepath.Join(dir, "Makefile"),
+				[]byte(contents),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			tasks, err := makerunner.New("").ListTasks(context.Background(), dir)
+			if err != nil {
+				t.Fatalf("ListTasks: %v", err)
+			}
+			if got, want := taskIDs(tasks), []string{"make:hello"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("task IDs = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestListTasksAcceptsMakeWhitespaceAfterAssignmentModifiers(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		assignment string
+	}{
+		{name: "export with tab", assignment: "export\tFOO := value\n"},
+		{name: "override with mixed whitespace", assignment: "override \t FOO := value\n"},
+		{name: "private with tabs", assignment: "private\t\tFOO := value\n"},
+		{
+			name:       "multiple modifiers with mixed whitespace",
+			assignment: "override \t private\texport  FOO := value\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			contents := test.assignment + ".PHONY: hello\nhello:\n\t@echo hello\n"
+			if err := os.WriteFile(
+				filepath.Join(dir, "Makefile"),
+				[]byte(contents),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+
+			tasks, err := makerunner.New("").ListTasks(context.Background(), dir)
+			if err != nil {
+				t.Fatalf("ListTasks: %v", err)
+			}
+			if got, want := taskIDs(tasks), []string{"make:hello"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("task IDs = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestListTasksDoesNotEvaluateMakefile(t *testing.T) {
+	dir := t.TempDir()
+	contents := "DISCOVERY_SIDE_EFFECT := $(shell echo side-effect > discovery-ran.txt)\n" +
+		".PHONY: hello\n" +
+		"hello:\n" +
+		"\t@echo hello\n"
+	if err := os.WriteFile(filepath.Join(dir, "Makefile"), []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := makerunner.New("").ListTasks(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("ListTasks: %v", err)
+	}
+	if got, want := taskIDs(tasks), []string{"make:hello"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("task IDs = %#v, want %#v", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "discovery-ran.txt")); !os.IsNotExist(err) {
+		t.Fatalf("Makefile evaluation created a marker: %v", err)
+	}
+}
+
+func TestListTasksRejectsUnsafeIntrospection(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		contents string
+		error    string
+	}{
+		{
+			name:     "dynamic target",
+			contents: "TARGET := hello\n$(TARGET):\n\t@echo hello\n",
+			error:    "dynamic or escaped targets are unsupported",
+		},
+		{
+			name:     "wildcard target",
+			contents: "*.generated:\n\t@echo generated\n",
+			error:    "wildcard targets are unsupported",
+		},
+		{
+			name:     "include",
+			contents: "include tasks.mk\n",
+			error:    "include directives are unsupported",
+		},
+		{
+			name:     "conditional",
+			contents: "ifeq ($(OS),Windows_NT)\nhello:\nendif\n",
+			error:    "ifeq directives are unsupported",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(
+				filepath.Join(dir, "Makefile"),
+				[]byte(test.contents),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+			_, err := makerunner.New("").ListTasks(context.Background(), dir)
+			if err == nil || !strings.Contains(err.Error(), test.error) {
+				t.Fatalf("ListTasks error = %v, want %q", err, test.error)
+			}
+		})
 	}
 }
 

@@ -138,6 +138,78 @@ func TestDirectHandlerFlow(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The cases assert one byte-paging sequence and its invalid boundaries.
+func TestGetRunLogsPreservesUTF8ByteOffsets(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	handle, err := server.store.Begin(runstore.Meta{TaskID: "test:utf8-log"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("a€b")
+	if _, err = handle.Stdout().Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err = handle.Finish(runstore.StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+
+	_, first, err := server.getRunLogs(
+		context.Background(),
+		nil,
+		getRunLogsInput{RunID: handle.Meta.RunID, Stream: "stdout", Limit: 2},
+	)
+	if err != nil || first.Data != "a" || first.Offset != 0 || first.NextOffset != 1 {
+		t.Fatalf("first UTF-8 page = %#v, %v", first, err)
+	}
+	_, second, err := server.getRunLogs(
+		context.Background(),
+		nil,
+		getRunLogsInput{
+			RunID:  handle.Meta.RunID,
+			Stream: "stdout",
+			Offset: first.NextOffset,
+			Limit:  4,
+		},
+	)
+	if err != nil || second.Data != "€b" || second.Offset != 1 || second.NextOffset != 5 {
+		t.Fatalf("second UTF-8 page = %#v, %v", second, err)
+	}
+
+	result, invalid, err := server.getRunLogs(
+		context.Background(),
+		nil,
+		getRunLogsInput{RunID: handle.Meta.RunID, Stream: "stdout", Offset: 2, Limit: 2},
+	)
+	if err != nil || result == nil || !result.IsError || invalid.Error == nil {
+		t.Fatalf("mid-rune UTF-8 page = %#v, %#v, %v", result, invalid, err)
+	}
+	result, incomplete, err := server.getRunLogs(
+		context.Background(),
+		nil,
+		getRunLogsInput{RunID: handle.Meta.RunID, Stream: "stdout", Offset: 1, Limit: 1},
+	)
+	if err != nil || result == nil || !result.IsError || incomplete.Error == nil {
+		t.Fatalf("incomplete UTF-8 page = %#v, %#v, %v", result, incomplete, err)
+	}
+
+	_, exact, err := server.getRunLogs(
+		context.Background(),
+		nil,
+		getRunLogsInput{
+			RunID:    handle.Meta.RunID,
+			Stream:   "stdout",
+			Offset:   1,
+			Limit:    1,
+			Encoding: "base64",
+		},
+	)
+	if err != nil ||
+		exact.Data != base64.StdEncoding.EncodeToString(content[1:2]) ||
+		exact.NextOffset != 2 {
+		t.Fatalf("base64 byte page = %#v, %v", exact, err)
+	}
+}
+
 func TestMCPServerHelperProcess(_ *testing.T) {
 	if os.Getenv("JMW_TEST_HELPER_PROCESS") != "1" {
 		return
@@ -192,6 +264,42 @@ func TestRunShellCommandDefaultsToWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestRunShellCommandCancellationIsOwnedByExecutor(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	_, receipt, err := server.runShellCommand(
+		ctx,
+		nil,
+		runShellCommandInput{Command: shellSleepCommand()},
+	)
+	if err != nil || receipt.Status != runstore.StatusCancelled {
+		t.Fatalf("cancelled shell command = %#v, %v", receipt, err)
+	}
+}
+
+func TestRunShellCommandPreCancelledDoesNotStartProcess(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, receipt, err := server.runShellCommand(
+		ctx,
+		nil,
+		runShellCommandInput{Command: "echo started > marker"},
+	)
+	if err != nil || receipt.Status != runstore.StatusCancelled {
+		t.Fatalf("pre-cancelled shell command = %#v, %v", receipt, err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "marker")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("marker stat error = %v, want not exist", statErr)
+	}
+}
+
 func newShellTestServer(t *testing.T, root string) *Server {
 	t.Helper()
 	runners, err := runner.NewRegistry()
@@ -209,6 +317,7 @@ func newShellTestServer(t *testing.T, root string) *Server {
 	server, err := New(workspaceRegistry, runners, store, Config{
 		Timeout:   5 * time.Second,
 		Retention: time.Hour,
+		Grace:     20 * time.Millisecond,
 		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -223,6 +332,13 @@ func shellOutputCommand() string {
 		command = "echo shell-output"
 	}
 	return command
+}
+
+func shellSleepCommand() string {
+	if runtime.GOOS == "windows" {
+		return "ping -n 30 127.0.0.1 >NUL"
+	}
+	return "sleep 30"
 }
 
 func assertShellRun(t *testing.T, server *Server, runID, root string) {

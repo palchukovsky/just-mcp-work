@@ -51,7 +51,10 @@ type Meta struct {
 	ExitCode        int       `json:"exit_code"`
 	Status          Status    `json:"status"`
 	RunnerVersion   string    `json:"runner_version,omitempty"`
+	OwnerPID        int       `json:"owner_pid,omitempty"`
+	OwnerIdentity   string    `json:"owner_identity,omitempty"`
 	PID             int       `json:"pid,omitempty"`
+	ProcessIdentity string    `json:"process_identity,omitempty"`
 	StdoutBytes     int64     `json:"stdout_bytes"`
 	StderrBytes     int64     `json:"stderr_bytes"`
 	StdoutTruncated bool      `json:"stdout_truncated,omitempty"`
@@ -118,6 +121,8 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 	meta.RunID = id.String()
 	meta.Status = StatusRunning
 	meta.StartedAt = time.Now().UTC()
+	meta.OwnerPID = os.Getpid()
+	meta.OwnerIdentity = ProcessIdentity(meta.OwnerPID)
 	meta.Args = append([]string(nil), meta.Args...)
 
 	dir, err := s.runDir(meta.RunID)
@@ -280,10 +285,10 @@ func (s *Store) Cleanup(retention time.Duration) error {
 			continue
 		}
 		meta, err := readMeta(filepath.Join(dir, "meta.json"))
-		if err != nil ||
-			meta.Status == StatusRunning ||
-			meta.EndedAt.IsZero() ||
-			!meta.EndedAt.Before(deadline) {
+		if err != nil {
+			continue
+		}
+		if !expiredForCleanup(meta, deadline) {
 			continue
 		}
 		if err := os.RemoveAll(dir); err != nil {
@@ -291,6 +296,18 @@ func (s *Store) Cleanup(retention time.Duration) error {
 		}
 	}
 	return result
+}
+
+func expiredForCleanup(meta Meta, deadline time.Time) bool {
+	retentionTime := meta.EndedAt
+	if meta.Status == StatusRunning {
+		if processMatches(meta.OwnerPID, meta.OwnerIdentity) ||
+			processMatches(meta.PID, meta.ProcessIdentity) {
+			return false
+		}
+		retentionTime = meta.StartedAt
+	}
+	return !retentionTime.IsZero() && retentionTime.Before(deadline)
 }
 
 func (s *Store) runDir(runID string) (string, error) {

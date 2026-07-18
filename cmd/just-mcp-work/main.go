@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -83,6 +84,9 @@ func serve(args []string) error {
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return fmt.Errorf("parse serve flags: %w", err)
 	}
 	if flags.NArg() != 0 {
@@ -117,10 +121,14 @@ func serve(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := server.Run(ctx); err != nil {
-		return fmt.Errorf("run MCP server: %w", err)
+	return serverRunError(ctx, server.Run(ctx))
+}
+
+func serverRunError(ctx context.Context, err error) error {
+	if err == nil || ctx.Err() != nil && errors.Is(err, ctx.Err()) {
+		return nil
 	}
-	return nil
+	return fmt.Errorf("run MCP server: %w", err)
 }
 
 func initCommand(args []string) error {
@@ -147,6 +155,9 @@ func initCommand(args []string) error {
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return fmt.Errorf("parse init flags: %w", err)
 	}
 	if flags.NArg() != 0 {
@@ -180,9 +191,9 @@ func initCommand(args []string) error {
 		fmt.Println("Restart Codex or your MCP client to load updated server configuration.")
 	}
 	if !*writeMCPConfig {
-		snippet, err := agentinit.MCPConfigSnippet()
-		if err != nil {
-			return fmt.Errorf("build MCP config snippet: %w", err)
+		snippet, snippetErr := agentinit.MCPConfigSnippet()
+		if snippetErr != nil {
+			return fmt.Errorf("build MCP config snippet: %w", snippetErr)
 		}
 		fmt.Println(
 			"\nPaste this local MCP configuration if your agent does not discover it automatically:",

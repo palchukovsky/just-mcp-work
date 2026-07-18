@@ -7,6 +7,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -127,6 +128,57 @@ func TestDiscoverSkipsJustfileIncludedByParentProject(t *testing.T) {
 	}
 }
 
+func TestDiscoverSuppressesOnlyIncludedJustRunnerAfterFullScan(t *testing.T) {
+	root := t.TempDir()
+	shared := filepath.Join(root, "a", "shared")
+	writeFile(t, filepath.Join(shared, "justfile"), "shared")
+	writeFile(t, filepath.Join(shared, "Makefile"), "shared")
+	writeFile(t, filepath.Join(root, "z", "app", "justfile"), "app")
+	runners, err := runner.NewRegistry(
+		includingFakeJustRunner{included: shared},
+		fakeMakeRunner{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, err := registry.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make([]string, 0, len(projects))
+	for _, project := range projects {
+		paths = append(paths, project.RelPath)
+	}
+	if want := []string{"a/shared", "z/app"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("project paths = %#v, want %#v", paths, want)
+	}
+	sharedProject := projectAt(t, projects, "a/shared")
+	if want := []string{"make"}; !reflect.DeepEqual(sharedProject.Runners, want) {
+		t.Fatalf("shared runners = %#v, want %#v", sharedProject.Runners, want)
+	}
+	if len(sharedProject.Tasks["just"]) != 0 || len(sharedProject.Tasks["make"]) != 1 {
+		t.Fatalf("shared tasks = %#v", sharedProject.Tasks)
+	}
+}
+
+func TestExcludedGlobUsesSlashSeparatorSemantics(t *testing.T) {
+	root := t.TempDir()
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), []string{"*/generated"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registry.excluded(filepath.Join(root, "a", "generated")) {
+		t.Fatal("exclude glob did not match one path segment")
+	}
+	if registry.excluded(filepath.Join(root, "a", "b", "generated")) {
+		t.Fatal("exclude glob crossed multiple slash-separated path segments")
+	}
+}
+
 func mustRunnerRegistry(t *testing.T) *runner.Registry {
 	t.Helper()
 	registry, err := runner.NewRegistry(fakeJustRunner{})
@@ -188,6 +240,34 @@ func (fakeJustRunner) ListTasks(_ context.Context, projectDir string) ([]runner.
 }
 
 func (fakeJustRunner) BuildCommand(
+	context.Context,
+	string,
+	runner.Task,
+	[]string,
+) (*exec.Cmd, error) {
+	return nil, errors.New("not used")
+}
+
+type fakeMakeRunner struct{}
+
+func (fakeMakeRunner) Name() string { return "make" }
+
+func (fakeMakeRunner) Detect(projectDir string) (bool, error) {
+	info, err := os.Lstat(filepath.Join(projectDir, "Makefile"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect Makefile: %w", err)
+	}
+	return info.Mode().IsRegular(), nil
+}
+
+func (fakeMakeRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
+	return []runner.Task{{ID: "make:task", Runner: "make", Name: "task"}}, nil
+}
+
+func (fakeMakeRunner) BuildCommand(
 	context.Context,
 	string,
 	runner.Task,

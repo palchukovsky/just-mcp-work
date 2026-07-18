@@ -222,7 +222,58 @@ func TestApplyCreatesMCPConfigInWorkspaceWhenNoneExists(t *testing.T) {
 		t.Fatalf("MCP servers = %#v", config["mcpServers"])
 	}
 	assertServerCommand(t, servers)
-	assertCodexMCPConfig(t, filepath.Join(dir, codexConfig), dir)
+	codexPath := filepath.Join(dir, codexConfig)
+	assertCodexMCPConfig(t, codexPath, dir)
+	assertFileMode(t, codexPath, 0o600)
+}
+
+func TestApplySupportsMissingStandaloneWorkspace(t *testing.T) {
+	tests := []struct {
+		name   string
+		dryRun bool
+	}{
+		{name: "write"},
+		{name: "dry run", dryRun: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			base := t.TempDir()
+			resolvedBase, err := filepath.EvalSymlinks(base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := filepath.Join(base, "missing", "workspace")
+			result, err := Apply(
+				Options{
+					Dir:            dir,
+					Agents:         []string{"codex"},
+					DryRun:         test.dryRun,
+					WriteMCPConfig: true,
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			expectedPaths := []string{
+				filepath.Join(dir, "AGENTS.md"),
+				filepath.Join(dir, mcpConfig),
+				filepath.Join(resolvedBase, "missing", "workspace", codexConfig),
+			}
+			for _, path := range expectedPaths {
+				if !containsPath(result.Paths, path) {
+					t.Fatalf("updated paths = %#v, want %s", result.Paths, path)
+				}
+			}
+			if test.dryRun {
+				if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+					t.Fatalf("dry-run workspace stat error = %v, want not exist", statErr)
+				}
+				return
+			}
+			assertCodexMCPConfig(t, filepath.Join(dir, codexConfig), dir)
+		})
+	}
 }
 
 func TestApplyMergesWorkspaceCodexMCPConfig(t *testing.T) {
@@ -245,6 +296,243 @@ func TestApplyMergesWorkspaceCodexMCPConfig(t *testing.T) {
 	}
 	if !strings.Contains(string(data), "[mcp_servers.other]") {
 		t.Fatalf("unmanaged Codex server was removed:\n%s", data)
+	}
+}
+
+func TestApplyRejectsUnmanagedCodexServerWithoutChangingFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := strings.Join(
+		[]string{
+			"[mcp_servers.other]",
+			"command = \"other\"",
+			"",
+			"[mcp_servers . \"just-mcp-work\"] # configured manually",
+			"command = \"just-mcp-work\"",
+			"",
+		},
+		"\n",
+	)
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	if err == nil || !strings.Contains(err.Error(), "unmanaged "+codexTable) {
+		t.Fatalf("Apply error = %v, want an unmanaged Codex server error", err)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != before {
+		t.Fatalf("Codex config changed after rejected merge:\n%s", data)
+	}
+	for _, unexpected := range []string{"AGENTS.md", mcpConfig} {
+		if _, statErr := os.Stat(filepath.Join(dir, unexpected)); !os.IsNotExist(statErr) {
+			t.Fatalf("%s was changed before the Codex config rejection: %v", unexpected, statErr)
+		}
+	}
+}
+
+func TestApplyRejectsInlineCodexServerWithoutChangingFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := strings.Join(
+		[]string{
+			"[mcp_servers]",
+			"just-mcp-work = { command = \"just-mcp-work\", args = [] }",
+			"",
+		},
+		"\n",
+	)
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	if err == nil || !strings.Contains(err.Error(), "unmanaged "+codexTable) {
+		t.Fatalf("Apply error = %v, want an unmanaged Codex server error", err)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(data) != before {
+		t.Fatalf("Codex config changed after rejected merge:\n%s", data)
+	}
+	for _, unexpected := range []string{"AGENTS.md", mcpConfig} {
+		if _, statErr := os.Stat(filepath.Join(dir, unexpected)); !os.IsNotExist(statErr) {
+			t.Fatalf("%s was changed before the Codex config rejection: %v", unexpected, statErr)
+		}
+	}
+}
+
+func TestApplyUpdatesSafeSymlinkedCodexConfigDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	targetDirectory := filepath.Join(dir, "shared", "codex")
+	if err := os.MkdirAll(targetDirectory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDirectory, "config.toml")
+	before := "[mcp_servers.other]\ncommand = \"other\"\n"
+	if err := os.WriteFile(target, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(
+		filepath.Join("shared", "codex"),
+		filepath.Join(dir, filepath.Dir(codexConfig)),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(result.Paths, resolvedTarget) {
+		t.Fatalf("updated paths = %#v, want resolved target %s", result.Paths, resolvedTarget)
+	}
+	assertCodexMCPConfig(t, target, dir)
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "[mcp_servers.other]") {
+		t.Fatalf("unmanaged Codex server was removed:\n%s", data)
+	}
+}
+
+func TestApplyUpdatesSafeSymlinkedCodexConfigFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "shared-config.toml")
+	before := []byte("[mcp_servers.other]\ncommand = \"other\"\n")
+	if err := os.WriteFile(target, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join("..", filepath.Base(target)), path); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(result.Paths, resolvedTarget) {
+		t.Fatalf("updated paths = %#v, want resolved target %s", result.Paths, resolvedTarget)
+	}
+	assertCodexMCPConfig(t, target, dir)
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("Codex config link was replaced: mode = %s", info.Mode())
+	}
+}
+
+func TestApplyRejectsEscapingCodexConfigSymlinkWithoutChanges(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(dir, filepath.Dir(codexConfig))); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace scope") {
+		t.Fatalf("Apply error = %v, want an escaping Codex directory error", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(target, "config.toml")); !os.IsNotExist(statErr) {
+		t.Fatalf("escaping symlink target was unexpectedly changed: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("agent instructions changed before the Codex path rejection: %v", statErr)
+	}
+}
+
+func TestApplyRejectsInvalidCodexConfigSymlinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	tests := []struct {
+		name      string
+		link      string
+		prepare   func(t *testing.T, dir string)
+		wantError string
+	}{
+		{
+			name:      "broken",
+			link:      "missing-config.toml",
+			wantError: "resolve Codex config",
+		},
+		{
+			name:      "loop",
+			link:      "config.toml",
+			wantError: "resolve Codex config",
+		},
+		{
+			name: "non-regular target",
+			link: "config-directory",
+			prepare: func(t *testing.T, dir string) {
+				t.Helper()
+				if err := os.Mkdir(filepath.Join(dir, "config-directory"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantError: "not a regular file",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			directory := filepath.Join(dir, filepath.Dir(codexConfig))
+			if err := os.Mkdir(directory, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if test.prepare != nil {
+				test.prepare(t, directory)
+			}
+			if err := os.Symlink(test.link, filepath.Join(dir, codexConfig)); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err := Apply(
+				Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true},
+			)
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("Apply error = %v, want error containing %q", err, test.wantError)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(statErr) {
+				t.Fatalf("agent instructions changed before the Codex path rejection: %v", statErr)
+			}
+		})
 	}
 }
 
@@ -385,6 +673,20 @@ func assertCodexMCPConfig(t *testing.T, path, root string) {
 		!strings.Contains(string(data), "--root") ||
 		!strings.Contains(string(data), root) {
 		t.Fatalf("invalid workspace Codex config:\n%s", data)
+	}
+}
+
+func assertFileMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
 	}
 }
 

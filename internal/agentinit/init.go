@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 const (
@@ -22,6 +25,7 @@ const (
 	codexConfig = ".codex/config.toml"
 	codexBegin  = "# >>> just-mcp-work mcp (managed) >>>"
 	codexEnd    = "# <<< just-mcp-work mcp <<<"
+	codexTable  = "[mcp_servers.just-mcp-work]"
 )
 
 // Prompt is the canonical agent instruction managed by init.
@@ -71,6 +75,23 @@ func Apply(options Options) (Result, error) {
 	}
 	if len(options.Agents) == 0 {
 		options.Agents = []string{"claude", "codex", "cursor"}
+	}
+	var codexPath string
+	var codexBefore []byte
+	var codexAfter []byte
+	if options.WriteMCPConfig {
+		codexPath, err = findCodexConfig(scope)
+		if err != nil {
+			return Result{}, err
+		}
+		codexBefore, err = os.ReadFile(codexPath)
+		if err != nil && !os.IsNotExist(err) {
+			return Result{}, fmt.Errorf("read %s: %w", codexPath, err)
+		}
+		codexAfter, err = mergeCodexConfig(codexBefore, scope)
+		if err != nil {
+			return Result{}, fmt.Errorf("merge %s: %w", codexPath, err)
+		}
 	}
 	result := Result{}
 	for _, agent := range unique(options.Agents) {
@@ -134,15 +155,6 @@ func Apply(options Options) (Result, error) {
 				}
 			}
 		}
-		codexPath := filepath.Join(scope, codexConfig)
-		codexBefore, readErr := os.ReadFile(codexPath)
-		if readErr != nil && !os.IsNotExist(readErr) {
-			return Result{}, fmt.Errorf("read %s: %w", codexPath, readErr)
-		}
-		codexAfter, mergeErr := mergeCodexConfig(codexBefore, scope)
-		if mergeErr != nil {
-			return Result{}, mergeErr
-		}
 		if !bytes.Equal(codexBefore, codexAfter) {
 			result.Paths = append(result.Paths, codexPath)
 			result.Diffs = append(result.Diffs, simpleDiff(codexPath, codexBefore, codexAfter))
@@ -150,7 +162,9 @@ func Apply(options Options) (Result, error) {
 				if mkdirErr := os.MkdirAll(filepath.Dir(codexPath), 0o750); mkdirErr != nil {
 					return Result{}, fmt.Errorf("create directory for %s: %w", codexPath, mkdirErr)
 				}
-				if writeErr := os.WriteFile(codexPath, codexAfter, 0o644); writeErr != nil {
+				// #nosec G703 -- findCodexConfig resolves existing symlinks and rejects
+				// targets outside the workspace scope before any file is changed.
+				if writeErr := os.WriteFile(codexPath, codexAfter, 0o600); writeErr != nil {
 					return Result{}, fmt.Errorf("write %s: %w", codexPath, writeErr)
 				}
 			}
@@ -254,6 +268,111 @@ func findMCPConfig(dir string) (string, error) {
 			return filepath.Join(dir, mcpConfig), nil
 		}
 	}
+}
+
+func findCodexConfig(scope string) (string, error) {
+	resolvedScope, err := resolveWorkspaceScope(scope)
+	if err != nil {
+		return "", err
+	}
+	resolvedDirectory, err := resolveCodexConfigDirectory(scope, resolvedScope)
+	if err != nil {
+		return "", err
+	}
+	return resolveCodexConfigFile(scope, resolvedScope, resolvedDirectory)
+}
+
+func resolveWorkspaceScope(scope string) (string, error) {
+	var missing []string
+	for current := scope; ; current = filepath.Dir(current) {
+		_, err := os.Lstat(current)
+		if err == nil {
+			resolved, resolveErr := filepath.EvalSymlinks(current)
+			if resolveErr != nil {
+				return "", fmt.Errorf("resolve workspace scope %s: %w", scope, resolveErr)
+			}
+			for _, component := range slices.Backward(missing) {
+				resolved = filepath.Join(resolved, component)
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) || filepath.Dir(current) == current {
+			return "", fmt.Errorf("resolve workspace scope %s: %w", scope, err)
+		}
+		missing = append(missing, filepath.Base(current))
+	}
+}
+
+func resolveCodexConfigDirectory(scope string, resolvedScope string) (string, error) {
+	directory := filepath.Join(scope, filepath.Dir(codexConfig))
+	info, err := os.Lstat(directory)
+	if os.IsNotExist(err) {
+		return filepath.Join(resolvedScope, filepath.Dir(codexConfig)), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect Codex config directory %s: %w", directory, err)
+	}
+	if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
+		return "", fmt.Errorf("codex config directory %s is not a directory", directory)
+	}
+	resolvedDirectory, err := resolveWithinScope(resolvedScope, directory)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex config directory: %w", err)
+	}
+	resolvedInfo, err := os.Stat(resolvedDirectory)
+	if err != nil {
+		return "", fmt.Errorf("inspect resolved Codex config directory %s: %w", directory, err)
+	}
+	if !resolvedInfo.IsDir() {
+		return "", fmt.Errorf("codex config directory %s is not a directory", directory)
+	}
+	return resolvedDirectory, nil
+}
+
+func resolveCodexConfigFile(
+	scope string,
+	resolvedScope string,
+	resolvedDirectory string,
+) (string, error) {
+	path := filepath.Join(scope, codexConfig)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return filepath.Join(resolvedDirectory, filepath.Base(codexConfig)), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect Codex config %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
+		return "", fmt.Errorf("codex config %s is not a regular file", path)
+	}
+	resolvedPath, err := resolveWithinScope(resolvedScope, path)
+	if err != nil {
+		return "", fmt.Errorf("resolve Codex config: %w", err)
+	}
+	resolvedInfo, err := os.Stat(resolvedPath)
+	if err != nil {
+		return "", fmt.Errorf("inspect resolved Codex config %s: %w", path, err)
+	}
+	if !resolvedInfo.Mode().IsRegular() {
+		return "", fmt.Errorf("codex config %s is not a regular file", path)
+	}
+	return resolvedPath, nil
+}
+
+func resolveWithinScope(scope string, path string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", path, err)
+	}
+	relative, err := filepath.Rel(scope, resolved)
+	if err != nil {
+		return "", fmt.Errorf("check %s against workspace scope: %w", path, err)
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
+		filepath.IsAbs(relative) {
+		return "", fmt.Errorf("%s resolves outside workspace scope %s", path, scope)
+	}
+	return resolved, nil
 }
 
 // MCPConfigSnippet is a ready-to-paste local MCP configuration.
@@ -374,12 +493,30 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 		}
 		text = text[:start] + text[end:]
 	}
+	containsServer, parseErr := containsCodexServerTable(text)
+	if parseErr != nil {
+		return nil, fmt.Errorf("decode Codex config: %w", parseErr)
+	}
+	if containsServer {
+		return nil, fmt.Errorf(
+			"unmanaged %s table already exists; remove it before running init",
+			codexTable,
+		)
+	}
+	executableValue, err := tomlString(executable)
+	if err != nil {
+		return nil, fmt.Errorf("encode executable path: %w", err)
+	}
+	rootValue, err := tomlString(root)
+	if err != nil {
+		return nil, fmt.Errorf("encode workspace root: %w", err)
+	}
 	block := strings.Join(
 		[]string{
 			codexBegin,
-			"[mcp_servers.just-mcp-work]",
-			"command = " + tomlString(executable),
-			"args = [\"serve\", \"--root\", " + tomlString(root) + "]",
+			codexTable,
+			"command = " + executableValue,
+			"args = [\"serve\", \"--root\", " + rootValue + "]",
 			"startup_timeout_sec = 120",
 			codexEnd,
 		},
@@ -392,9 +529,21 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 	return []byte(text + block + "\n"), nil
 }
 
-func tomlString(value string) string {
-	encoded, _ := json.Marshal(value)
-	return string(encoded)
+func containsCodexServerTable(text string) (bool, error) {
+	config := map[string]any{}
+	metadata, err := toml.Decode(text, &config)
+	if err != nil {
+		return false, fmt.Errorf("decode TOML: %w", err)
+	}
+	return metadata.IsDefined("mcp_servers", "just-mcp-work"), nil
+}
+
+func tomlString(value string) (string, error) {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "", fmt.Errorf("marshal TOML string: %w", err)
+	}
+	return string(encoded), nil
 }
 
 func unique(values []string) []string {

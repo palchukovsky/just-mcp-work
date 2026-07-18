@@ -231,11 +231,14 @@ func (r *Runner) BuildCommand(
 func findJustfile(projectDir string) (string, error) {
 	for _, name := range []string{"justfile", "Justfile", ".justfile"} {
 		path := filepath.Join(projectDir, name)
-		info, err := os.Stat(path)
-		if err == nil && !info.IsDir() {
-			return path, nil
+		info, err := os.Lstat(path)
+		if err == nil {
+			if info.Mode().IsRegular() {
+				return path, nil
+			}
+			continue
 		}
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
+		if !errors.Is(err, os.ErrNotExist) {
 			return "", fmt.Errorf("inspect justfile: %w", err)
 		}
 	}

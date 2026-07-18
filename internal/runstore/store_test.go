@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -37,6 +38,16 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	if handle.Meta.Status != StatusRunning || handle.Meta.StartedAt.IsZero() {
 		t.Fatalf("initial metadata = %#v", handle.Meta)
 	}
+	if handle.Meta.OwnerPID != os.Getpid() {
+		t.Fatalf("owner PID = %d, want %d", handle.Meta.OwnerPID, os.Getpid())
+	}
+	if (runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows") &&
+		handle.Meta.OwnerIdentity == "" {
+		t.Fatalf("owner process identity is empty: %#v", handle.Meta)
+	}
+	if !processMatches(handle.Meta.OwnerPID, handle.Meta.OwnerIdentity) {
+		t.Fatalf("owner process identity does not match: %#v", handle.Meta)
+	}
 	if _, err := handle.Stdout().Write([]byte("abcdef")); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +74,36 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	}
 	if meta.EndedAt.IsZero() || meta.EndedAt.Before(meta.StartedAt) {
 		t.Fatalf("invalid run timestamps: %#v", meta)
+	}
+}
+
+func TestCleanupSkipsRunningRunOwnedByAnotherLiveStore(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle.Meta.StartedAt = time.Now().UTC().Add(-2 * time.Hour)
+	if err = store.writeMeta(handle.dir, handle.Meta); err != nil {
+		t.Fatal(err)
+	}
+
+	otherStore, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = otherStore.Cleanup(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(handle.dir); err != nil {
+		t.Fatalf("live run was removed by another store: %v", err)
+	}
+	if err = handle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -95,8 +136,7 @@ func TestCleanupSkipsActiveAndDeletesFinishedStaleRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := time.Now().UTC().Add(-2 * time.Hour)
-	handle.Meta.Status = StatusOK
-	handle.Meta.EndedAt = old
+	handle.Meta.StartedAt = old
 	if err := store.writeMeta(handle.dir, handle.Meta); err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +159,45 @@ func TestCleanupSkipsActiveAndDeletesFinishedStaleRun(t *testing.T) {
 	}
 	if _, err := os.Stat(handle.dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("finished stale run still exists: %v", err)
+	}
+}
+
+func TestCleanupDeletesStaleRunningRunAfterRestart(t *testing.T) {
+	root := t.TempDir()
+	store, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:interrupted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle.Meta.StartedAt = time.Now().UTC().Add(-2 * time.Hour)
+	identity := ProcessIdentity(os.Getpid())
+	if identity == "" {
+		t.Skip("process identity is unavailable on this platform")
+	}
+	handle.Meta.OwnerPID = os.Getpid()
+	handle.Meta.OwnerIdentity = identity + ":reused"
+	if err = store.writeMeta(handle.dir, handle.Meta); err != nil {
+		t.Fatal(err)
+	}
+	if err = handle.stdout.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = handle.stderr.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = restarted.Cleanup(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(handle.dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale interrupted run still exists: %v", err)
 	}
 }
 
