@@ -1,5 +1,11 @@
 # just-mcp-work
 
+[![Verify][verify-badge]][verify-workflow]
+[![Release][release-badge]][release-workflow]
+[![Latest release][release-version-badge]][releases]
+[![Go][go-badge]][go-cache]
+[![License: MIT][license-badge]][license]
+
 > Just work with your workspace — over MCP.
 
 **Stop burning agent context on build files.** `just-mcp-work` is a local
@@ -143,3 +149,14 @@ GitHub CLI access.
 ## License
 
 [MIT](LICENSE)
+
+[verify-badge]: https://github.com/palchukovsky/just-mcp-work/actions/workflows/ci.yml/badge.svg
+[verify-workflow]: https://github.com/palchukovsky/just-mcp-work/actions/workflows/ci.yml
+[release-badge]: https://github.com/palchukovsky/just-mcp-work/actions/workflows/release.yml/badge.svg
+[release-workflow]: https://github.com/palchukovsky/just-mcp-work/actions/workflows/release.yml
+[release-version-badge]: https://img.shields.io/github/v/release/palchukovsky/just-mcp-work
+[releases]: https://github.com/palchukovsky/just-mcp-work/releases
+[go-badge]: https://img.shields.io/github/go-mod/go-version/palchukovsky/just-mcp-work
+[go-cache]: https://pkg.go.dev/github.com/palchukovsky/just-mcp-work
+[license-badge]: https://img.shields.io/github/license/palchukovsky/just-mcp-work
+[license]: LICENSE
