@@ -16,6 +16,13 @@ the agent only the part it asked for.
 - **Output on demand.** A run answers with a short receipt; the full stdout
   and stderr stay one call away, whenever the agent actually needs them.
 
+## Security
+
+`just-mcp-work` runs tasks that already exist in your project - a `just` recipe,
+a `make` target, etc. - never arbitrary shell. They run with your privileges,
+unsandboxed: trust a project's tasks like you trust its build scripts. Need
+isolation? Run `just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
+
 ## Install
 
 Must be available on `PATH`:
