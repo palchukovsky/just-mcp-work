@@ -43,18 +43,18 @@ Must be available on `PATH`:
 
 ### Prebuilt binaries
 
-Every GitHub Release contains these archives:
+Download an archive from the [latest GitHub Release][latest-release]:
 
-| Platform | Archive |
+| Platform | Download |
 | --- | --- |
-| Linux x86_64 | `just-mcp-work_linux_amd64.tar.gz` |
-| Linux arm64 | `just-mcp-work_linux_arm64.tar.gz` |
-| macOS Apple Silicon | `just-mcp-work_darwin_arm64.tar.gz` |
-| Windows x86_64 | `just-mcp-work_windows_amd64.zip` |
+| Linux x86_64 | [`just-mcp-work_linux_amd64.tar.gz`][linux-amd64-download] |
+| Linux arm64 | [`just-mcp-work_linux_arm64.tar.gz`][linux-arm64-download] |
+| macOS Apple Silicon | [`just-mcp-work_darwin_arm64.tar.gz`][macos-arm64-download] ([opening notes][macos-notes]) |
+| Windows x86_64 | [`just-mcp-work_windows_amd64.zip`][windows-amd64-download] |
 
 Extract the matching archive and place `just-mcp-work` (or
 `just-mcp-work.exe`) on `PATH`. Verify the archive with the release
-`checksums.txt` when needed.
+[`checksums.txt`][checksums-download] when needed.
 
 ### Sources
 
@@ -156,6 +156,13 @@ GitHub CLI access.
 [release-workflow]: https://github.com/palchukovsky/just-mcp-work/actions/workflows/release.yml
 [release-version-badge]: https://img.shields.io/github/v/release/palchukovsky/just-mcp-work
 [releases]: https://github.com/palchukovsky/just-mcp-work/releases
+[latest-release]: https://github.com/palchukovsky/just-mcp-work/releases/latest
+[linux-amd64-download]: https://github.com/palchukovsky/just-mcp-work/releases/latest/download/just-mcp-work_linux_amd64.tar.gz
+[linux-arm64-download]: https://github.com/palchukovsky/just-mcp-work/releases/latest/download/just-mcp-work_linux_arm64.tar.gz
+[macos-arm64-download]: https://github.com/palchukovsky/just-mcp-work/releases/latest/download/just-mcp-work_darwin_arm64.tar.gz
+[windows-amd64-download]: https://github.com/palchukovsky/just-mcp-work/releases/latest/download/just-mcp-work_windows_amd64.zip
+[checksums-download]: https://github.com/palchukovsky/just-mcp-work/releases/latest/download/checksums.txt
+[macos-notes]: docs/macos.md
 [go-badge]: https://img.shields.io/github/go-mod/go-version/palchukovsky/just-mcp-work
 [go-cache]: https://pkg.go.dev/github.com/palchukovsky/just-mcp-work
 [license-badge]: https://img.shields.io/github/license/palchukovsky/just-mcp-work
