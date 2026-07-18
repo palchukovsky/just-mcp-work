@@ -12,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/BurntSushi/toml"
 )
 
 func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
@@ -663,15 +665,43 @@ func assertServerCommand(t *testing.T, servers map[string]any) {
 	}
 }
 
+func TestTOMLStringEscapesWindowsPath(t *testing.T) {
+	value := `C:\Users\runneradmin\just-mcp-work.exe`
+	encoded, err := tomlString(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Command string
+	}
+	if _, err := toml.Decode("command = "+encoded, &config); err != nil {
+		t.Fatalf("decode encoded Windows path: %v", err)
+	}
+	if config.Command != value {
+		t.Fatalf("command = %q, want %q", config.Command, value)
+	}
+}
+
 func assertCodexMCPConfig(t *testing.T, path, root string) {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "[mcp_servers.just-mcp-work]") ||
-		!strings.Contains(string(data), "--root") ||
-		!strings.Contains(string(data), root) {
+	var config struct {
+		MCPServers map[string]struct {
+			Command           string
+			Args              []string
+			StartupTimeoutSec int `toml:"startup_timeout_sec"`
+		} `toml:"mcp_servers"`
+	}
+	if _, err := toml.Decode(string(data), &config); err != nil {
+		t.Fatalf("decode workspace Codex config: %v", err)
+	}
+	server, found := config.MCPServers["just-mcp-work"]
+	if !found || server.Command == "" ||
+		!slices.Equal(server.Args, []string{"serve", "--root", root}) ||
+		server.StartupTimeoutSec != 120 {
 		t.Fatalf("invalid workspace Codex config:\n%s", data)
 	}
 }
