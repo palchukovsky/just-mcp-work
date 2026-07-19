@@ -212,6 +212,7 @@ func TestStatusDoesNotTreatLiveForeignOwnerAsThisServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finishRunningRunAtCleanup(t, handle)
 	handle.Meta.OwnerPID = cmd.Process.Pid
 	handle.Meta.OwnerIdentity = identity
 	if persistErr := handle.PersistRunning(); persistErr != nil {
@@ -237,6 +238,7 @@ func TestStatusDoesNotTreatReusedOwnerPIDAsThisServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finishRunningRunAtCleanup(t, handle)
 	handle.Meta.OwnerPID = os.Getpid()
 	handle.Meta.OwnerIdentity = identity + ":reused"
 	if persistErr := handle.PersistRunning(); persistErr != nil {
@@ -261,6 +263,7 @@ func TestRunStatusUsesPersistedTaskTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finishRunningRunAtCleanup(t, handle)
 	server.config.Timeout = 0
 	server.config.TimeoutUnlimited = true
 	_, status, err := server.getRunStatus(
@@ -481,12 +484,22 @@ func newForeignRun(t *testing.T) (*Server, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	finishRunningRunAtCleanup(t, handle)
 	handle.Meta.OwnerPID = os.Getpid() + 1
 	handle.Meta.OwnerIdentity = "other-server"
 	if persistErr := handle.PersistRunning(); persistErr != nil {
 		t.Fatal(persistErr)
 	}
 	return server, handle.Meta.RunID
+}
+
+func finishRunningRunAtCleanup(t *testing.T, handle *runstore.Handle) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := handle.Finish(runstore.StatusCancelled, -1, "test cleanup", false, false); err != nil {
+			t.Errorf("finish running test run cleanup: %v", err)
+		}
+	})
 }
 
 func stopRunOrFail(t *testing.T, server *Server, runID string) {
