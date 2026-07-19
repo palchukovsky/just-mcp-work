@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -135,6 +136,80 @@ func TestDirectHandlerFlow(t *testing.T) {
 		missing.Error == nil ||
 		missing.Error.Message == "" {
 		t.Fatalf("structured missing getRun error = %#v, %#v, %v", result, missing, err)
+	}
+}
+
+func TestListProjectsFilterDefaultsDoNotLimitTaskLookup(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{
+		"justfile",
+		"top/justfile",
+		"top/deeper/justfile",
+		".hidden/justfile",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, path)), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, path), []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runners, err := runner.NewRegistry(handlerRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(workspaceRegistry, runners, store, Config{
+		Timeout:   5 * time.Second,
+		Retention: time.Hour,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, listed, err := server.listProjects(context.Background(), nil, listProjectsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := make([]string, 0, len(listed.Projects))
+	for _, project := range listed.Projects {
+		paths = append(paths, project.RelPath)
+	}
+	if want := []string{".", "top"}; !reflect.DeepEqual(paths, want) {
+		t.Fatalf("default projects = %#v, want %#v", paths, want)
+	}
+	if got, want := listed.AppliedFilter, (appliedFilterOutput{
+		Path:            ".",
+		MaxDepth:        1,
+		Runners:         nil,
+		IncludeHidden:   false,
+		DefaultsApplied: []string{"path", "max_depth", "runners", "include_hidden"},
+		Pruned:          workspace.Pruned{Depth: 1, Hidden: 1, Excluded: 1},
+	}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("applied filter = %#v, want %#v", got, want)
+	}
+	_, tasks, err := server.listTasks(
+		context.Background(),
+		nil,
+		listTasksInput{ProjectPath: "top/deeper"},
+	)
+	if err != nil || len(tasks.Tasks) != 1 {
+		t.Fatalf("listTasks below default depth = %#v, %v", tasks, err)
+	}
+	_, receipt, err := server.runTask(
+		context.Background(),
+		nil,
+		runTaskInput{ProjectPath: "top/deeper", TaskID: "fake:echo"},
+	)
+	if err != nil || !receipt.OK {
+		t.Fatalf("runTask below default depth = %#v, %v", receipt, err)
 	}
 }
 

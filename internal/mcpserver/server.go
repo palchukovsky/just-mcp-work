@@ -96,8 +96,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mcp.AddTool(
 		server,
 		&mcp.Tool{
-			Name:        "list_projects",
-			Description: "List task projects discovered below the workspace root.",
+			Name: "list_projects",
+			Description: "List task projects. By default, scans depth 0-1 below the workspace root " +
+				"without dot-directories; use path, max_depth, runners, or include_hidden to widen it. " +
+				"Non-zero applied_filter.pruned counters mean that the scan omitted projects.",
 		},
 		recoverTool(withUpdateNotification(s, s.listProjects)),
 	)
@@ -164,7 +166,12 @@ func (s *Server) versionStatus(
 	return nil, s.updates.CheckNow(ctx), nil
 }
 
-type listProjectsInput struct{}
+type listProjectsInput struct {
+	Path          *string  `json:"path,omitempty" jsonschema:"workspace-relative subtree to search, default ."`
+	MaxDepth      *int     `json:"max_depth,omitempty" jsonschema:"relative scan depth: default 1, -1 unlimited"`
+	Runners       []string `json:"runners,omitempty" jsonschema:"keep projects exposing one of these runners"`
+	IncludeHidden *bool    `json:"include_hidden,omitempty" jsonschema:"include dot-directories, default false"`
+}
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
 type projectOutput struct {
@@ -176,20 +183,36 @@ type projectOutput struct {
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
 type listProjectsOutput struct {
-	Projects []projectOutput `json:"projects"`
-	Error    *toolError      `json:"error,omitempty"`
+	Projects      []projectOutput     `json:"projects"`
+	AppliedFilter appliedFilterOutput `json:"applied_filter"`
+	Error         *toolError          `json:"error,omitempty"`
+}
+
+//nolint:govet // Field order follows the stable MCP JSON response shape.
+type appliedFilterOutput struct {
+	Path            string           `json:"path"`
+	MaxDepth        int              `json:"max_depth"`
+	Runners         []string         `json:"runners"`
+	IncludeHidden   bool             `json:"include_hidden"`
+	DefaultsApplied []string         `json:"defaults_applied"`
+	Pruned          workspace.Pruned `json:"pruned"`
 }
 
 func (s *Server) listProjects(
 	ctx context.Context,
 	_ *mcp.CallToolRequest,
-	_ listProjectsInput,
+	input listProjectsInput,
 ) (*mcp.CallToolResult, listProjectsOutput, error) {
-	projects, err := s.workspace.Discover(ctx)
+	filter, applied := projectFilter(input)
+	projects, pruned, err := s.workspace.Discover(ctx, filter)
 	if err != nil {
 		return toolErrorResult(err), listProjectsOutput{Error: newToolError(err)}, nil
 	}
-	output := listProjectsOutput{Projects: make([]projectOutput, 0, len(projects))}
+	applied.Pruned = pruned
+	output := listProjectsOutput{
+		Projects:      make([]projectOutput, 0, len(projects)),
+		AppliedFilter: applied,
+	}
 	for _, project := range projects {
 		output.Projects = append(
 			output.Projects,
@@ -202,6 +225,37 @@ func (s *Server) listProjects(
 		)
 	}
 	return nil, output, nil
+}
+
+func projectFilter(input listProjectsInput) (workspace.Filter, appliedFilterOutput) {
+	filter := workspace.Filter{Runners: append([]string(nil), input.Runners...)}
+	applied := appliedFilterOutput{Runners: append([]string(nil), input.Runners...)}
+	if input.Path == nil {
+		filter.Path = "."
+		applied.Path = "."
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "path")
+	} else {
+		filter.Path = *input.Path
+		applied.Path = *input.Path
+	}
+	if input.MaxDepth == nil {
+		filter.MaxDepth = 1
+		applied.MaxDepth = 1
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "max_depth")
+	} else {
+		filter.MaxDepth = *input.MaxDepth
+		applied.MaxDepth = *input.MaxDepth
+	}
+	if input.Runners == nil {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "runners")
+	}
+	if input.IncludeHidden == nil {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "include_hidden")
+	} else {
+		filter.IncludeHidden = *input.IncludeHidden
+		applied.IncludeHidden = *input.IncludeHidden
+	}
+	return filter, applied
 }
 
 type listTasksInput struct {

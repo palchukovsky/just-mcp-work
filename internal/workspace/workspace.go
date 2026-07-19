@@ -30,6 +30,22 @@ type Project struct {
 	Dir     string
 }
 
+// Filter limits a project scan without narrowing the runners reported by a project.
+type Filter struct {
+	Path          string
+	MaxDepth      int
+	Runners       []string
+	IncludeHidden bool
+}
+
+// Pruned records directories or projects omitted while applying a Filter.
+type Pruned struct {
+	Depth          int `json:"depth"`
+	Hidden         int `json:"hidden"`
+	Excluded       int `json:"excluded"`
+	RunnerMismatch int `json:"runner_mismatch"`
+}
+
 // Registry scans a workspace on demand. It does not retain stale project data.
 type Registry struct {
 	root     string
@@ -56,10 +72,29 @@ func NewRegistry(root string, runners *runner.Registry, excludes []string) (*Reg
 // Root returns the resolved workspace root.
 func (r *Registry) Root() string { return r.root }
 
-// Discover scans the root and returns projects sorted by relative path.
-func (r *Registry) Discover(ctx context.Context) ([]Project, error) {
+// Discover scans a filtered workspace subtree and returns projects sorted by relative path.
+func (r *Registry) Discover(ctx context.Context, filter Filter) ([]Project, Pruned, error) {
+	if filter.Path == "" {
+		filter.Path = "."
+	}
+	if filter.MaxDepth < -1 {
+		return nil, Pruned{}, fmt.Errorf("max_depth must be -1 or greater")
+	}
+	base, err := r.ResolveDir(filter.Path)
+	if err != nil {
+		return nil, Pruned{}, err
+	}
+	wantedRunners := make(map[string]struct{}, len(filter.Runners))
+	for _, name := range filter.Runners {
+		if _, found := r.runners.Get(name); !found {
+			return nil, Pruned{}, fmt.Errorf("unknown runner %q", name)
+		}
+		wantedRunners[name] = struct{}{}
+	}
+
 	projects := make([]Project, 0)
-	err := filepath.WalkDir(r.root, func(path string, entry fs.DirEntry, walkErr error) error {
+	pruned := Pruned{}
+	err = filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -69,10 +104,23 @@ func (r *Registry) Discover(ctx context.Context) ([]Project, error) {
 		if !entry.IsDir() {
 			return nil
 		}
-		if path != r.root && entry.Type()&fs.ModeSymlink != 0 {
+		if path != base && entry.Type()&fs.ModeSymlink != 0 {
 			return filepath.SkipDir
 		}
-		if path != r.root && r.excluded(path) {
+		if filepath.Base(path) == ".just-mcp-work" || (path != base && r.excluded(path)) {
+			pruned.Excluded++
+			return filepath.SkipDir
+		}
+		if path != base && !filter.IncludeHidden && strings.HasPrefix(entry.Name(), ".") {
+			pruned.Hidden++
+			return filepath.SkipDir
+		}
+		depth, depthErr := relativeDepth(base, path)
+		if depthErr != nil {
+			return depthErr
+		}
+		if filter.MaxDepth >= 0 && depth > filter.MaxDepth {
+			pruned.Depth++
 			return filepath.SkipDir
 		}
 
@@ -86,15 +134,24 @@ func (r *Registry) Discover(ctx context.Context) ([]Project, error) {
 		return nil
 	})
 	if err != nil {
-		return nil, fmt.Errorf("scan workspace: %w", err)
+		return nil, Pruned{}, fmt.Errorf("scan workspace: %w", err)
 	}
+	filtered := projects[:0]
+	for _, project := range projects {
+		if len(wantedRunners) > 0 && !projectHasRunner(project, wantedRunners) {
+			pruned.RunnerMismatch++
+			continue
+		}
+		filtered = append(filtered, project)
+	}
+	projects = filtered
 	included := make(map[includedProject]struct{})
 	for _, project := range projects {
 		if err := r.markIncluded(ctx, project, included); err != nil {
-			return nil, err
+			return nil, Pruned{}, err
 		}
 	}
-	filtered := projects[:0]
+	filtered = projects[:0]
 	for _, project := range projects {
 		if suppressIncluded(&project, included) {
 			filtered = append(filtered, project)
@@ -102,7 +159,7 @@ func (r *Registry) Discover(ctx context.Context) ([]Project, error) {
 	}
 	projects = filtered
 	sort.Slice(projects, func(i, j int) bool { return projects[i].RelPath < projects[j].RelPath })
-	return projects, nil
+	return projects, pruned, nil
 }
 
 type includedProject struct {
@@ -177,7 +234,10 @@ func (r *Registry) Find(ctx context.Context, relPath string) (Project, error) {
 	if !validRelPath(relPath) {
 		return Project{}, fmt.Errorf("invalid project path %q", relPath)
 	}
-	projects, err := r.Discover(ctx)
+	projects, _, err := r.Discover(
+		ctx,
+		Filter{Path: ".", MaxDepth: -1, IncludeHidden: true},
+	)
 	if err != nil {
 		return Project{}, err
 	}
@@ -187,6 +247,26 @@ func (r *Registry) Find(ctx context.Context, relPath string) (Project, error) {
 		}
 	}
 	return Project{}, fmt.Errorf("unknown project_path %q", relPath)
+}
+
+func relativeDepth(base, path string) (int, error) {
+	rel, err := filepath.Rel(base, path)
+	if err != nil {
+		return 0, fmt.Errorf("resolve scan depth: %w", err)
+	}
+	if rel == "." {
+		return 0, nil
+	}
+	return len(strings.Split(rel, string(filepath.Separator))), nil
+}
+
+func projectHasRunner(project Project, wanted map[string]struct{}) bool {
+	for _, name := range project.Runners {
+		if _, found := wanted[name]; found {
+			return true
+		}
+	}
+	return false
 }
 
 // ResolveDir resolves a workspace-relative directory without following symlinks.

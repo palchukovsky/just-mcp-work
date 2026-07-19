@@ -33,7 +33,10 @@ func TestDiscoverProjectsAndSurfaceInvalidJustfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projects, err := registry.Discover(context.Background())
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, IncludeHidden: true},
+	)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -115,7 +118,10 @@ func TestDiscoverSkipsJustfileIncludedByParentProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projects, err := registry.Discover(context.Background())
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, IncludeHidden: true},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +151,10 @@ func TestDiscoverSuppressesOnlyIncludedJustRunnerAfterFullScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projects, err := registry.Discover(context.Background())
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, IncludeHidden: true},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,6 +171,115 @@ func TestDiscoverSuppressesOnlyIncludedJustRunnerAfterFullScan(t *testing.T) {
 	}
 	if len(sharedProject.Tasks["just"]) != 0 || len(sharedProject.Tasks["make"]) != 1 {
 		t.Fatalf("shared tasks = %#v", sharedProject.Tasks)
+	}
+}
+
+func TestDiscoverFilterPrunesBeforeInspection(t *testing.T) {
+	root := t.TempDir()
+	for _, path := range []string{
+		"justfile",
+		"top/justfile",
+		"top/deeper/justfile",
+		".hidden/justfile",
+		".just-mcp-work/justfile",
+		"target/justfile",
+	} {
+		writeFile(t, filepath.Join(root, path), "fixture")
+	}
+	calls := 0
+	runners, err := runner.NewRegistry(countingFakeJustRunner{calls: &calls})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, pruned, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{".", "top"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+	if want := (Pruned{Depth: 1, Hidden: 1, Excluded: 2}); pruned != want {
+		t.Fatalf("pruned = %#v, want %#v", pruned, want)
+	}
+	if calls != len(projects) {
+		t.Fatalf("ListTasks calls = %d, projects = %d", calls, len(projects))
+	}
+
+	projects, pruned, err = registry.Discover(
+		context.Background(),
+		Filter{Path: "top", MaxDepth: 0},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{"top"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("base-relative project paths = %#v, want %#v", got, want)
+	}
+	if pruned.Depth != 1 {
+		t.Fatalf("base-relative depth pruned = %#v", pruned)
+	}
+
+	projects, _, err = registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, IncludeHidden: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{".", ".hidden", "top", "top/deeper"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("unlimited project paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverFilterKeepsProjectDetailsAndValidatesInput(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "dual", "justfile"), "fixture")
+	writeFile(t, filepath.Join(root, "dual", "Makefile"), "fixture")
+	runners, err := runner.NewRegistry(fakeJustRunner{}, fakeMakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, pruned, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, Runners: []string{"just"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pruned.RunnerMismatch != 0 {
+		t.Fatalf("runner mismatch count = %d", pruned.RunnerMismatch)
+	}
+	if got, want := projectAt(t, projects, "dual").Runners, []string{"just", "make"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered project runners = %#v, want %#v", got, want)
+	}
+	if _, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -2},
+	); err == nil {
+		t.Fatal("Discover accepted max_depth below -1")
+	}
+	if _, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, Runners: []string{"missing"}},
+	); err == nil {
+		t.Fatal("Discover accepted an unknown runner")
+	}
+	if _, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: "../outside", MaxDepth: -1},
+	); err == nil {
+		t.Fatal("Discover accepted a path outside the workspace")
 	}
 }
 
@@ -203,7 +321,10 @@ func TestDiscoverDoesNotDescendIntoDirectorySymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	projects, err := registry.Discover(context.Background())
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, IncludeHidden: true},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +367,16 @@ func (fakeJustRunner) BuildCommand(
 	[]string,
 ) (*exec.Cmd, error) {
 	return nil, errors.New("not used")
+}
+
+type countingFakeJustRunner struct {
+	calls *int
+	fakeJustRunner
+}
+
+func (r countingFakeJustRunner) ListTasks(ctx context.Context, projectDir string) ([]runner.Task, error) {
+	*r.calls++
+	return r.fakeJustRunner.ListTasks(ctx, projectDir)
 }
 
 type fakeMakeRunner struct{}
@@ -304,4 +435,12 @@ func projectAt(t *testing.T, projects []Project, relPath string) Project {
 	}
 	t.Fatalf("project %q not found in %#v", relPath, projects)
 	return Project{}
+}
+
+func projectPaths(projects []Project) []string {
+	paths := make([]string, 0, len(projects))
+	for _, project := range projects {
+		paths = append(paths, project.RelPath)
+	}
+	return paths
 }
