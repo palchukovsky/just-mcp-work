@@ -139,6 +139,7 @@ func TestDirectHandlerFlow(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This direct handler test deliberately pins the filtering contract end to end.
 func TestListProjectsFilterDefaultsDoNotLimitTaskLookup(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{
@@ -188,7 +189,7 @@ func TestListProjectsFilterDefaultsDoNotLimitTaskLookup(t *testing.T) {
 	if got, want := listed.AppliedFilter, (appliedFilterOutput{
 		Path:            ".",
 		MaxDepth:        1,
-		Runners:         nil,
+		Runners:         []string{},
 		IncludeHidden:   false,
 		DefaultsApplied: []string{"path", "max_depth", "runners", "include_hidden"},
 		Pruned:          workspace.Pruned{Depth: 1, Hidden: 1, Excluded: 1},
@@ -286,14 +287,18 @@ func TestGetRunLogsPreservesUTF8ByteOffsets(t *testing.T) {
 }
 
 func TestMCPServerHelperProcess(_ *testing.T) {
-	if os.Getenv("JMW_TEST_HELPER_PROCESS") != "1" {
-		return
+	switch os.Getenv("JMW_TEST_HELPER_PROCESS") {
+	case "1":
+		//nolint:errcheck // The helper exits immediately when test output is unavailable.
+		_, _ = os.Stdout.WriteString("helper stdout")
+		//nolint:errcheck // The helper exits immediately when test output is unavailable.
+		_, _ = os.Stderr.WriteString("helper stderr")
+		os.Exit(0)
+	case "sleep":
+		for {
+			time.Sleep(time.Hour)
+		}
 	}
-	//nolint:errcheck // The helper exits immediately when test output is unavailable.
-	_, _ = os.Stdout.WriteString("helper stdout")
-	//nolint:errcheck // The helper exits immediately when test output is unavailable.
-	_, _ = os.Stderr.WriteString("helper stderr")
-	os.Exit(0)
 }
 
 func TestRunShellCommandFromNonProjectDirectory(t *testing.T) {
@@ -310,6 +315,10 @@ func TestRunShellCommandFromNonProjectDirectory(t *testing.T) {
 	)
 	if err != nil || !receipt.OK || receipt.Status != runstore.StatusOK {
 		t.Fatalf("runShellCommand = %#v, %v", receipt, err)
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil || strings.Contains(string(encoded), "completed") || strings.Contains(string(encoded), "promoted") {
+		t.Fatalf("fast receipt changed = %s, %v", encoded, err)
 	}
 	assertShellRun(t, server, receipt.RunID, root)
 	_, rejected, err := server.runShellCommand(
@@ -339,6 +348,41 @@ func TestRunShellCommandDefaultsToWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestRunShellCommandCanonicalizesWorkingDirectoryBeforeRecordingHistory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "nested"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	server := newShellTestServer(t, root)
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: shellOutputCommand(), WorkingDirectory: "nested/.."},
+	)
+	if err != nil || !receipt.OK {
+		t.Fatalf("runShellCommand = %#v, %v", receipt, err)
+	}
+	_, stored, err := server.getRun(context.Background(), nil, getRunInput{RunID: receipt.RunID})
+	if err != nil || stored.Run.ProjectPath != "." || stored.Run.CWD != root {
+		t.Fatalf("canonical shell metadata = %#v, %v", stored.Run, err)
+	}
+}
+
+func TestStartShellCommandReportsLedgerCreationFailureAsMCPError(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	if err := os.RemoveAll(server.store.LogRoot()); err != nil {
+		t.Fatal(err)
+	}
+	result, output, err := server.startShellCommand(
+		context.Background(),
+		nil,
+		startShellCommandInput{Command: shellOutputCommand()},
+	)
+	if err != nil || result == nil || !result.IsError || output.Error == nil {
+		t.Fatalf("start after ledger removal = %#v, %#v, %v", result, output, err)
+	}
+}
+
 func TestRunShellCommandCancellationIsOwnedByExecutor(t *testing.T) {
 	root := t.TempDir()
 	server := newShellTestServer(t, root)
@@ -357,6 +401,104 @@ func TestRunShellCommandCancellationIsOwnedByExecutor(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This test deliberately verifies the whole recovery sequence.
+func TestRunShellCommandPromotionCanBeRecoveredAndStopped(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	maxWait := int64(10)
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: shellLongOutputCommand(), MaxWaitMS: &maxWait},
+	)
+	if err != nil ||
+		receipt.RunID == "" ||
+		receipt.Status != runstore.StatusRunning ||
+		!receipt.Promoted ||
+		receipt.Completed == nil ||
+		*receipt.Completed {
+		t.Fatalf("promoted shell command = %#v, %v", receipt, err)
+	}
+	_, persisted, err := server.getRun(context.Background(), nil, getRunInput{RunID: receipt.RunID})
+	if err != nil ||
+		persisted.Run.ProjectPath != "." ||
+		persisted.Run.TaskID != "shell:command" ||
+		persisted.Run.CWD != root ||
+		persisted.Run.PID == 0 {
+		t.Fatalf("running metadata = %#v, %v", persisted, err)
+	}
+	_, listed, err := server.listRuns(
+		context.Background(),
+		nil,
+		listRunsInput{Status: []string{"running"}, ProjectPath: ".", TaskID: "shell:command"},
+	)
+	if err != nil || len(listed.Runs) == 0 || listed.Runs[0].RunID != receipt.RunID {
+		t.Fatalf("running runs = %#v, %v", listed, err)
+	}
+	wait := int64(1)
+	_, waiting, err := server.waitRun(
+		context.Background(),
+		nil,
+		waitRunInput{RunID: receipt.RunID, MaxWaitMS: &wait},
+	)
+	if err != nil ||
+		waiting.Completed == nil ||
+		*waiting.Completed ||
+		waiting.Status != runstore.StatusRunning {
+		t.Fatalf("wait timeout = %#v, %v", waiting, err)
+	}
+	_, stopped, err := server.stopRun(
+		context.Background(),
+		nil,
+		stopRunInput{RunID: receipt.RunID},
+	)
+	if err != nil ||
+		stopped.Completed == nil ||
+		!*stopped.Completed ||
+		stopped.Status != runstore.StatusCancelled {
+		t.Fatalf("stopped run = %#v, %v", stopped, err)
+	}
+}
+
+//nolint:gocyclo // This test keeps pagination and input-contract assertions together.
+func TestListRunsPaginatesAndExplainsStatusValues(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	for range 3 {
+		handle, err := server.store.Begin(runstore.Meta{ProjectPath: ".", TaskID: "just:page"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := handle.Finish(runstore.StatusOK, 0, "", false, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	limit := 2
+	_, first, err := server.listRuns(context.Background(), nil, listRunsInput{Limit: &limit})
+	if err != nil || len(first.Runs) != 2 || !first.Truncated || first.NextCursor == "" {
+		t.Fatalf("first list page = %#v, %v", first, err)
+	}
+	_, second, err := server.listRuns(
+		context.Background(),
+		nil,
+		listRunsInput{Limit: &limit, Cursor: first.NextCursor},
+	)
+	if err != nil || len(second.Runs) != 1 || second.Truncated {
+		t.Fatalf("second list page = %#v, %v", second, err)
+	}
+	if second.Runs[0].RunID == first.Runs[0].RunID || second.Runs[0].RunID == first.Runs[1].RunID {
+		t.Fatalf("list cursor repeated a run: first=%#v second=%#v", first.Runs, second.Runs)
+	}
+	result, invalid, err := server.listRuns(
+		context.Background(),
+		nil,
+		listRunsInput{Status: []string{"bad"}},
+	)
+	if err != nil || result == nil || !result.IsError || invalid.Error == nil ||
+		!strings.Contains(invalid.Error.Message, "spawn_error") {
+		t.Fatalf("invalid status = %#v, %#v, %v", result, invalid, err)
+	}
+}
+
 func TestRunShellCommandPreCancelledDoesNotStartProcess(t *testing.T) {
 	root := t.TempDir()
 	server := newShellTestServer(t, root)
@@ -372,6 +514,25 @@ func TestRunShellCommandPreCancelledDoesNotStartProcess(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "marker")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("marker stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestNewRejectsSubMillisecondTaskTimeout(t *testing.T) {
+	root := t.TempDir()
+	runners, err := runner.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = New(workspaceRegistry, runners, store, Config{Timeout: 500 * time.Microsecond}); err == nil {
+		t.Fatal("sub-millisecond task timeout must be rejected")
 	}
 }
 
@@ -414,6 +575,13 @@ func shellSleepCommand() string {
 		return "ping -n 30 127.0.0.1 >NUL"
 	}
 	return "sleep 30"
+}
+
+func shellLongOutputCommand() string {
+	if runtime.GOOS == "windows" {
+		return "echo started & ping -n 30 127.0.0.1 >NUL"
+	}
+	return "printf started; sleep 30"
 }
 
 func assertShellRun(t *testing.T, server *Server, runID, root string) {

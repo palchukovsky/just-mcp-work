@@ -33,9 +33,16 @@ const Prompt = `This workspace exposes its runnable tasks through the just-mcp-w
 (currently the ` + "`just`" + `, ` + "`CMake`" + `, and ` + "`Make`" + ` runners). When running project tasks:
 
 - Discover tasks with ` + "`list_projects`" + ` and ` + "`list_tasks`" + ` instead of
-  reading build files.
-- Run tasks with ` + "`run_task`" + ` (project_path, task_id, arguments) — do not shell out
-  to the underlying tool or bash directly.
+  reading build files. ` + "`list_projects`" + ` defaults to depth 1 without dot-directories;
+  use path to choose a subtree, max_depth or include_hidden to widen directory coverage, and runners
+  to restrict projects. ` + "`pruned.depth`" + ` and ` + "`pruned.hidden`" + ` count skipped directory
+  subtrees; ` + "`pruned.runner_mismatch`" + ` means relaxing runners may return more projects. Excluded
+  paths are configured by the operator and cannot be widened.
+- Run short tasks with ` + "`run_task`" + ` (project_path, task_id, arguments). A receipt with
+  ` + "`status: running`" + ` and a ` + "`run_id`" + ` is normal: follow it with ` + "`wait_run`" + ` or
+  ` + "`get_run_status`" + ` and never start the task again. Prefer ` + "`start_task`" + ` for a task
+  whose statistics show a long average duration. ` + "`wait_run`" + ` accepts ` + "`max_wait_ms: 0`" + ` for
+  an immediate snapshot; ` + "`get_run_status`" + ` never waits.
 - Use ` + "`run_shell_command`" + ` for an arbitrary shell command that is not represented by a
   discovered task. Set ` + "`working_directory`" + ` to a workspace-relative directory (default
   ` + "`.`" + `); do not use it instead of ` + "`run_task`" + ` for an existing task.
@@ -44,7 +51,9 @@ const Prompt = `This workspace exposes its runnable tasks through the just-mcp-w
   double-check output.
 - If more context is needed, first use ` + "`stdout_tail`" + ` and ` + "`stderr_tail`" + ` from the
   receipt. Fetch full logs with ` + "`get_run_logs`" + ` only when explicitly requested
-  or when diagnosing a failure and the tail is insufficient.
+  or when diagnosing a failure and the tail is insufficient. Use ` + "`last_output_age_ms`" + ` as the
+  anti-hang signal; ` + "`stats`" + ` reports expected duration from retained runs. Use ` + "`tail_bytes: 0`" + `
+  on status tools to suppress output tails.
 - Prefer existing tasks; do not edit build files unless asked.`
 
 // Options controls agent instruction injection.

@@ -30,9 +30,19 @@ type Project struct {
 	Dir     string
 }
 
+// MaxDepthUnlimited disables the depth bound of a Filter. Note that the zero
+// value of Filter.MaxDepth means "scan the base directory only", so a caller
+// that wants the whole workspace must set this explicitly.
+const MaxDepthUnlimited = -1
+
 // Filter limits a project scan without narrowing the runners reported by a project.
+//
+//nolint:govet // Field order follows the public filter request shape.
 type Filter struct {
-	Path          string
+	// Path is the workspace-relative scan base and defaults to the root.
+	Path string
+	// MaxDepth counts directory levels below Path, where Path itself is zero.
+	// Use MaxDepthUnlimited to scan without a bound.
 	MaxDepth      int
 	Runners       []string
 	IncludeHidden bool
@@ -73,6 +83,8 @@ func NewRegistry(root string, runners *runner.Registry, excludes []string) (*Reg
 func (r *Registry) Root() string { return r.root }
 
 // Discover scans a filtered workspace subtree and returns projects sorted by relative path.
+//
+//nolint:gocyclo // Each independent scan-pruning rule must remain explicit.
 func (r *Registry) Discover(ctx context.Context, filter Filter) ([]Project, Pruned, error) {
 	if filter.Path == "" {
 		filter.Path = "."
@@ -83,6 +95,9 @@ func (r *Registry) Discover(ctx context.Context, filter Filter) ([]Project, Prun
 	base, err := r.ResolveDir(filter.Path)
 	if err != nil {
 		return nil, Pruned{}, err
+	}
+	if r.scanBaseExcluded(base) {
+		return nil, Pruned{}, fmt.Errorf("scan path %q is excluded", filter.Path)
 	}
 	wantedRunners := make(map[string]struct{}, len(filter.Runners))
 	for _, name := range filter.Runners {
@@ -124,9 +139,9 @@ func (r *Registry) Discover(ctx context.Context, filter Filter) ([]Project, Prun
 			return filepath.SkipDir
 		}
 
-		project, found, err := r.inspect(ctx, path)
-		if err != nil {
-			return err
+		project, found, inspectErr := r.inspect(ctx, path)
+		if inspectErr != nil {
+			return inspectErr
 		}
 		if found {
 			projects = append(projects, project)
@@ -234,9 +249,26 @@ func (r *Registry) Find(ctx context.Context, relPath string) (Project, error) {
 	if !validRelPath(relPath) {
 		return Project{}, fmt.Errorf("invalid project path %q", relPath)
 	}
+	// Prefer an exact scoped discovery. An including parent outside that scan
+	// base may leave more runners visible than a full-workspace scan does, and a
+	// project exposed by that scoped list must keep the same task surface here.
 	projects, _, err := r.Discover(
 		ctx,
-		Filter{Path: ".", MaxDepth: -1, IncludeHidden: true},
+		Filter{Path: relPath, MaxDepth: 0, IncludeHidden: true},
+	)
+	if err != nil {
+		return Project{}, err
+	}
+	for _, project := range projects {
+		if project.RelPath == relPath {
+			return project, nil
+		}
+	}
+	// Fall back to the full discovery context for runners whose project
+	// detection may depend on other workspace paths.
+	projects, _, err = r.Discover(
+		ctx,
+		Filter{Path: ".", MaxDepth: MaxDepthUnlimited, IncludeHidden: true},
 	)
 	if err != nil {
 		return Project{}, err
@@ -265,6 +297,16 @@ func projectHasRunner(project Project, wanted map[string]struct{}) bool {
 		if _, found := wanted[name]; found {
 			return true
 		}
+	}
+	return false
+}
+
+func (r *Registry) scanBaseExcluded(path string) bool {
+	for path != r.root {
+		if r.excluded(path) {
+			return true
+		}
+		path = filepath.Dir(path)
 	}
 	return false
 }

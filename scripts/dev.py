@@ -88,7 +88,14 @@ def smoke(_: argparse.Namespace) -> None:
         return
     with tempfile.TemporaryDirectory(prefix="just-mcp-work-smoke-") as temporary:
         root = Path(temporary)
-        (root / "justfile").write_text("hello:\n    @echo hello\n", encoding="utf-8")
+        (root / "justfile").write_text(
+            "hello:\n    @echo hello\nlong:\n    @go run wait.go\n",
+            encoding="utf-8",
+        )
+        (root / "wait.go").write_text(
+            "package main\n\nimport \"time\"\n\nfunc main() { time.Sleep(10 * time.Second) }\n",
+            encoding="utf-8",
+        )
         process = subprocess.Popen(
             ["go", "run", "./cmd/just-mcp-work", "serve", "--root", str(root)],
             cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
@@ -104,9 +111,15 @@ def smoke(_: argparse.Namespace) -> None:
                 "list_projects",
                 "list_tasks",
                 "run_task",
+                "start_task",
                 "run_shell_command",
+                "start_shell_command",
                 "get_run",
                 "get_run_logs",
+                "get_run_status",
+                "wait_run",
+                "stop_run",
+                "list_runs",
                 "version_status",
             }
             if missing := expected_tools - tools_by_name.keys():
@@ -115,6 +128,26 @@ def smoke(_: argparse.Namespace) -> None:
                 tools_by_name["run_shell_command"],
                 properties={"command", "working_directory"},
                 required={"command"},
+            )
+            assert_input_schema(
+                tools_by_name["start_task"],
+                properties={"project_path", "task_id", "arguments"},
+                required={"project_path", "task_id"},
+            )
+            assert_input_schema(
+                tools_by_name["get_run_status"],
+                properties={"run_id", "tail_bytes"},
+                required={"run_id"},
+            )
+            assert_input_schema(
+                tools_by_name["wait_run"],
+                properties={"run_id", "max_wait_ms", "tail_bytes"},
+                required={"run_id"},
+            )
+            assert_input_schema(
+                tools_by_name["list_runs"],
+                properties={"status", "project_path", "task_id", "limit", "cursor"},
+                required=set(),
             )
             assert_input_schema(
                 tools_by_name["version_status"],
@@ -172,7 +205,68 @@ def smoke(_: argparse.Namespace) -> None:
             if shell_logs["data"].strip() != shell_marker:
                 raise RuntimeError(f"unexpected shell output: {shell_logs['data']!r}")
 
-            version_status = call_tool(process, responses, 9, "version_status", {})
+            long_task_id = next(
+                task["task_id"] for task in tasks["tasks"] if task["task_id"] == "just:long"
+            )
+            started = call_tool(
+                process,
+                responses,
+                9,
+                "start_task",
+                {"project_path": project_path, "task_id": long_task_id, "arguments": []},
+            )
+            if started["status"] != "running" or not started.get("run_id"):
+                raise RuntimeError(f"long task was not started asynchronously: {started!r}")
+            run_id = started["run_id"]
+            assert isinstance(run_id, str)
+            status = call_tool(
+                process,
+                responses,
+                10,
+                "get_run_status",
+                {"run_id": run_id, "tail_bytes": 0},
+            )
+            if status["status"] != "running" or status.get("stdout_tail") or status.get("stderr_tail"):
+                raise RuntimeError(f"non-blocking zero-tail status changed: {status!r}")
+            waiting = call_tool(
+                process,
+                responses,
+                11,
+                "wait_run",
+                {"run_id": run_id, "max_wait_ms": 0, "tail_bytes": 0},
+            )
+            if waiting["status"] != "running":
+                raise RuntimeError(f"zero-wait run unexpectedly completed: {waiting!r}")
+            listed = call_tool(
+                process,
+                responses,
+                12,
+                "list_runs",
+                {"status": ["running"], "task_id": long_task_id},
+            )
+            if not any(entry["run_id"] == run_id for entry in listed["runs"]):
+                raise RuntimeError(f"running task is absent from list_runs: {listed!r}")
+            stopped = call_tool(
+                process,
+                responses,
+                13,
+                "stop_run",
+                {"run_id": run_id, "tail_bytes": 0},
+            )
+            if stopped["status"] != "cancelled" or not stopped.get("completed"):
+                raise RuntimeError(f"stop_run did not finish the task: {stopped!r}")
+
+            shell_started = call_tool(
+                process,
+                responses,
+                14,
+                "start_shell_command",
+                {"command": "echo " + shell_marker, "working_directory": "."},
+            )
+            if not shell_started.get("run_id"):
+                raise RuntimeError(f"start_shell_command did not return a run: {shell_started!r}")
+
+            version_status = call_tool(process, responses, 15, "version_status", {})
             assert_typed_fields(
                 "version_status",
                 version_status,

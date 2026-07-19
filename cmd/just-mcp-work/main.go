@@ -55,7 +55,21 @@ func run(args []string) error {
 	}
 }
 
-func serve(args []string) error {
+// serveOptions holds the resolved serve settings. Each duration takes its value
+// from the flag, then the environment variable, then the built-in default.
+//
+//nolint:govet // Field order follows the documented flag order.
+type serveOptions struct {
+	Root             string
+	Timeout          time.Duration
+	TimeoutUnlimited bool
+	SyncDeadline     time.Duration
+	Retention        time.Duration
+	Exclude          []string
+	HelpOnly         bool
+}
+
+func parseServeOptions(args []string) (serveOptions, error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	root := flags.String("root", envOr("JMW_ROOT", "."), "workspace root")
@@ -63,6 +77,11 @@ func serve(args []string) error {
 		"timeout",
 		durationEnvOr("JMW_TIMEOUT", 15*time.Minute),
 		"per-task timeout",
+	)
+	syncDeadline := flags.Duration(
+		"sync-deadline",
+		durationEnvOr("JMW_SYNC_DEADLINE", time.Minute),
+		"maximum synchronous wait before a run is promoted to the background",
 	)
 	retention := flags.Duration(
 		"retention",
@@ -78,19 +97,43 @@ func serve(args []string) error {
 		//nolint:errcheck // FlagSet usage callbacks cannot return output errors.
 		_, _ = fmt.Fprintln(
 			flags.Output(),
-			"Usage: just-mcp-work serve [--root <dir>] [--timeout <duration>] "+
+			"Usage: just-mcp-work serve [--root <dir>] [--timeout <duration>] [--sync-deadline <duration>] "+
 				"[--retention <duration>] [--exclude <glob>,...]",
 		)
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return nil
+			return serveOptions{HelpOnly: true}, nil
 		}
-		return fmt.Errorf("parse serve flags: %w", err)
+		return serveOptions{}, fmt.Errorf("parse serve flags: %w", err)
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("serve accepts no positional arguments")
+		return serveOptions{}, fmt.Errorf("serve accepts no positional arguments")
+	}
+	if *timeout < 0 {
+		return serveOptions{}, fmt.Errorf("timeout must not be negative")
+	}
+	if *timeout > 0 && *timeout < time.Millisecond {
+		return serveOptions{}, fmt.Errorf("timeout must be zero or at least 1ms")
+	}
+	return serveOptions{
+		Root:             *root,
+		Timeout:          *timeout,
+		TimeoutUnlimited: *timeout == 0,
+		SyncDeadline:     *syncDeadline,
+		Retention:        *retention,
+		Exclude:          splitCSV(*exclude),
+	}, nil
+}
+
+func serve(args []string) error {
+	options, err := parseServeOptions(args)
+	if err != nil {
+		return err
+	}
+	if options.HelpOnly {
+		return nil
 	}
 
 	registry, err := runner.NewRegistry(
@@ -101,7 +144,7 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("create runner registry: %w", err)
 	}
-	workspaceRegistry, err := workspace.NewRegistry(*root, registry, splitCSV(*exclude))
+	workspaceRegistry, err := workspace.NewRegistry(options.Root, registry, options.Exclude)
 	if err != nil {
 		return fmt.Errorf("create workspace registry: %w", err)
 	}
@@ -114,7 +157,13 @@ func serve(args []string) error {
 		workspaceRegistry,
 		registry,
 		store,
-		mcpserver.Config{Timeout: *timeout, Retention: *retention, Logger: logger},
+		mcpserver.Config{
+			Timeout:          options.Timeout,
+			TimeoutUnlimited: options.TimeoutUnlimited,
+			SyncDeadline:     options.SyncDeadline,
+			Retention:        options.Retention,
+			Logger:           logger,
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("create MCP server: %w", err)

@@ -48,8 +48,22 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	}
 }
 
-func TestPromptDescribesShellCommand(t *testing.T) {
-	for _, expected := range []string{"run_shell_command", "working_directory", "run_task"} {
+func TestPromptDescribesRunRecovery(t *testing.T) {
+	for _, expected := range []string{
+		"run_shell_command",
+		"working_directory",
+		"run_task",
+		"start_task",
+		"wait_run",
+		"max_wait_ms: 0",
+		"get_run_status",
+		"tail_bytes: 0",
+		"last_output_age_ms",
+		"max_depth",
+		"include_hidden",
+		"runner_mismatch",
+		"cannot be widened",
+	} {
 		if !strings.Contains(Prompt, expected) {
 			t.Errorf("Prompt does not mention %q", expected)
 		}

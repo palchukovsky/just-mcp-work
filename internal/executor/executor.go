@@ -19,9 +19,10 @@ import (
 
 // Config controls generic process execution behavior.
 type Config struct {
-	Timeout  time.Duration
-	TailSize int
-	Grace    time.Duration
+	Timeout          time.Duration
+	TimeoutUnlimited bool
+	TailSize         int
+	Grace            time.Duration
 }
 
 // Result is the compact receipt returned to callers.
@@ -39,26 +40,342 @@ type Result struct {
 	LogsReady  bool            `json:"logs_available"`
 }
 
-// Execute starts cmd without changing the process working directory.
+// Run is one started process that can be observed or stopped independently of a request.
 //
-//nolint:gocyclo // Process completion, timeout, and cancellation have distinct states.
+//nolint:govet // Fields stay grouped by process lifecycle ownership.
+type Run struct {
+	cmd        *exec.Cmd
+	handle     *runstore.Handle
+	config     Config
+	stdoutTail *Tail
+	stderrTail *Tail
+	killTree   func()
+	cleanup    func()
+	done       chan struct{}
+	stop       chan stopRequest
+	stopOnce   sync.Once
+
+	mu                   sync.RWMutex
+	meta                 runstore.Meta
+	result               Result
+	finalErr             error
+	metadataRepairNeeded bool
+}
+
+type stopRequest struct {
+	status  runstore.Status
+	message string
+	errText string
+}
+
+// Start starts cmd without binding its lifetime to an MCP request context.
+func Start(cmd *exec.Cmd, handle *runstore.Handle, config Config) (*Run, error) {
+	if cmd == nil || handle == nil {
+		return nil, fmt.Errorf("command and run handle are required")
+	}
+	config = normalizeConfig(config)
+	run := &Run{
+		cmd:        cmd,
+		handle:     handle,
+		config:     config,
+		stdoutTail: NewTail(config.TailSize),
+		stderrTail: NewTail(config.TailSize),
+		done:       make(chan struct{}),
+		stop:       make(chan stopRequest, 1),
+		meta:       handle.Meta,
+	}
+	cmd.Stdin = nil
+	cmd.Stdout = io.MultiWriter(handle.Stdout(), run.stdoutTail)
+	cmd.Stderr = io.MultiWriter(handle.Stderr(), run.stderrTail)
+	cmd.WaitDelay = config.Grace
+	prepare(cmd)
+	if err := cmd.Start(); err != nil {
+		run.complete(
+			compact(
+				handle.Meta,
+				false,
+				-1,
+				runstore.StatusSpawnError,
+				"Failed to start task",
+				run.stderrTail.String(),
+				run.stdoutTail.String(),
+			),
+			handle.Finish(
+				runstore.StatusSpawnError,
+				-1,
+				err.Error(),
+				run.stdoutTail.Truncated(),
+				run.stderrTail.Truncated(),
+			),
+		)
+		return run, fmt.Errorf("start task process: %w", err)
+	}
+	cleanup, killTree, attachErr := attach(cmd)
+	run.cleanup = cleanup
+	run.killTree = killTree
+	if attachErr != nil {
+		run.failSetup(attachErr, "Failed to prepare task process")
+		return run, attachErr
+	}
+	handle.Meta.PID = cmd.Process.Pid
+	handle.Meta.ProcessIdentity = runstore.ProcessIdentity(handle.Meta.PID)
+	if err := handle.PersistRunning(); err != nil {
+		// A metadata write failure must not kill a started process: the run keeps
+		// going and reports the failure through its own stderr stream.
+		if warningErr := writeExecutorWarning(
+			handle,
+			fmt.Errorf("publish running metadata: %w", err),
+		); warningErr != nil {
+			handle.Meta.Error = warningErr.Error()
+		}
+	}
+	run.meta = handle.Meta
+	go run.await()
+	return run, nil
+}
+
+func normalizeConfig(config Config) Config {
+	if config.TimeoutUnlimited {
+		config.Timeout = 0
+	} else if config.Timeout <= 0 {
+		config.Timeout = 15 * time.Minute
+	}
+	if config.TailSize <= 0 {
+		config.TailSize = 64 << 10
+	}
+	if config.Grace <= 0 {
+		config.Grace = 2 * time.Second
+	}
+	return config
+}
+
+func (r *Run) failSetup(err error, message string) {
+	if r.killTree != nil {
+		r.killTree()
+	} else if r.cmd.Process != nil {
+		//nolint:errcheck // The setup failure remains the actionable error.
+		_ = r.cmd.Process.Kill()
+	}
+	waitErr := r.cmd.Wait()
+	if r.cleanup != nil {
+		r.cleanup()
+	}
+	finalErr := r.handle.Finish(
+		runstore.StatusSpawnError,
+		-1,
+		err.Error(),
+		r.stdoutTail.Truncated(),
+		r.stderrTail.Truncated(),
+	)
+	r.complete(
+		compact(
+			r.handle.Meta,
+			false,
+			-1,
+			runstore.StatusSpawnError,
+			message,
+			r.stderrTail.String(),
+			r.stdoutTail.String(),
+		),
+		errors.Join(err, waitErr, finalErr),
+	)
+}
+
+func (r *Run) await() {
+	if r.cleanup != nil {
+		defer r.cleanup()
+	}
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- r.cmd.Wait() }()
+	var timeout <-chan time.Time
+	var timer *time.Timer
+	if !r.config.TimeoutUnlimited {
+		timer = time.NewTimer(r.config.Timeout)
+		defer timer.Stop()
+		timeout = timer.C
+	}
+
+	var (
+		waitErr error
+		status  = runstore.StatusOK
+		message = "OK"
+		errText string
+	)
+	select {
+	case waitErr = <-waitDone:
+		if waitErr != nil {
+			status = runstore.StatusNonzero
+			message = "Task exited with a non-zero status"
+		}
+	case <-timeout:
+		status = runstore.StatusTimeout
+		message = fmt.Sprintf(
+			"Task exceeded configured timeout of %s; adjust --timeout or JMW_TIMEOUT.",
+			r.config.Timeout,
+		)
+		errText = message
+		terminate(r.cmd, r.config.Grace, r.killTree)
+		waitErr = <-waitDone
+	case request := <-r.stop:
+		status = request.status
+		message = request.message
+		errText = request.errText
+		terminate(r.cmd, r.config.Grace, r.killTree)
+		waitErr = <-waitDone
+	}
+	if errors.Is(waitErr, exec.ErrWaitDelay) && r.cmd.ProcessState != nil && r.cmd.ProcessState.Success() {
+		waitErr = nil
+	}
+	exitCode := 0
+	if r.cmd.ProcessState != nil {
+		exitCode = r.cmd.ProcessState.ExitCode()
+	}
+	if status == runstore.StatusOK && waitErr != nil {
+		status = runstore.StatusNonzero
+		message = "Task exited with a non-zero status"
+	}
+	if errText == "" {
+		errText = errorText(waitErr, status)
+	}
+	finalErr := r.handle.Finish(
+		status,
+		exitCode,
+		errText,
+		r.stdoutTail.Truncated(),
+		r.stderrTail.Truncated(),
+	)
+	r.complete(
+		compact(
+			r.handle.Meta,
+			status == runstore.StatusOK,
+			exitCode,
+			status,
+			message,
+			r.stderrTail.String(),
+			r.stdoutTail.String(),
+		),
+		finalErr,
+	)
+}
+
+func (r *Run) complete(result Result, finalErr error) {
+	r.mu.Lock()
+	r.meta = r.handle.Meta
+	r.result = result
+	r.finalErr = finalErr
+	r.metadataRepairNeeded = errors.Is(finalErr, runstore.ErrFinalMetadataPersistence)
+	r.mu.Unlock()
+	close(r.done)
+}
+
+// Done closes when the process and its ledger entry are terminal.
+func (r *Run) Done() <-chan struct{} { return r.done }
+
+// Snapshot returns the latest non-blocking receipt.
+func (r *Run) Snapshot() Result {
+	r.mu.RLock()
+	if r.result.RunID != "" {
+		result := r.result
+		r.mu.RUnlock()
+		return result
+	}
+	meta := r.meta
+	r.mu.RUnlock()
+	return compact(
+		meta,
+		false,
+		0,
+		runstore.StatusRunning,
+		"Task is running",
+		r.stderrTail.String(),
+		r.stdoutTail.String(),
+	)
+}
+
+// Wait returns when the run finishes or ctx expires without stopping the process.
+func (r *Run) Wait(ctx context.Context) Result {
+	select {
+	case <-r.done:
+	case <-ctx.Done():
+	}
+	return r.Snapshot()
+}
+
+// Stop terminates a running process and records it as cancelled.
+func (r *Run) Stop() error { return r.StopWithReason("Task cancelled") }
+
+// StopWithReason terminates a running process and stores reason as the ledger
+// error text. The receipt message stays the stable cancellation message.
+func (r *Run) StopWithReason(reason string) error {
+	select {
+	case <-r.done:
+		return r.Err()
+	default:
+	}
+	r.stopOnce.Do(func() {
+		r.stop <- stopRequest{
+			status:  runstore.StatusCancelled,
+			message: "Task cancelled",
+			errText: reason,
+		}
+	})
+	<-r.done
+	return r.Err()
+}
+
+// Err returns a ledger finalization error, if one occurred.
+func (r *Run) Err() error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.finalErr
+}
+
+// NeedsMetadataRepair reports whether the terminal ledger write failed. A run
+// may have another final error without needing to stay retained by the manager.
+func (r *Run) NeedsMetadataRepair() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.metadataRepairNeeded
+}
+
+// Meta returns the newest in-memory metadata snapshot for this run.
+func (r *Run) Meta() runstore.Meta {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	meta := r.meta
+	meta.Args = append([]string(nil), meta.Args...)
+	return meta
+}
+
+// RepairFinalMetadata retries a terminal metadata write that failed during
+// finalization. It never reopens or rewrites the run logs.
+func (r *Run) RepairFinalMetadata() error {
+	select {
+	case <-r.done:
+	default:
+		return fmt.Errorf("run %q is not terminal", r.Snapshot().RunID)
+	}
+	if err := r.handle.PersistFinal(); err != nil {
+		return fmt.Errorf("persist final run metadata: %w", err)
+	}
+	r.mu.Lock()
+	r.metadataRepairNeeded = false
+	r.mu.Unlock()
+	return nil
+}
+
+// Execute starts cmd and preserves the synchronous cancellation semantics.
 func Execute(
 	ctx context.Context,
 	cmd *exec.Cmd,
 	handle *runstore.Handle,
 	config Config,
 ) (Result, error) {
-	if cmd == nil || handle == nil {
-		return Result{}, fmt.Errorf("command and run handle are required")
-	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		finalErr := handle.Finish(
-			runstore.StatusCancelled,
-			-1,
-			ctxErr.Error(),
-			false,
-			false,
-		)
+		if cmd == nil || handle == nil {
+			return Result{}, fmt.Errorf("command and run handle are required")
+		}
+		finalErr := handle.Finish(runstore.StatusCancelled, -1, ctxErr.Error(), false, false)
 		return compact(
 			handle.Meta,
 			false,
@@ -69,133 +386,20 @@ func Execute(
 			"",
 		), finalErr
 	}
-	if config.Timeout <= 0 {
-		config.Timeout = 15 * time.Minute
+	run, startErr := Start(cmd, handle, config)
+	if run == nil {
+		return Result{}, startErr
 	}
-	if config.TailSize <= 0 {
-		config.TailSize = 64 << 10
+	if startErr != nil {
+		return run.Snapshot(), errors.Join(startErr, run.Err())
 	}
-	if config.Grace <= 0 {
-		config.Grace = 2 * time.Second
-	}
-	stdoutTail := NewTail(config.TailSize)
-	stderrTail := NewTail(config.TailSize)
-	cmd.Stdin = nil
-	cmd.Stdout = io.MultiWriter(handle.Stdout(), stdoutTail)
-	cmd.Stderr = io.MultiWriter(handle.Stderr(), stderrTail)
-	cmd.WaitDelay = config.Grace
-	prepare(cmd)
-	if err := cmd.Start(); err != nil {
-		finalErr := handle.Finish(
-			runstore.StatusSpawnError,
-			-1,
-			err.Error(),
-			stdoutTail.Truncated(),
-			stderrTail.Truncated(),
-		)
-		return compact(
-			handle.Meta,
-			false,
-			-1,
-			runstore.StatusSpawnError,
-			"Failed to start task",
-			stderrTail.String(),
-			stdoutTail.String(),
-		), errors.Join(err, finalErr)
-	}
-	handle.Meta.PID = cmd.Process.Pid
-	handle.Meta.ProcessIdentity = runstore.ProcessIdentity(handle.Meta.PID)
-	if err := handle.PersistRunning(); err != nil {
-		if warningErr := writeExecutorWarning(
-			handle,
-			fmt.Errorf("publish running metadata: %w", err),
-		); warningErr != nil {
-			handle.Meta.Error = warningErr.Error()
-		}
-	}
-	cleanup, killTree, attachErr := attach(cmd)
-	if attachErr != nil {
-		if killTree != nil {
-			killTree()
-		} else if cmd.Process != nil {
-			//nolint:errcheck // The setup failure remains the actionable error.
-			_ = cmd.Process.Kill()
-		}
-		waitErr := cmd.Wait()
-		finalErr := handle.Finish(
-			runstore.StatusSpawnError,
-			-1,
-			attachErr.Error(),
-			stdoutTail.Truncated(),
-			stderrTail.Truncated(),
-		)
-		return compact(
-			handle.Meta,
-			false,
-			-1,
-			runstore.StatusSpawnError,
-			"Failed to prepare task process",
-			stderrTail.String(),
-			stdoutTail.String(),
-		), errors.Join(attachErr, waitErr, finalErr)
-	}
-	if cleanup != nil {
-		defer cleanup()
-	}
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	timer := time.NewTimer(config.Timeout)
-	defer timer.Stop()
-
-	var waitErr error
-	status := runstore.StatusOK
-	message := "OK"
 	select {
-	case waitErr = <-done:
-		if waitErr != nil {
-			status = runstore.StatusNonzero
-			message = "Task exited with a non-zero status"
-		}
-	case <-timer.C:
-		status = runstore.StatusTimeout
-		message = "Task timed out"
-		terminate(cmd, config.Grace, killTree)
-		waitErr = <-done
+	case <-run.Done():
+		return run.Snapshot(), run.Err()
 	case <-ctx.Done():
-		status = runstore.StatusCancelled
-		message = "Task cancelled"
-		terminate(cmd, config.Grace, killTree)
-		waitErr = <-done
+		stopErr := run.Stop()
+		return run.Snapshot(), errors.Join(stopErr, run.Err())
 	}
-	if errors.Is(waitErr, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
-		waitErr = nil
-	}
-
-	exitCode := 0
-	if cmd.ProcessState != nil {
-		exitCode = cmd.ProcessState.ExitCode()
-	}
-	if status == runstore.StatusOK && waitErr != nil {
-		status = runstore.StatusNonzero
-		message = "Task exited with a non-zero status"
-	}
-	finalErr := handle.Finish(
-		status,
-		exitCode,
-		errorText(waitErr, status),
-		stdoutTail.Truncated(),
-		stderrTail.Truncated(),
-	)
-	return compact(
-		handle.Meta,
-		status == runstore.StatusOK,
-		exitCode,
-		status,
-		message,
-		stderrTail.String(),
-		stdoutTail.String(),
-	), finalErr
 }
 
 func compact(

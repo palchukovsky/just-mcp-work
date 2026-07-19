@@ -14,6 +14,9 @@ func ProcessIdentity(pid int) string {
 	return identity
 }
 
+// ProcessMatches reports whether pid is alive and still has the expected identity.
+func ProcessMatches(pid int, expected string) bool { return processMatches(pid, expected) }
+
 func processMatches(pid int, expected string) bool {
 	identity, alive := processIdentity(pid)
 	if !alive {

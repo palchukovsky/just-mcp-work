@@ -132,6 +132,20 @@ func TestDiscoverSkipsJustfileIncludedByParentProject(t *testing.T) {
 	if want := []string{".", "invalid"}; !reflect.DeepEqual(paths, want) {
 		t.Fatalf("project paths = %#v, want %#v", paths, want)
 	}
+	scoped, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: "nested", MaxDepth: 0, IncludeHidden: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(scoped), []string{"nested"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("scoped project paths = %#v, want %#v", got, want)
+	}
+	found, err := registry.Find(context.Background(), "nested")
+	if err != nil || found.RelPath != "nested" {
+		t.Fatalf("Find scoped project = %#v, %v", found, err)
+	}
 }
 
 func TestDiscoverSuppressesOnlyIncludedJustRunnerAfterFullScan(t *testing.T) {
@@ -172,8 +186,19 @@ func TestDiscoverSuppressesOnlyIncludedJustRunnerAfterFullScan(t *testing.T) {
 	if len(sharedProject.Tasks["just"]) != 0 || len(sharedProject.Tasks["make"]) != 1 {
 		t.Fatalf("shared tasks = %#v", sharedProject.Tasks)
 	}
+	found, err := registry.Find(context.Background(), "a/shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"just", "make"}; !reflect.DeepEqual(found.Runners, want) {
+		t.Fatalf("found shared runners = %#v, want %#v", found.Runners, want)
+	}
+	if len(found.Tasks["just"]) != 1 || len(found.Tasks["make"]) != 1 {
+		t.Fatalf("found shared tasks = %#v", found.Tasks)
+	}
 }
 
+//nolint:gocyclo // This test pins every independent scan-filter boundary.
 func TestDiscoverFilterPrunesBeforeInspection(t *testing.T) {
 	root := t.TempDir()
 	for _, path := range []string{
@@ -236,12 +261,42 @@ func TestDiscoverFilterPrunesBeforeInspection(t *testing.T) {
 	if got, want := projectPaths(projects), []string{".", ".hidden", "top", "top/deeper"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unlimited project paths = %#v, want %#v", got, want)
 	}
+
+	projects, _, err = registry.Discover(
+		context.Background(),
+		Filter{Path: ".hidden", MaxDepth: 0},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{".hidden"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("explicit hidden base paths = %#v, want %#v", got, want)
+	}
+	if _, _, discoverErr := registry.Discover(
+		context.Background(),
+		Filter{Path: "target", MaxDepth: 0},
+	); discoverErr == nil {
+		t.Fatal("Discover accepted a built-in excluded base")
+	}
+
+	writeFile(t, filepath.Join(root, "ignored", "nested", "justfile"), "fixture")
+	excludedRegistry, err := NewRegistry(root, runners, []string{"ignored"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := excludedRegistry.Discover(
+		context.Background(),
+		Filter{Path: "ignored/nested", MaxDepth: 0},
+	); err == nil {
+		t.Fatal("Discover accepted a base below a user-excluded directory")
+	}
 }
 
 func TestDiscoverFilterKeepsProjectDetailsAndValidatesInput(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "dual", "justfile"), "fixture")
 	writeFile(t, filepath.Join(root, "dual", "Makefile"), "fixture")
+	writeFile(t, filepath.Join(root, "just-only", "justfile"), "fixture")
 	runners, err := runner.NewRegistry(fakeJustRunner{}, fakeMakeRunner{})
 	if err != nil {
 		t.Fatal(err)
@@ -262,6 +317,19 @@ func TestDiscoverFilterKeepsProjectDetailsAndValidatesInput(t *testing.T) {
 	}
 	if got, want := projectAt(t, projects, "dual").Runners, []string{"just", "make"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("filtered project runners = %#v, want %#v", got, want)
+	}
+	projects, pruned, err = registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: -1, Runners: []string{"make"}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{"dual"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("make-filtered project paths = %#v, want %#v", got, want)
+	}
+	if pruned.RunnerMismatch != 1 {
+		t.Fatalf("runner mismatch count = %d, want 1", pruned.RunnerMismatch)
 	}
 	if _, _, err := registry.Discover(
 		context.Background(),
@@ -369,6 +437,7 @@ func (fakeJustRunner) BuildCommand(
 	return nil, errors.New("not used")
 }
 
+//nolint:govet // Embedded runner keeps the test double compact.
 type countingFakeJustRunner struct {
 	calls *int
 	fakeJustRunner

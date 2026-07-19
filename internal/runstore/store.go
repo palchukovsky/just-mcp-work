@@ -12,8 +12,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -35,6 +37,10 @@ const (
 	StatusSpawnError Status = "spawn_error"
 )
 
+// ErrFinalMetadataPersistence marks a terminal metadata write failure. Other
+// finalization errors, such as closing a log, do not require ledger repair.
+var ErrFinalMetadataPersistence = errors.New("final run metadata persistence failed")
+
 // Meta is persisted as <run>/meta.json.
 //
 //nolint:govet // Field order follows the stable on-disk metadata schema.
@@ -48,6 +54,7 @@ type Meta struct {
 	StartedAt       time.Time `json:"started_at"`
 	EndedAt         time.Time `json:"ended_at"`
 	DurationMS      int64     `json:"duration_ms,omitempty"`
+	TaskTimeoutMS   *int64    `json:"task_timeout_ms,omitempty"`
 	ExitCode        int       `json:"exit_code"`
 	Status          Status    `json:"status"`
 	RunnerVersion   string    `json:"runner_version,omitempty"`
@@ -60,6 +67,16 @@ type Meta struct {
 	StdoutTruncated bool      `json:"stdout_truncated,omitempty"`
 	StderrTruncated bool      `json:"stderr_truncated,omitempty"`
 	Error           string    `json:"error,omitempty"`
+}
+
+// LogState is a filesystem-derived snapshot of a run's two log files.
+//
+//nolint:govet // Field order follows the status response shape.
+type LogState struct {
+	StdoutBytes  int64
+	StderrBytes  int64
+	LastOutputAt time.Time
+	NoOutputYet  bool
 }
 
 // Store owns one workspace's run ledger.
@@ -180,6 +197,15 @@ func (h *Handle) PersistRunning() error {
 	return h.store.writeMeta(h.dir, h.Meta)
 }
 
+// PersistFinal retries publication of terminal metadata after a prior Finish
+// write failed. Log files are already closed by Finish and are not touched.
+func (h *Handle) PersistFinal() error {
+	if h.Meta.Status == StatusRunning {
+		return fmt.Errorf("cannot republish running run %q as terminal", h.Meta.RunID)
+	}
+	return h.store.writeMeta(h.dir, h.Meta)
+}
+
 // Finish finalizes a run atomically after both stream files have been closed.
 func (h *Handle) Finish(
 	status Status,
@@ -203,6 +229,9 @@ func (h *Handle) Finish(
 		h.Meta.StderrBytes = info.Size()
 	}
 	writeErr := h.store.writeMeta(h.dir, h.Meta)
+	if writeErr != nil {
+		writeErr = errors.Join(ErrFinalMetadataPersistence, writeErr)
+	}
 	h.store.markActive(h.Meta.RunID, false)
 	return errors.Join(closeErr, writeErr)
 }
@@ -259,6 +288,146 @@ func (s *Store) ReadLog(runID, stream string, offset, limit int64) ([]byte, erro
 		return nil, fmt.Errorf("read log file: %w", err)
 	}
 	return data, nil
+}
+
+// ReadLogTail reads up to maxBytes from the end of a log without splitting a UTF-8 rune.
+func (s *Store) ReadLogTail(runID, stream string, maxBytes int64) ([]byte, error) {
+	if maxBytes < 0 {
+		return nil, fmt.Errorf("max bytes must not be negative")
+	}
+	if maxBytes == 0 {
+		return nil, nil
+	}
+	if stream != "stdout" && stream != "stderr" {
+		return nil, fmt.Errorf("stream must be stdout or stderr")
+	}
+	dir, err := s.existingRunDir(runID)
+	if err != nil {
+		return nil, fmt.Errorf("resolve run directory: %w", err)
+	}
+	path := filepath.Join(dir, stream+".log")
+	info, err := safeRegularFile(path)
+	if err != nil {
+		return nil, err
+	}
+	start := max(info.Size()-maxBytes, 0)
+	// #nosec G304 -- path is constructed from a validated run ID and fixed stream name.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open log file: %w", err)
+	}
+	defer func() {
+		//nolint:errcheck // Read errors take precedence and Close cannot be returned here.
+		_ = file.Close()
+	}()
+	if _, seekErr := file.Seek(start, io.SeekStart); seekErr != nil {
+		return nil, fmt.Errorf("seek log tail: %w", seekErr)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read log tail: %w", err)
+	}
+	if start > 0 {
+		for len(data) > 0 && !utf8.RuneStart(data[0]) {
+			data = data[1:]
+		}
+	}
+	return data, nil
+}
+
+// LogState returns byte counts and the newest non-empty log-file modification time.
+func (s *Store) LogState(runID string) (LogState, error) {
+	dir, err := s.existingRunDir(runID)
+	if err != nil {
+		return LogState{}, fmt.Errorf("resolve run directory: %w", err)
+	}
+	stdout, err := safeRegularFile(filepath.Join(dir, "stdout.log"))
+	if err != nil {
+		return LogState{}, err
+	}
+	stderr, err := safeRegularFile(filepath.Join(dir, "stderr.log"))
+	if err != nil {
+		return LogState{}, err
+	}
+	state := LogState{StdoutBytes: stdout.Size(), StderrBytes: stderr.Size()}
+	if stdout.Size() > 0 {
+		state.LastOutputAt = stdout.ModTime().UTC()
+	}
+	if stderr.Size() > 0 && stderr.ModTime().After(state.LastOutputAt) {
+		state.LastOutputAt = stderr.ModTime().UTC()
+	}
+	state.NoOutputYet = state.LastOutputAt.IsZero()
+	return state, nil
+}
+
+// ListRecent returns up to limit persisted runs in reverse UUIDv7 order.
+func (s *Store) ListRecent(limit int) ([]Meta, error) {
+	runs, _, err := s.ListRecentPage(limit, "")
+	return runs, err
+}
+
+// ListRecentPage returns a page of persisted runs in reverse UUIDv7 order.
+//
+// Cursor is an exclusive UUIDv7 boundary returned by a previous page. hasMore
+// means a later page may contain additional valid ledger entries.
+//
+//nolint:gocyclo // Each filesystem validation branch protects the ledger boundary.
+func (s *Store) ListRecentPage(limit int, cursor string) ([]Meta, bool, error) {
+	if limit <= 0 {
+		return []Meta{}, false, nil
+	}
+	if cursor != "" {
+		parsed, err := uuid.Parse(cursor)
+		if err != nil || parsed.Version() != 7 || parsed.String() != cursor {
+			return nil, false, fmt.Errorf("invalid run cursor %q", cursor)
+		}
+	}
+	entries, err := os.ReadDir(s.logRoot)
+	if err != nil {
+		return nil, false, fmt.Errorf("list run logs: %w", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			continue
+		}
+		parsed, parseErr := uuid.Parse(entry.Name())
+		if parseErr != nil || parsed.Version() != 7 || parsed.String() != entry.Name() {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(names)))
+	runs := make([]Meta, 0, min(limit, len(names)))
+	for _, name := range names {
+		if cursor != "" && name >= cursor {
+			continue
+		}
+		dir, dirErr := s.existingRunDir(name)
+		if dirErr != nil {
+			continue
+		}
+		meta, metaErr := readMeta(filepath.Join(dir, "meta.json"))
+		if metaErr != nil {
+			continue
+		}
+		if len(runs) == limit {
+			return runs, true, nil
+		}
+		runs = append(runs, meta)
+	}
+	return runs, false, nil
+}
+
+func safeRegularFile(path string) (os.FileInfo, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect log file: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("refusing non-regular log file")
+	}
+	return info, nil
 }
 
 // Cleanup deletes safely-contained, terminal runs older than retention.

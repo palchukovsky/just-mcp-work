@@ -126,6 +126,90 @@ func TestReadLogValidatesPagingAndPath(t *testing.T) {
 	}
 }
 
+func TestReadLogTailAndLogState(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:tail"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, writeErr := handle.Stdout().Write([]byte("abcdef😀Z")); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	tail, err := store.ReadLogTail(handle.Meta.RunID, "stdout", 3)
+	if err != nil || string(tail) != "Z" {
+		t.Fatalf("ReadLogTail = %q, %v", tail, err)
+	}
+	state, err := store.LogState(handle.Meta.RunID)
+	if err != nil || state.StdoutBytes == 0 || state.NoOutputYet || state.LastOutputAt.IsZero() {
+		t.Fatalf("LogState = %#v, %v", state, err)
+	}
+	if _, err := store.ReadLogTail(handle.Meta.RunID, "stdout", -1); err == nil {
+		t.Fatal("negative tail size was accepted")
+	}
+	if err := handle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestListRecentSkipsInvalidNewerEntries(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid, err := store.Begin(Meta{TaskID: "just:valid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishErr := valid.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+		t.Fatal(finishErr)
+	}
+	for range 2 {
+		id := uuid.Must(uuid.NewV7()).String()
+		if id <= valid.Meta.RunID {
+			t.Fatal("new UUIDv7 is not newer than the valid run")
+		}
+		if mkdirErr := os.Mkdir(filepath.Join(store.logRoot, id), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+	}
+	runs, err := store.ListRecent(1)
+	if err != nil || len(runs) != 1 || runs[0].RunID != valid.Meta.RunID {
+		t.Fatalf("ListRecent = %#v, %v, want the older valid run", runs, err)
+	}
+}
+
+func TestListRecentPageUsesExclusiveCursor(t *testing.T) {
+	store, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for range 2 {
+		handle, beginErr := store.Begin(Meta{TaskID: "just:page"})
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if finishErr := handle.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+			t.Fatal(finishErr)
+		}
+		ids = append(ids, handle.Meta.RunID)
+	}
+	first, more, err := store.ListRecentPage(1, "")
+	if err != nil || !more || len(first) != 1 || first[0].RunID != ids[1] {
+		t.Fatalf("first page = %#v, more=%t, err=%v", first, more, err)
+	}
+	second, more, err := store.ListRecentPage(1, first[0].RunID)
+	if err != nil || more || len(second) != 1 || second[0].RunID != ids[0] {
+		t.Fatalf("second page = %#v, more=%t, err=%v", second, more, err)
+	}
+	if _, _, err := store.ListRecentPage(1, "not-a-run"); err == nil {
+		t.Fatal("invalid cursor was accepted")
+	}
+}
+
 func TestCleanupSkipsActiveAndDeletesFinishedStaleRun(t *testing.T) {
 	store, err := New(t.TempDir())
 	if err != nil {

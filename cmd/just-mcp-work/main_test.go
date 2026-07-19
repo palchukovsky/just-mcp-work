@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRunPrintsVersionWithFlagAlias(t *testing.T) {
@@ -86,4 +87,37 @@ func captureStdout(t *testing.T, fn func()) string {
 		t.Fatal(closeErr)
 	}
 	return string(data)
+}
+
+func TestParseServeOptionsResolvesDeadlinePrecedence(t *testing.T) {
+	t.Setenv("JMW_SYNC_DEADLINE", "90s")
+	options, err := parseServeOptions(nil)
+	if err != nil || options.SyncDeadline != 90*time.Second {
+		t.Fatalf("environment deadline = %v, %v, want 90s", options.SyncDeadline, err)
+	}
+	options, err = parseServeOptions([]string{"--sync-deadline", "5s"})
+	if err != nil || options.SyncDeadline != 5*time.Second {
+		t.Fatalf("flag deadline = %v, %v, want 5s", options.SyncDeadline, err)
+	}
+	t.Setenv("JMW_SYNC_DEADLINE", "not-a-duration")
+	options, err = parseServeOptions(nil)
+	if err != nil || options.SyncDeadline != time.Minute {
+		t.Fatalf("fallback deadline = %v, %v, want 1m", options.SyncDeadline, err)
+	}
+	if _, err := parseServeOptions([]string{"unexpected"}); err == nil {
+		t.Fatal("positional arguments must be rejected")
+	}
+}
+
+func TestParseServeOptionsAllowsUnlimitedTimeout(t *testing.T) {
+	options, err := parseServeOptions([]string{"--timeout", "0"})
+	if err != nil || !options.TimeoutUnlimited || options.Timeout != 0 {
+		t.Fatalf("zero timeout options = %#v, %v", options, err)
+	}
+	if _, err := parseServeOptions([]string{"--timeout", "-1s"}); err == nil {
+		t.Fatal("negative timeout must be rejected")
+	}
+	if _, err := parseServeOptions([]string{"--timeout", "500us"}); err == nil {
+		t.Fatal("sub-millisecond timeout must be rejected")
+	}
 }

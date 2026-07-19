@@ -94,18 +94,47 @@ The server discovers nested projects on demand. Use `init --help` and
 
 | Tool | Purpose |
 | --- | --- |
-| `list_projects` | List discovered projects and runner errors. |
-| `list_tasks` | List tasks and parameters for a project. |
-| `run_task` | Start a selected task with separate argument values. |
-| `run_shell_command` | Run a shell command inside the workspace. |
+| `list_projects` | List filtered projects and runner errors. |
+| `list_tasks` | List tasks, parameters, and duration statistics. |
+| `run_task` | Run a task, promoting a long run to the background. |
+| `start_task` | Start a selected task asynchronously. |
+| `run_shell_command` | Run a shell command; long runs go to background. |
+| `start_shell_command` | Start a shell command asynchronously. |
 | `get_run` | Read stored run metadata. |
 | `get_run_logs` | Page stdout or stderr by byte offset. |
+| `get_run_status` | Read run liveness, output, and duration statistics. |
+| `wait_run` | Wait for completion without killing a run on a wait timeout. |
+| `stop_run` | Stop a running task owned by this server. |
+| `list_runs` | List recent runs, newest first, with the scanned count. |
 | `version_status` | Compare this binary with the latest stable GitHub tag. |
+
+`list_projects` defaults to the workspace root at depth 1 and skips dot-directories.
+Use `path` to choose a subtree, `max_depth` (`-1` is unlimited) or
+`include_hidden` to widen directory coverage, and `runners` to restrict projects.
+`applied_filter.pruned.depth` and `.hidden` count skipped directory subtrees;
+`.runner_mismatch` counts inspected projects removed by `runners`. `excluded`
+reports directories skipped by the operator's policy and cannot be widened. This
+filtering applies only to the list: `list_tasks` and task tools can still address
+any discovered workspace project.
 
 Task IDs are runner-qualified, for example `just:build`, `cmake:build:debug`,
 or `make:test`. Make projects expose their explicit targets without running
-recipes during task discovery. `run_task` returns a short receipt; read output
-separately with `get_run_logs`.
+recipes during task discovery. For a short task, use `run_task`; it waits for up
+to `max_wait_ms`, `--sync-deadline`, or `JMW_SYNC_DEADLINE` (in that precedence
+order). A receipt with `status: "running"`, `completed: false`, and
+`promoted: true` is successful handoff to a background run, not a failure: use
+its `run_id` with `wait_run` or `get_run_status` and do not run the task again.
+Use `start_task` up front for a task with a long historical average.
+
+When an MCP client supplies a progress token, synchronous task calls publish the
+`run_id` immediately and report elapsed time, output age, and byte counts every
+10 seconds. `get_run_status`, `wait_run`, and `list_tasks` expose duration
+statistics derived from retained run metadata; aborted runs are counted but do
+not affect duration averages. `last_output_age_ms` is the anti-hang signal.
+
+`list_runs` returns a bounded page of newest ledger entries. It reports
+`scanned` and, when `truncated` is true, a `next_cursor` for the next page, so
+filters cannot silently hide matching older runs.
 
 `run_shell_command` is separate from project discovery: it accepts command
 text and an optional workspace-relative `working_directory` (default `.`), so
@@ -114,12 +143,22 @@ the current OS shell (`$SHELL`, falling back to `/bin/sh`, on Unix; `ComSpec`
 on Windows). The working directory must exist inside the workspace and cannot
 be a symlink.
 
+`get_run_status` is non-blocking. `wait_run` waits up to `max_wait_ms` (30s by
+default); set it to `0` for an immediate snapshot. Status tools return 4096
+tail bytes by default; set `tail_bytes` to `0` when output is not needed.
+
+Each task has a 15-minute timeout by default. Set `--timeout=0` or
+`JMW_TIMEOUT=0` to disable that timeout entirely; no task timer is created in
+that mode. The selected timeout is recorded with the run, so a later server
+configuration cannot misreport a foreign run's deadline.
+
 ## Configuration
 
 | Flag | Environment | Default |
 | --- | --- | --- |
 | `--root` | `JMW_ROOT` | Current directory |
-| `--timeout` | `JMW_TIMEOUT` | `15m` |
+| `--timeout` | `JMW_TIMEOUT` | `15m` (`0` disables the timeout) |
+| `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` |
 | `--retention` | `JMW_RETENTION` | `72h` |
 | `--exclude` | — | None |
 
