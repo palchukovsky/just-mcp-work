@@ -322,7 +322,13 @@ func resolveCodexConfigDirectory(scope string, resolvedScope string) (string, er
 		return "", fmt.Errorf("inspect Codex config directory %s: %w", directory, err)
 	}
 	if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
-		return "", fmt.Errorf("codex config directory %s is not a directory", directory)
+		// Windows directory junctions are reported by Lstat as irregular files.
+		// Follow the path once before rejecting it so junction-backed workspace
+		// configuration, such as the installer fallback, remains usable.
+		resolvedInfo, statErr := os.Stat(directory)
+		if statErr != nil || !resolvedInfo.IsDir() {
+			return "", fmt.Errorf("codex config directory %s is not a directory", directory)
+		}
 	}
 	resolvedDirectory, err := resolveWithinScope(resolvedScope, directory)
 	if err != nil {
@@ -354,7 +360,13 @@ func resolveCodexConfigFile(
 	if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
 		return "", fmt.Errorf("codex config %s is not a regular file", path)
 	}
-	resolvedPath, err := resolveWithinScope(resolvedScope, path)
+	// Resolve the directory before appending the file name. On Windows,
+	// EvalSymlinks can fail for a file addressed through a directory junction,
+	// even though the file is present in the junction target.
+	resolvedPath, err := resolveWithinScope(
+		resolvedScope,
+		filepath.Join(resolvedDirectory, filepath.Base(codexConfig)),
+	)
 	if err != nil {
 		return "", fmt.Errorf("resolve Codex config: %w", err)
 	}
@@ -369,7 +381,7 @@ func resolveCodexConfigFile(
 }
 
 func resolveWithinScope(scope string, path string) (string, error) {
-	resolved, err := filepath.EvalSymlinks(path)
+	resolved, err := resolvePath(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", path, err)
 	}
@@ -380,6 +392,25 @@ func resolveWithinScope(scope string, path string) (string, error) {
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
 		filepath.IsAbs(relative) {
 		return "", fmt.Errorf("%s resolves outside workspace scope %s", path, scope)
+	}
+	return resolved, nil
+}
+
+func resolvePath(path string) (string, error) {
+	link, err := os.Readlink(path)
+	if err == nil {
+		if !filepath.IsAbs(link) {
+			link = filepath.Join(filepath.Dir(path), link)
+		}
+		resolved, resolveErr := filepath.EvalSymlinks(link)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolve %s: %w", link, resolveErr)
+		}
+		return resolved, nil
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", path, err)
 	}
 	return resolved, nil
 }
