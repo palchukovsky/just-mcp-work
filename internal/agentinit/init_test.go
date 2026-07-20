@@ -48,21 +48,29 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	}
 }
 
-func TestPromptDescribesRunRecovery(t *testing.T) {
+func TestPromptDescribesCompactReceiptContract(t *testing.T) {
 	for _, expected := range []string{
+		"just-mcp-work (JMW)",
+		"compact execution receipt",
+		"save tokens",
 		"run_shell_command",
 		"working_directory",
 		"run_task",
+		"status: running",
 		"start_task",
 		"wait_run",
-		"max_wait_ms: 0",
 		"get_run_status",
+		"execution-and-receipt tool",
+		"not a universal shell wrapper",
+		"itself is the data",
+		"normal shell",
+		"read/navigation tool",
+		"ok: true",
+		"exit code 0",
+		"stdout_tail",
+		"stderr_tail",
+		"get_run_logs",
 		"tail_bytes: 0",
-		"last_output_age_ms",
-		"max_depth",
-		"include_hidden",
-		"runner_mismatch",
-		"cannot be widened",
 	} {
 		if !strings.Contains(Prompt, expected) {
 			t.Errorf("Prompt does not mention %q", expected)

@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/executor"
 	"github.com/palchukovsky/just-mcp-work/internal/runmanager"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
@@ -136,7 +137,10 @@ func (s *Server) Run(ctx context.Context) error {
 	}()
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "just-mcp-work", Version: version.Current().Display()},
-		&mcp.ServerOptions{Logger: s.config.Logger},
+		&mcp.ServerOptions{
+			Instructions: agentinit.Prompt,
+			Logger:       s.config.Logger,
+		},
 	)
 	mcp.AddTool(
 		server,
@@ -163,16 +167,18 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name: "run_task",
-			Description: "Run one discovered task. A running receipt with promoted: true is normal: " +
-				"use its run_id with wait_run or get_run_status, never start the task again.",
+			Description: "Run one discovered task. A running receipt with promoted: true is normal: use " +
+				"its run_id with wait_run or get_run_status, never start the task again.",
 		},
 		recoverTool(withUpdateNotification(s, s.runTask)),
 	)
 	mcp.AddTool(
 		server,
 		&mcp.Tool{
-			Name:        "start_task",
-			Description: "Start one discovered task asynchronously and return its run_id immediately.",
+			Name: "start_task",
+			Description: "Start one discovered task asynchronously and return its run_id immediately. " +
+				"Prefer this for long check/verify/CI-style gates; while a run_id is active, never " +
+				"launch the task again.",
 		},
 		recoverTool(withUpdateNotification(s, s.startTask)),
 	)
@@ -180,8 +186,11 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name: "run_shell_command",
-			Description: "Run a shell command. A running receipt with promoted: true is normal: follow its " +
-				"run_id instead of retrying the command.",
+			Description: "Run ad-hoc shell only when no discovered task maps to it. TRIP-WIRE: a command " +
+				"whose program is just, cargo, go, make, cmake, npm, ruff, black, or a discovered task/gate " +
+				"name must use run_task/start_task, never Bash. Direct Bash is only for read-only inspection " +
+				"with no task. A running receipt with promoted: true is normal: follow its run_id instead of " +
+				"retrying the command.",
 		},
 		recoverTool(withUpdateNotification(s, s.runShellCommand)),
 	)

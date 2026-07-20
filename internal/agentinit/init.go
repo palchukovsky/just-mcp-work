@@ -28,33 +28,64 @@ const (
 	codexTable  = "[mcp_servers.just-mcp-work]"
 )
 
-// Prompt is the canonical agent instruction managed by init.
-const Prompt = `This workspace exposes its runnable tasks through the just-mcp-work MCP server
-(currently the ` + "`just`" + `, ` + "`CMake`" + `, and ` + "`Make`" + ` runners). When running project tasks:
+// Prompt is the canonical JMW usage guidance served as the MCP server's instructions.
+const Prompt = `This workspace exposes runnable project tasks through just-mcp-work (JMW).
 
-- Discover tasks with ` + "`list_projects`" + ` and ` + "`list_tasks`" + ` instead of
-  reading build files. ` + "`list_projects`" + ` defaults to depth 1 without dot-directories;
-  use path to choose a subtree, max_depth or include_hidden to widen directory coverage, and runners
-  to restrict projects. ` + "`pruned.depth`" + ` and ` + "`pruned.hidden`" + ` count skipped directory
-  subtrees; ` + "`pruned.runner_mismatch`" + ` means relaxing runners may return more projects. Excluded
-  paths are configured by the operator and cannot be widened.
-- Run short tasks with ` + "`run_task`" + ` (project_path, task_id, arguments). A receipt with
-  ` + "`status: running`" + ` and a ` + "`run_id`" + ` is normal: follow it with ` + "`wait_run`" + ` or
-  ` + "`get_run_status`" + ` and never start the task again. Prefer ` + "`start_task`" + ` for a task
-  whose statistics show a long average duration. ` + "`wait_run`" + ` accepts ` + "`max_wait_ms: 0`" + ` for
-  an immediate snapshot; ` + "`get_run_status`" + ` never waits.
-- Use ` + "`run_shell_command`" + ` for an arbitrary shell command that is not represented by a
-  discovered task. Set ` + "`working_directory`" + ` to a workspace-relative directory (default
-  ` + "`.`" + `); do not use it instead of ` + "`run_task`" + ` for an existing task.
-- Results are compact. Treat ` + "`ok: true`" + ` and exit code 0 as the primary success
-  signal. Do not call ` + "`get_run_logs`" + ` after a successful run just to
-  double-check output.
-- If more context is needed, first use ` + "`stdout_tail`" + ` and ` + "`stderr_tail`" + ` from the
-  receipt. Fetch full logs with ` + "`get_run_logs`" + ` only when explicitly requested
-  or when diagnosing a failure and the tail is insufficient. Use ` + "`last_output_age_ms`" + ` as the
-  anti-hang signal; ` + "`stats`" + ` reports expected duration from retained runs. Use ` + "`tail_bytes: 0`" + `
-  on status tools to suppress output tails.
+SCOPE - including delegated work. These rules bind you AND every sub-agent,
+workflow stage, worktree, or external executor you spawn. When you delegate any
+work that runs a project task (build, test, lint, format, a check/verify gate, or
+a run), your delegated prompt MUST tell the executor to run it through JMW
+(list_tasks -> run_task/start_task) and MUST NOT contain a hardcoded just, cargo,
+go, make, cmake, npm, ruff, or black shell line. A raw build/test/lint shell
+command embedded in a sub-agent prompt is a rule violation, not a convenience.
+
+TRIP-WIRE - stop before these tokens. Before you (or a delegate) run a shell
+command whose program is just, cargo, go, make, cmake, npm, ruff, black, or the
+name of any discovered task or gate (check, verify, lint, test, build, or a
+check-*/lint-* variant): STOP. That command is a discovered task - run it via
+run_task/start_task, never Bash. Using Bash for a task JMW already exposes is a
+violation even when it "works".
+
+GATES ARE LONG TASKS. Any check/verify/CI-style gate has a long average duration:
+launch it with start_task + wait_run, never a blocking Bash and never a bare
+run_task you might mistake for hung. While a run_id is active, never launch the
+task again.
+
+WHERE BASH IS STILL FINE. Direct Bash is acceptable only for ad-hoc, read-only
+inspection with no task representation - git status/diff/log, grep, sed -n, ls.
+Anything runnable-as-a-task, and anything that mutates the tree or build, goes
+through JMW.
+
+- Discover existing tasks with list_projects and list_tasks.
+- Use JMW to save tokens when a compact execution receipt is enough: success
+  status, exit code, and short stdout/stderr tails, especially for successful
+  checks where the full log is not needed.
+- Run an existing task with run_task when that compact receipt is enough. A
+  receipt with status: running and a run_id is normal: follow it with wait_run or
+  get_run_status and do not start the task again. Prefer start_task for a task
+  whose statistics show a long average duration.
+- JMW is an execution-and-receipt tool, not a universal shell wrapper. If stdout
+  itself is the data that must be inspected in full or quoted - for example git
+  diff, large search results, source excerpts, generated reports, or command
+  output explicitly requested by the user - use the normal shell or a specialized
+  read/navigation tool instead of JMW.
+- Use run_shell_command only for commands without an existing task and only when a
+  compact receipt is sufficient; never for a command that maps to a discovered
+  task (see TRIP-WIRE). Set working_directory to a workspace-relative directory
+  (default .).
+- On success, trust ok: true and exit code 0. Do not fetch logs merely to
+  double-check the output.
+- On failure, inspect stdout_tail and stderr_tail from the receipt first. Use
+  get_run_logs only when the tails are missing or insufficient for diagnosis. Use
+  tail_bytes: 0 on status tools to suppress output tails.
 - Prefer existing tasks; do not edit build files unless asked.`
+
+const managedBlockBody = `This workspace uses just-mcp-work (JMW) for its runnable tasks. Full usage rules
+are provided by the JMW MCP server (its instructions and tool descriptions). Core
+rule: run project tasks - build, test, lint, format, check/verify gates - through
+JMW (list_tasks -> run_task/start_task), never a raw just/cargo/go/make/... shell
+line, including in prompts you hand to sub-agents, workflows, or other executors.
+Use direct Bash only for read-only inspection (git status/diff, grep, ls).`
 
 // Options controls agent instruction injection.
 type Options struct {
@@ -450,7 +481,7 @@ func agentTarget(agent string) (target, bool) {
 }
 
 func canonicalBlock() string {
-	return beginMarker + "\n" + Prompt + "\n" + endMarker + "\n"
+	return beginMarker + "\n" + managedBlockBody + "\n" + endMarker + "\n"
 }
 
 func managedContent(before []byte, header string) ([]byte, error) {
