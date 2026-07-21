@@ -28,23 +28,50 @@ const (
 	codexTable  = "[mcp_servers.just-mcp-work]"
 )
 
-// Prompt is the canonical JMW usage guidance served as the MCP server's instructions.
-const Prompt = `This workspace exposes runnable project tasks through just-mcp-work (JMW).
+// TripWirePrograms returns the programs whose direct shell invocation must be
+// replaced by a discovered task. Prompt, the managed instruction block, and the
+// MCP tool descriptions all render this one list, so a new runner cannot land
+// in only one of them.
+func TripWirePrograms() []string {
+	return []string{"just", "cargo", "go", "make", "cmake", "docker", "npm", "ruff", "black"}
+}
+
+// tripWireList renders the programs as a plain enumeration.
+func tripWireList() string {
+	return strings.Join(TripWirePrograms(), ", ")
+}
+
+// tripWireChoice renders the programs as an enumeration that reads as a closed
+// choice, for the sentences that end on the list instead of continuing it.
+func tripWireChoice() string {
+	programs := TripWirePrograms()
+	if len(programs) < 2 {
+		return tripWireList()
+	}
+	return strings.Join(programs[:len(programs)-1], ", ") + ", or " + programs[len(programs)-1]
+}
+
+// Prompt returns the canonical JMW usage guidance served as the MCP server's
+// instructions. It renders TripWirePrograms instead of repeating the list.
+func Prompt() string {
+	return fmt.Sprintf(promptTemplate, tripWireChoice(), tripWireList())
+}
+
+const promptTemplate = `This workspace exposes runnable project tasks through just-mcp-work (JMW).
 
 SCOPE - including delegated work. These rules bind you AND every sub-agent,
 workflow stage, worktree, or external executor you spawn. When you delegate any
 work that runs a project task (build, test, lint, format, a check/verify gate, or
 a run), your delegated prompt MUST tell the executor to run it through JMW
-(list_tasks -> run_task/start_task) and MUST NOT contain a hardcoded just, cargo,
-go, make, cmake, npm, ruff, or black shell line. A raw build/test/lint shell
-command embedded in a sub-agent prompt is a rule violation, not a convenience.
+(list_tasks -> run_task/start_task) and MUST NOT contain a hardcoded %s shell
+line. A raw build/test/lint shell command embedded in a sub-agent prompt is a
+rule violation, not a convenience.
 
 TRIP-WIRE - stop before these tokens. Before you (or a delegate) run a shell
-command whose program is just, cargo, go, make, cmake, npm, ruff, black, or the
-name of any discovered task or gate (check, verify, lint, test, build, or a
-check-*/lint-* variant): STOP. That command is a discovered task - run it via
-run_task/start_task, never Bash. Using Bash for a task JMW already exposes is a
-violation even when it "works".
+command whose program is %s, or the name of any discovered task or gate (check,
+verify, lint, test, build, or a check-*/lint-* variant): STOP. That command is a
+discovered task - run it via run_task/start_task, never Bash. Using Bash for a
+task JMW already exposes is a violation even when it "works".
 
 GATES ARE LONG TASKS. Any check/verify/CI-style gate has a long average duration:
 launch it with start_task + wait_run, never a blocking Bash and never a bare
@@ -80,12 +107,17 @@ through JMW.
   tail_bytes: 0 on status tools to suppress output tails.
 - Prefer existing tasks; do not edit build files unless asked.`
 
-const managedBlockBody = `This workspace uses just-mcp-work (JMW) for its runnable tasks. Full usage rules
+func managedBlockBody() string {
+	return fmt.Sprintf(managedBlockTemplate, tripWireList())
+}
+
+const managedBlockTemplate = `This workspace uses just-mcp-work (JMW) for its runnable tasks. Full usage rules
 are provided by the JMW MCP server (its instructions and tool descriptions). Core
-rule: run project tasks - build, test, lint, format, check/verify gates - through
-JMW (list_tasks -> run_task/start_task), never a raw just/cargo/go/make/... shell
-line, including in prompts you hand to sub-agents, workflows, or other executors.
-Use direct Bash only for read-only inspection (git status/diff, grep, ls).`
+rule: run project tasks - build, test, lint, format, check/verify gates -
+through JMW (list_tasks -> run_task/start_task), never a raw shell line whose
+program is %s, including in prompts you hand to sub-agents, workflows, or other
+executors. Use direct Bash only for read-only inspection (git status/diff, grep,
+ls).`
 
 // Options controls agent instruction injection.
 type Options struct {
@@ -481,7 +513,7 @@ func agentTarget(agent string) (target, bool) {
 }
 
 func canonicalBlock() string {
-	return beginMarker + "\n" + managedBlockBody + "\n" + endMarker + "\n"
+	return beginMarker + "\n" + managedBlockBody() + "\n" + endMarker + "\n"
 }
 
 func managedContent(before []byte, header string) ([]byte, error) {

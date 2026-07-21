@@ -6,6 +6,7 @@ package cmake_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,6 +76,20 @@ func TestListTasksReturnsNoTasksWithoutPresets(t *testing.T) {
 	}
 	if len(tasks) != 0 {
 		t.Fatalf("tasks without presets = %#v", tasks)
+	}
+}
+
+// TestListTasksReportsMissingCMakeAsWarning keeps a checkout with presets
+// usable on a host that lacks the CMake family: the gap belongs to the machine,
+// not to the project, so it must not turn the project into an error.
+func TestListTasksReportsMissingCMakeAsWarning(t *testing.T) {
+	dir := t.TempDir()
+	writeCMakeProject(t, dir)
+	writePresets(t, dir)
+
+	_, err := cmakerunner.New("jmw-absent-cmake-fixture").ListTasks(context.Background(), dir)
+	if !errors.Is(err, runner.ErrToolUnavailable) {
+		t.Fatalf("ListTasks error = %v, want ErrToolUnavailable", err)
 	}
 }
 

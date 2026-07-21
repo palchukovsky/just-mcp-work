@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -62,11 +61,14 @@ func (r *Runner) RunnerVersion(ctx context.Context) (string, error) {
 
 // Detect reports whether a CMake project file exists in projectDir.
 func (*Runner) Detect(projectDir string) (bool, error) {
-	_, err := findRegularFile(projectDir, cmakeListsName)
+	_, err := runner.FindRegularFile(projectDir, cmakeListsName)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
-	return err == nil, err
+	if err != nil {
+		return false, fmt.Errorf("find %s in %q: %w", cmakeListsName, projectDir, err)
+	}
+	return true, nil
 }
 
 // ListTasks lists every enabled CMake preset without configuring the project.
@@ -79,9 +81,11 @@ func (r *Runner) ListTasks(ctx context.Context, projectDir string) ([]runner.Tas
 		return nil, nil
 	}
 
-	presets, err := r.listPresets(ctx, projectDir)
-	if err != nil {
-		return nil, err
+	// A tool of the CMake family that is missing on this host is reported
+	// together with the presets that could still be listed.
+	presets, missing := r.listPresets(ctx, projectDir)
+	if missing != nil && !errors.Is(missing, runner.ErrToolUnavailable) {
+		return nil, missing
 	}
 	tasks := make([]runner.Task, 0, len(presets))
 	for _, preset := range presets {
@@ -99,7 +103,7 @@ func (r *Runner) ListTasks(ctx context.Context, projectDir string) ([]runner.Tas
 	sort.Slice(tasks, func(i, j int) bool {
 		return tasks[i].ID < tasks[j].ID
 	})
-	return tasks, nil
+	return tasks, missing
 }
 
 // BuildCommand creates an argv-only invocation of the selected CMake preset.
@@ -151,14 +155,23 @@ func (r *Runner) listPresets(ctx context.Context, projectDir string) ([]preset, 
 		{binary: r.binary, args: []string{"--list-presets=workflow"}},
 	}
 	presets := make([]preset, 0)
+	// A CMake installation does not have to ship ctest and cpack. Their absence
+	// only removes the presets they own, so the configure and build presets are
+	// still listed and the gap is reported as a warning instead of failing the
+	// whole project.
+	var missing error
 	for _, command := range commands {
 		listed, err := command.list(ctx, projectDir)
 		if err != nil {
+			if errors.Is(err, runner.ErrToolUnavailable) {
+				missing = errors.Join(missing, err)
+				continue
+			}
 			return nil, err
 		}
 		presets = append(presets, listed...)
 	}
-	return presets, nil
+	return presets, missing
 }
 
 type presetCommand struct {
@@ -176,7 +189,10 @@ func (c presetCommand) list(ctx context.Context, projectDir string) ([]preset, e
 		if errors.As(err, &exitErr) {
 			return nil, fmt.Errorf("list CMake presets: %s", strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return nil, fmt.Errorf("start CMake preset listing: %w", err)
+		return nil, fmt.Errorf(
+			"start CMake preset listing: %w",
+			runner.MarkMissingTool(c.binary, err),
+		)
 	}
 	presets, err := parsePresets(string(output))
 	if err != nil {
@@ -259,29 +275,12 @@ func taskPreset(task runner.Task) (string, string, error) {
 }
 
 func hasPresetFile(projectDir string) (bool, error) {
-	for _, name := range []string{presetsName, userPresetsName} {
-		_, err := findRegularFile(projectDir, name)
-		if err == nil {
-			return true, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return false, err
-		}
+	_, err := runner.FindRegularFile(projectDir, presetsName, userPresetsName)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
 	}
-	return false, nil
-}
-
-func findRegularFile(dir string, name string) (string, error) {
-	path := filepath.Join(dir, name)
-	info, err := os.Lstat(path)
-	if err == nil {
-		if info.Mode().IsRegular() {
-			return path, nil
-		}
-		return "", os.ErrNotExist
+	if err != nil {
+		return false, fmt.Errorf("find CMake preset file in %q: %w", projectDir, err)
 	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("inspect %s: %w", name, err)
-	}
-	return "", os.ErrNotExist
+	return true, nil
 }

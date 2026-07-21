@@ -104,7 +104,7 @@ func (r *Runner) dump(ctx context.Context, projectDir string) (justDump, error) 
 		if errors.As(err, &exitErr) {
 			return justDump{}, fmt.Errorf("just dump: %s", strings.TrimSpace(string(exitErr.Stderr)))
 		}
-		return justDump{}, fmt.Errorf("start just dump: %w", err)
+		return justDump{}, fmt.Errorf("start just dump: %w", runner.MarkMissingTool(r.binary, err))
 	}
 
 	var dump justDump
@@ -229,20 +229,11 @@ func (r *Runner) BuildCommand(
 }
 
 func findJustfile(projectDir string) (string, error) {
-	for _, name := range []string{"justfile", "Justfile", ".justfile"} {
-		path := filepath.Join(projectDir, name)
-		info, err := os.Lstat(path)
-		if err == nil {
-			if info.Mode().IsRegular() {
-				return path, nil
-			}
-			continue
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("inspect justfile: %w", err)
-		}
+	path, err := runner.FindRegularFile(projectDir, "justfile", "Justfile", ".justfile")
+	if err != nil {
+		return "", fmt.Errorf("find justfile in %q: %w", projectDir, err)
 	}
-	return "", os.ErrNotExist
+	return path, nil
 }
 
 //nolint:govet // Field order mirrors the just JSON dump for readable decoding.

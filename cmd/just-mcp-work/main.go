@@ -20,6 +20,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/mcpserver"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	cmakerunner "github.com/palchukovsky/just-mcp-work/internal/runner/cmake"
+	dockerrunner "github.com/palchukovsky/just-mcp-work/internal/runner/docker"
 	justrunner "github.com/palchukovsky/just-mcp-work/internal/runner/just"
 	makerunner "github.com/palchukovsky/just-mcp-work/internal/runner/make"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
@@ -139,6 +140,7 @@ func serve(args []string) error {
 	registry, err := runner.NewRegistry(
 		justrunner.New(""),
 		cmakerunner.New(""),
+		dockerrunner.New(""),
 		makerunner.New(""),
 	)
 	if err != nil {

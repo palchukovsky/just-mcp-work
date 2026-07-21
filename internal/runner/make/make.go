@@ -399,20 +399,11 @@ func taskTarget(task runner.Task) (string, error) {
 }
 
 func findMakefile(projectDir string) (string, error) {
-	for _, name := range makefileNames() {
-		path := filepath.Join(projectDir, name)
-		info, err := os.Lstat(path)
-		if err == nil {
-			if info.Mode().IsRegular() {
-				return path, nil
-			}
-			continue
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return "", fmt.Errorf("inspect Makefile: %w", err)
-		}
+	path, err := runner.FindRegularFile(projectDir, makefileNames()...)
+	if err != nil {
+		return "", fmt.Errorf("find Makefile in %q: %w", projectDir, err)
 	}
-	return "", os.ErrNotExist
+	return path, nil
 }
 
 func makefileNames() []string {

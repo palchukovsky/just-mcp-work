@@ -24,12 +24,77 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 	"github.com/palchukovsky/just-mcp-work/internal/updatecheck"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
+
+// TestRunShellCommandDescriptionCoversEveryTripWireProgram checks the whole
+// rendered list instead of each program separately: a substring check would
+// also pass on an unrelated word that merely contains the program name.
+func TestRunShellCommandDescriptionCoversEveryTripWireProgram(t *testing.T) {
+	programs := strings.Join(agentinit.TripWirePrograms(), ", ")
+	if !strings.Contains(runShellCommandDescription(), "program is "+programs+",") {
+		t.Errorf(
+			"run_shell_command does not list the TRIP-WIRE programs %q: %s",
+			programs,
+			runShellCommandDescription(),
+		)
+	}
+}
+
+// TestListTasksExplainsAnEmptyRunner keeps the reason for a taskless runner in
+// the answer the agent already asked for, instead of making it call
+// list_projects to find out why the listing is empty.
+func TestListTasksExplainsAnEmptyRunner(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runners, err := runner.NewRegistry(unavailableToolRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(workspaceRegistry, runners, store, Config{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, output, err := server.listTasks(context.Background(), nil, listTasksInput{ProjectPath: "."})
+	if err != nil {
+		t.Fatalf("list_tasks: %v", err)
+	}
+	if len(output.Tasks) != 0 {
+		t.Fatalf("tasks = %#v, want none", output.Tasks)
+	}
+	if !strings.Contains(output.Warnings["fake"], "runner tool is unavailable") {
+		t.Fatalf("warnings = %#v", output.Warnings)
+	}
+
+	_, filtered, err := server.listTasks(context.Background(), nil, listTasksInput{
+		ProjectPath: ".",
+		Runner:      "absent",
+	})
+	if err != nil {
+		t.Fatalf("filtered list_tasks: %v", err)
+	}
+	if len(filtered.Warnings) != 0 {
+		t.Fatalf("filtered warnings = %#v, want only the requested runner", filtered.Warnings)
+	}
+}
 
 //nolint:gocyclo // This direct tool-flow test intentionally covers all MCP outcomes together.
 func TestDirectHandlerFlow(t *testing.T) {
@@ -744,6 +809,14 @@ type errorHTTPClient struct{}
 
 func (errorHTTPClient) Do(*http.Request) (*http.Response, error) {
 	return nil, errors.New("offline")
+}
+
+// unavailableToolRunner stands for a runner whose build tool is missing on this
+// host, so it contributes a warning instead of tasks.
+type unavailableToolRunner struct{ handlerRunner }
+
+func (unavailableToolRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
+	return nil, fmt.Errorf("find the fake binary: %w", runner.ErrToolUnavailable)
 }
 
 type handlerRunner struct{}

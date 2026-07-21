@@ -62,6 +62,106 @@ func TestDiscoverProjectsAndSurfaceInvalidJustfile(t *testing.T) {
 	}
 }
 
+// TestDiscoverReportsMissingToolAsWarning keeps a checkout usable on a host
+// that lacks one of its build tools: the project stays ready, the runners that
+// do work keep their tasks, and the missing tool is still reported.
+func TestDiscoverReportsMissingToolAsWarning(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "justfile"), "root")
+	writeFile(t, filepath.Join(root, "Makefile"), "root")
+
+	runners, err := runner.NewRegistry(fakeJustRunner{}, unavailableToolRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(context.Background(), Filter{Path: "."})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	project := projectAt(t, projects, ".")
+	if project.Status != "ready" {
+		t.Fatalf("project status = %q, want ready", project.Status)
+	}
+	if len(project.Errors) != 0 {
+		t.Fatalf("project errors = %#v, want none", project.Errors)
+	}
+	if !strings.Contains(project.Warnings["make"], "runner tool is unavailable") {
+		t.Fatalf("project warnings = %#v", project.Warnings)
+	}
+	if len(project.Tasks["just"]) != 1 {
+		t.Fatalf("just tasks = %#v, want the tasks of the working runner", project.Tasks["just"])
+	}
+}
+
+// TestDiscoverKeepsProjectWithOnlyWarnings covers the directory whose single
+// signal is a warning: dropping it would hide the diagnosis of why a project
+// the operator expects to see reports nothing at all.
+func TestDiscoverKeepsProjectWithOnlyWarnings(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "Makefile"), "root")
+
+	runners, err := runner.NewRegistry(detectUnavailableToolRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(context.Background(), Filter{Path: "."})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	project := projectAt(t, projects, ".")
+	if project.Status != "ready" {
+		t.Fatalf("project status = %q, want ready", project.Status)
+	}
+	if len(project.Runners) != 0 {
+		t.Fatalf("project runners = %#v, want none", project.Runners)
+	}
+	if !strings.Contains(project.Warnings["make"], "runner tool is unavailable") {
+		t.Fatalf("project warnings = %#v", project.Warnings)
+	}
+}
+
+// TestDiscoverKeepsPartiallyDiscoveredTasks covers a runner that reports what it
+// could discover together with the failure of the rest: the usable tasks must
+// survive, and the failure must still mark the project.
+func TestDiscoverKeepsPartiallyDiscoveredTasks(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "Makefile"), "root")
+
+	runners, err := runner.NewRegistry(partialFakeMakeRunner{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(context.Background(), Filter{Path: "."})
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	project := projectAt(t, projects, ".")
+	if project.Status != "error" {
+		t.Fatalf("project status = %q, want error", project.Status)
+	}
+	if !strings.Contains(project.Errors["make"], "half of the targets") {
+		t.Fatalf("project errors = %#v", project.Errors)
+	}
+	if got := project.Tasks["make"]; len(got) != 1 || got[0].ID != "make:task" {
+		t.Fatalf("make tasks = %#v, want the discovered part", got)
+	}
+}
+
 func TestFindRejectsPathsOutsideWorkspace(t *testing.T) {
 	registry, err := NewRegistry(t.TempDir(), mustRunnerRegistry(t), nil)
 	if err != nil {
@@ -474,6 +574,38 @@ func (fakeMakeRunner) BuildCommand(
 	[]string,
 ) (*exec.Cmd, error) {
 	return nil, errors.New("not used")
+}
+
+// unavailableToolRunner stands for a runner whose build tool is not installed
+// on this host.
+type unavailableToolRunner struct{ fakeMakeRunner }
+
+func (unavailableToolRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
+	return nil, fmt.Errorf("find the Make binary: %w", runner.ErrToolUnavailable)
+}
+
+// detectUnavailableToolRunner stands for a runner that cannot even detect a
+// project because its build tool is missing, so the warning is the only thing
+// the directory contributes.
+type detectUnavailableToolRunner struct{ fakeMakeRunner }
+
+func (detectUnavailableToolRunner) Detect(string) (bool, error) {
+	return false, fmt.Errorf("find the Make binary: %w", runner.ErrToolUnavailable)
+}
+
+// partialFakeMakeRunner stands for a runner that discovers part of a project and
+// reports why the rest is missing.
+type partialFakeMakeRunner struct{ fakeMakeRunner }
+
+func (r partialFakeMakeRunner) ListTasks(
+	ctx context.Context,
+	projectDir string,
+) ([]runner.Task, error) {
+	tasks, err := r.fakeMakeRunner.ListTasks(ctx, projectDir)
+	if err != nil {
+		return nil, err
+	}
+	return tasks, errors.New("half of the targets are unreadable")
 }
 
 type includingFakeJustRunner struct {

@@ -6,10 +6,10 @@ decide how much to trust it in a given setup.
 
 ## What jmw executes
 
-jmw runs **tasks that already exist in a project** - a `just` recipe today,
-a `make` target or `cmake` build tomorrow — addressed as `<runner>:<task>`
-(e.g. `just:build`). It discovers projects under a root and invokes their
-existing tasks through the real runner binary.
+jmw runs **tasks that already exist in a project** - a `just` recipe, a `make`
+target, a `cmake` preset, or a Docker build and Compose service — addressed as
+`<runner>:<task>` (e.g. `just:build`). It discovers projects under a root and
+invokes their existing tasks through the real runner binary.
 
 It does **not** accept arbitrary shell from the agent. The MCP surface lets a
 caller run named tasks that are already in the repo; it adds no new "execute
@@ -24,9 +24,17 @@ jmw process itself. It can read and write anywhere that process can, open
 network connections, and spawn further processes — whatever the task
 definition tells it to.
 
-A task file (justfile, Makefile, …) is code. Pointing jmw at a project is the
-same act as running that project's build scripts by hand — because it is the
-same thing. Do not point jmw at task files you do not trust.
+A task file (justfile, Makefile, Dockerfile, Compose manifest, …) is code.
+Pointing jmw at a project is the same act as running that project's build
+scripts by hand — because it is the same thing. Do not point jmw at task files
+you do not trust.
+
+Docker tasks reach the furthest. A build executes the instructions of the
+project `Dockerfile`, and a Compose service runs with the bind mounts,
+published ports, and privileges its manifest declares — all through the Docker
+daemon, which is a privileged service on most hosts. Compose services are
+started detached, so their containers outlive the run that started them until
+`docker:compose:down` stops them.
 
 ## Lifecycle controls
 

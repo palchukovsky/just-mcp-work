@@ -7,8 +7,31 @@ package runner
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io/fs"
 	"os/exec"
 )
+
+// ErrToolUnavailable reports that the build tool of a runner is missing on this
+// host. A repository that merely carries a build file for a tool the machine
+// does not have is not a broken project, so the workspace keeps such a runner
+// visible as a warning instead of failing the project.
+var ErrToolUnavailable = errors.New("runner tool is unavailable")
+
+// MarkMissingTool reports err as ErrToolUnavailable when a command failed
+// because its binary does not exist on this host. Every other failure is
+// returned unchanged: a tool that is installed but broken is a real error, and
+// hiding it behind a warning would leave the project silently taskless.
+func MarkMissingTool(binary string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return fmt.Errorf("find the %s binary: %w: %w", binary, ErrToolUnavailable, err)
+}
 
 // ParamKind describes how a task parameter accepts values.
 type ParamKind string
@@ -42,6 +65,10 @@ type Task struct {
 
 // Runner discovers and runs tasks for one build-tool format.
 // Implementations must set Cmd.Dir and must not interpret task bodies.
+//
+// ListTasks may return the tasks it did discover together with an error that
+// describes the part of the discovery that failed, so one unusable task file
+// does not hide the tasks of the same runner that are perfectly usable.
 type Runner interface {
 	Name() string
 	Detect(projectDir string) (bool, error)

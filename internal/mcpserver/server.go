@@ -33,6 +33,16 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
 
+// runShellCommandDescription reuses the shared TRIP-WIRE program list, so a new
+// runner reaches the tool description and the agent prompt at the same time.
+func runShellCommandDescription() string {
+	return "Run ad-hoc shell only when no discovered task maps to it. TRIP-WIRE: a command whose " +
+		"program is " + strings.Join(agentinit.TripWirePrograms(), ", ") +
+		", or a discovered task/gate name must use run_task/start_task, never Bash. Direct Bash " +
+		"is only for read-only inspection with no task. A running receipt with promoted: true is " +
+		"normal: follow its run_id instead of retrying the command."
+}
+
 // Config controls server-side execution defaults.
 //
 //nolint:govet // Field order groups process settings before the logger dependency.
@@ -138,7 +148,7 @@ func (s *Server) Run(ctx context.Context) error {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "just-mcp-work", Version: version.Current().Display()},
 		&mcp.ServerOptions{
-			Instructions: agentinit.Prompt,
+			Instructions: agentinit.Prompt(),
 			Logger:       s.config.Logger,
 		},
 	)
@@ -185,12 +195,8 @@ func (s *Server) Run(ctx context.Context) error {
 	mcp.AddTool(
 		server,
 		&mcp.Tool{
-			Name: "run_shell_command",
-			Description: "Run ad-hoc shell only when no discovered task maps to it. TRIP-WIRE: a command " +
-				"whose program is just, cargo, go, make, cmake, npm, ruff, black, or a discovered task/gate " +
-				"name must use run_task/start_task, never Bash. Direct Bash is only for read-only inspection " +
-				"with no task. A running receipt with promoted: true is normal: follow its run_id instead of " +
-				"retrying the command.",
+			Name:        "run_shell_command",
+			Description: runShellCommandDescription(),
 		},
 		recoverTool(withUpdateNotification(s, s.runShellCommand)),
 	)
@@ -281,10 +287,11 @@ type listProjectsInput struct {
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
 type projectOutput struct {
-	RelPath string            `json:"rel_path"`
-	Runners []string          `json:"runners"`
-	Status  string            `json:"status"`
-	Errors  map[string]string `json:"errors,omitempty"`
+	RelPath  string            `json:"rel_path"`
+	Runners  []string          `json:"runners"`
+	Status   string            `json:"status"`
+	Errors   map[string]string `json:"errors,omitempty"`
+	Warnings map[string]string `json:"warnings,omitempty"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -323,10 +330,11 @@ func (s *Server) listProjects(
 		output.Projects = append(
 			output.Projects,
 			projectOutput{
-				RelPath: project.RelPath,
-				Runners: project.Runners,
-				Status:  project.Status,
-				Errors:  project.Errors,
+				RelPath:  project.RelPath,
+				Runners:  project.Runners,
+				Status:   project.Status,
+				Errors:   project.Errors,
+				Warnings: project.Warnings,
 			},
 		)
 	}
@@ -372,7 +380,11 @@ type listTasksInput struct {
 //nolint:govet // Field order follows the stable MCP JSON response shape.
 type listTasksOutput struct {
 	Tasks []taskOutput `json:"tasks"`
-	Error *toolError   `json:"error,omitempty"`
+	// Errors and Warnings explain a runner that contributes no task here, so
+	// the caller does not have to fall back to list_projects to learn why.
+	Errors   map[string]string `json:"errors,omitempty"`
+	Warnings map[string]string `json:"warnings,omitempty"`
+	Error    *toolError        `json:"error,omitempty"`
 }
 
 type taskOutput struct {
@@ -391,15 +403,27 @@ func (s *Server) listTasks(
 		return toolErrorResult(err), listTasksOutput{Error: newToolError(err)}, nil
 	}
 	if input.Runner != "" {
-		return nil,
-			listTasksOutput{Tasks: s.taskOutputs(project.RelPath, project.Tasks[input.Runner])},
-			nil
+		return nil, listTasksOutput{
+			Tasks:    s.taskOutputs(project.RelPath, project.Tasks[input.Runner]),
+			Errors:   selectIssues(project.Errors, input.Runner),
+			Warnings: selectIssues(project.Warnings, input.Runner),
+		}, nil
 	}
-	result := listTasksOutput{}
+	result := listTasksOutput{Errors: project.Errors, Warnings: project.Warnings}
 	for _, name := range project.Runners {
 		result.Tasks = append(result.Tasks, s.taskOutputs(project.RelPath, project.Tasks[name])...)
 	}
 	return nil, result, nil
+}
+
+// selectIssues narrows a per-runner issue map to the requested runner, so a
+// filtered listing does not report a runner the caller excluded.
+func selectIssues(issues map[string]string, name string) map[string]string {
+	issue, found := issues[name]
+	if !found {
+		return nil
+	}
+	return map[string]string{name: issue}
 }
 
 func (s *Server) taskOutputs(projectPath string, tasks []runner.Task) []taskOutput {

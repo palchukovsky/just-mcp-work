@@ -14,7 +14,7 @@ the agent only the part it asked for.
 
 - **Run it.** The task, or a plain shell command when no task fits.
 - **Browse instead of reading.** [Just](https://just.systems/),
-  [CMake](https://cmake.org/), and
+  [CMake](https://cmake.org/), [Docker](https://www.docker.com/), and
   [GNU Make](https://www.gnu.org/software/make/) projects, nested anywhere in
   the workspace — no build file is ever loaded into context.
 - **One task at a time.** Full metadata and parameters for the task the agent
@@ -24,11 +24,11 @@ the agent only the part it asked for.
 
 ## Security
 
-`run_task` executes an existing `just` recipe, CMake target, or Make target with
-arguments kept separate. `run_shell_command` intentionally passes command text
-to the operating system shell. Both run with your privileges and without a
-sandbox: trust the selected task or command like you trust a project's build
-scripts. Need isolation? Run `just-mcp-work` in a container. See
+`run_task` executes an existing `just` recipe, CMake target, Docker task, or
+Make target with arguments kept separate. `run_shell_command` intentionally
+passes command text to the operating system shell. Both run with your privileges
+and without a sandbox: trust the selected task or command like you trust a
+project's build scripts. Need isolation? Run `just-mcp-work` in a container. See
 [SECURITY.md](SECURITY.md).
 
 ## Install
@@ -38,8 +38,16 @@ Must be available on `PATH`:
 - [`just`](https://just.systems/) for [Just](https://just.systems/) projects.
 - [CMake](https://cmake.org/) must be available for [CMake](https://cmake.org/)
   projects.
+- [Docker](https://www.docker.com/) with the
+  [Compose](https://docs.docker.com/compose/) v2 plugin must be available for
+  Docker projects.
 - [GNU Make](https://www.gnu.org/software/make/) must be available for
   [Make](https://www.gnu.org/software/make/) projects.
+
+A tool that is missing on this host keeps its project usable: the runner is
+reported as a project warning instead of an error, and the runners that do work
+keep their tasks. Docker without the Compose v2 plugin is reported the same way,
+and its `Dockerfile` build stays runnable.
 
 ### Prebuilt binaries
 
@@ -94,8 +102,8 @@ The server discovers nested projects on demand. Use `init --help` and
 
 | Tool | Purpose |
 | --- | --- |
-| `list_projects` | List filtered projects and runner errors. |
-| `list_tasks` | List tasks, parameters, and duration statistics. |
+| `list_projects` | List filtered projects, runner errors, and warnings. |
+| `list_tasks` | List tasks, parameters, statistics, and runner issues. |
 | `run_task` | Run a task, promoting a long run to the background. |
 | `start_task` | Start a selected task asynchronously. |
 | `run_shell_command` | Run a shell command; long runs go to background. |
@@ -117,10 +125,18 @@ reports directories skipped by the operator's policy and cannot be widened. This
 filtering applies only to the list: `list_tasks` and task tools can still address
 any discovered workspace project.
 
-Task IDs are runner-qualified, for example `just:build`, `cmake:build:debug`,
-or `make:test`. Make projects expose their explicit targets without running
-recipes during task discovery. For a short task, use `run_task`; it waits for up
-to `max_wait_ms`, `--sync-deadline`, or `JMW_SYNC_DEADLINE` (in that precedence
+A project reports `errors` when a runner could not be read and `warnings` when a
+runner could not be used without the project being at fault, such as a build tool
+that is missing on this host. Only `errors` set the project status to `"error"`,
+and a runner that fails halfway still contributes the tasks it did discover.
+`list_tasks` repeats the `errors` and `warnings` of the runners it listed, so an
+empty listing carries its own explanation.
+
+Task IDs are runner-qualified across the `just`, `cmake`, `docker`, and `make`
+runners, for example `just:build`, `cmake:build:debug`, `docker:compose:up`, or
+`make:test`. Make projects expose their explicit targets without running recipes
+during task discovery. For a short task, use `run_task`; it waits for up to
+`max_wait_ms`, `--sync-deadline`, or `JMW_SYNC_DEADLINE` (in that precedence
 order). A receipt with `status: "running"`, `completed: false`, and
 `promoted: true` is successful handoff to a background run, not a failure: use
 its `run_id` with `wait_run` or `get_run_status` and do not run the task again.
@@ -138,10 +154,10 @@ filters cannot silently hide matching older runs.
 
 `run_shell_command` is separate from project discovery: it accepts command
 text and an optional workspace-relative `working_directory` (default `.`), so
-it can run from directories that have no Just, CMake, or Make project. It uses
-the current OS shell (`$SHELL`, falling back to `/bin/sh`, on Unix; `ComSpec`
-on Windows). The working directory must exist inside the workspace and cannot
-be a symlink.
+it can run from directories that have no Just, CMake, Docker, or Make project.
+It uses the current OS shell (`$SHELL`, falling back to `/bin/sh`, on Unix;
+`ComSpec` on Windows). The working directory must exist inside the workspace and
+cannot be a symlink.
 
 `get_run_status` is non-blocking. `wait_run` waits up to `max_wait_ms` (30s by
 default); set it to `0` for an immediate snapshot. Status tools return 4096

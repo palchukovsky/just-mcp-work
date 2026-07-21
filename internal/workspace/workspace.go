@@ -7,6 +7,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -26,8 +27,12 @@ type Project struct {
 	Runners []string          `json:"runners"`
 	Status  string            `json:"status"`
 	Errors  map[string]string `json:"errors,omitempty"`
-	Tasks   map[string][]runner.Task
-	Dir     string
+	// Warnings reports runners that could not be used without the project
+	// itself being broken, such as a build tool that is missing on this host.
+	// They keep the project status "ready".
+	Warnings map[string]string `json:"warnings,omitempty"`
+	Tasks    map[string][]runner.Task
+	Dir      string
 }
 
 // MaxDepthUnlimited disables the depth bound of a Filter. Note that the zero
@@ -191,6 +196,9 @@ func (r *Registry) markIncluded(
 		if _, failed := project.Errors[name]; failed {
 			continue
 		}
+		if _, unavailable := project.Warnings[name]; unavailable {
+			continue
+		}
 		candidate, ok := r.runners.Get(name)
 		if !ok {
 			continue
@@ -224,6 +232,7 @@ func suppressIncluded(project *Project, included map[includedProject]struct{}) b
 		if _, ok := included[key]; ok {
 			delete(project.Tasks, name)
 			delete(project.Errors, name)
+			delete(project.Warnings, name)
 			continue
 		}
 		runners = append(runners, name)
@@ -232,9 +241,10 @@ func suppressIncluded(project *Project, included map[includedProject]struct{}) b
 	for key := range included {
 		if key.dir == filepath.Clean(project.Dir) {
 			delete(project.Errors, key.runner)
+			delete(project.Warnings, key.runner)
 		}
 	}
-	if len(project.Runners) == 0 && len(project.Errors) == 0 {
+	if project.empty() {
 		return false
 	}
 	project.Status = "ready"
@@ -356,21 +366,25 @@ func (r *Registry) inspect(ctx context.Context, dir string) (Project, bool, erro
 	for _, candidate := range r.runners.All() {
 		detected, err := candidate.Detect(dir)
 		if err != nil {
-			project.Errors = addError(project.Errors, candidate.Name(), err)
+			project.addIssue(candidate.Name(), err)
 			continue
 		}
 		if !detected {
 			continue
 		}
 		project.Runners = append(project.Runners, candidate.Name())
+		// A runner may report the tasks it did discover together with the
+		// failure of the rest, so the usable part of a project survives one
+		// unusable task file.
 		tasks, err := candidate.ListTasks(ctx, dir)
 		if err != nil {
-			project.Errors = addError(project.Errors, candidate.Name(), err)
-			continue
+			project.addIssue(candidate.Name(), err)
 		}
-		project.Tasks[candidate.Name()] = tasks
+		if err == nil || len(tasks) > 0 {
+			project.Tasks[candidate.Name()] = tasks
+		}
 	}
-	if len(project.Runners) == 0 && len(project.Errors) == 0 {
+	if project.empty() {
 		return Project{}, false, nil
 	}
 	if len(project.Errors) > 0 {
@@ -378,6 +392,14 @@ func (r *Registry) inspect(ctx context.Context, dir string) (Project, bool, erro
 	}
 	project.Dir = dir
 	return project, true, nil
+}
+
+// empty reports a directory that carries nothing worth listing. A warning is
+// enough to keep the project: it names a runner that was detected here and
+// explains why it contributes no task, which is exactly what the caller would
+// otherwise have to guess.
+func (p *Project) empty() bool {
+	return len(p.Runners) == 0 && len(p.Errors) == 0 && len(p.Warnings) == 0
 }
 
 func validRelPath(path string) bool {
@@ -410,6 +432,17 @@ func (r *Registry) excluded(path string) bool {
 		}
 	}
 	return false
+}
+
+// addIssue records a runner failure. A tool that is simply not installed on
+// this host is a warning: the checkout is fine, the machine just cannot run
+// that runner, and failing the whole project would bury the runners it can run.
+func (p *Project) addIssue(name string, err error) {
+	if errors.Is(err, runner.ErrToolUnavailable) {
+		p.Warnings = addError(p.Warnings, name, err)
+		return
+	}
+	p.Errors = addError(p.Errors, name, err)
 }
 
 func addError(errors map[string]string, name string, err error) map[string]string {

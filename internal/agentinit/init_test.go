@@ -51,6 +51,7 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 func TestPromptDescribesCompactReceiptContract(t *testing.T) {
 	for _, expected := range []string{
 		"just-mcp-work (JMW)",
+		"docker",
 		"compact execution receipt",
 		"save tokens",
 		"run_shell_command",
@@ -72,10 +73,57 @@ func TestPromptDescribesCompactReceiptContract(t *testing.T) {
 		"get_run_logs",
 		"tail_bytes: 0",
 	} {
-		if !strings.Contains(Prompt, expected) {
+		if !strings.Contains(Prompt(), expected) {
 			t.Errorf("Prompt does not mention %q", expected)
 		}
 	}
+}
+
+// TestPromptCoversEveryTripWireProgram compares the program lists of the prompt
+// with TripWirePrograms as lists. A plain substring check would pass on an
+// unrelated word: "go" occurs in "goes", and a program dropped from one list
+// would stay unnoticed while it is still named in the other.
+func TestPromptCoversEveryTripWireProgram(t *testing.T) {
+	for name, list := range map[string][]string{
+		"delegation rule": promptProgramList(t, "MUST NOT contain a hardcoded ", " shell line."),
+		"TRIP-WIRE":       promptProgramList(t, "command whose program is ", ", or the name of"),
+	} {
+		if want := TripWirePrograms(); !slices.Equal(list, want) {
+			t.Errorf("Prompt %s lists %#v, want %#v", name, list, want)
+		}
+	}
+}
+
+// TestManagedBlockCoversEveryTripWireProgram keeps the block written into
+// AGENTS.md and CLAUDE.md on the same program list as the prompt, so a runner
+// added to one of them cannot stay missing from the other.
+func TestManagedBlockCoversEveryTripWireProgram(t *testing.T) {
+	flat := strings.Join(strings.Fields(managedBlockBody()), " ")
+	want := "program is " + strings.Join(TripWirePrograms(), ", ") + ","
+	if !strings.Contains(flat, want) {
+		t.Errorf("managed block does not list %q: %s", want, flat)
+	}
+}
+
+// promptProgramList extracts the comma-separated program list that Prompt keeps
+// between prefix and suffix, flattening the wrapped lines first.
+func promptProgramList(t *testing.T, prefix string, suffix string) []string {
+	t.Helper()
+	flat := strings.Join(strings.Fields(Prompt()), " ")
+	start := strings.Index(flat, prefix)
+	if start < 0 {
+		t.Fatalf("Prompt does not contain %q", prefix)
+	}
+	rest := flat[start+len(prefix):]
+	end := strings.Index(rest, suffix)
+	if end < 0 {
+		t.Fatalf("Prompt does not contain %q after %q", suffix, prefix)
+	}
+	programs := strings.Split(rest[:end], ", ")
+	for i, program := range programs {
+		programs[i] = strings.TrimPrefix(program, "or ")
+	}
+	return programs
 }
 
 func TestApplyReplacesModifiedManagedBlock(t *testing.T) {
