@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -197,11 +198,17 @@ func initCommand(args []string) error {
 		true,
 		"find the nearest .mcp.json and merge the server entry",
 	)
+	claudePermissions := flags.String(
+		"claude-permissions",
+		string(agentinit.ClaudePermissionsAsk),
+		"managed tool permissions in .claude/settings.json: ask, yes, or no",
+	)
 	flags.Usage = func() {
 		//nolint:errcheck // FlagSet usage callbacks cannot return output errors.
 		_, _ = fmt.Fprintln(
 			flags.Output(),
-			"Usage: just-mcp-work init [--dir <dir>] [--agents <names>] [--dry-run]",
+			"Usage: just-mcp-work init [--dir <dir>] [--agents <names>] [--dry-run] "+
+				"[--claude-permissions ask|yes|no]",
 		)
 		flags.PrintDefaults()
 	}
@@ -214,12 +221,18 @@ func initCommand(args []string) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("init accepts no positional arguments")
 	}
+	permissions, err := agentinit.ParseClaudePermissions(*claudePermissions)
+	if err != nil {
+		return fmt.Errorf("parse init flags: %w", err)
+	}
 	result, err := agentinit.Apply(
 		agentinit.Options{
-			Dir:            *dir,
-			Agents:         splitCSV(*agents),
-			DryRun:         *dryRun,
-			WriteMCPConfig: *writeMCPConfig,
+			Dir:               *dir,
+			Agents:            splitCSV(*agents),
+			DryRun:            *dryRun,
+			WriteMCPConfig:    *writeMCPConfig,
+			ClaudePermissions: permissions,
+			Confirm:           confirmClaudePermissions,
 		},
 	)
 	if err != nil {
@@ -252,6 +265,38 @@ func initCommand(args []string) error {
 		fmt.Print(snippet)
 	}
 	return nil
+}
+
+// confirmClaudePermissions asks the operator on the console whether the managed
+// Claude tool permissions may be written. An unanswerable console, such as a
+// closed or empty standard input, declines the change and points at the flag
+// that answers the question up front.
+func confirmClaudePermissions(path string, _ string) (bool, error) {
+	managed := agentinit.ClaudeManagedTools()
+	fmt.Printf(
+		"\n%s: replace the managed just-mcp-work tool permissions?\n"+
+			"  allow: %s\n  ask:   %s\n"+
+			"Existing %s* entries are removed first.\n"+
+			"Apply? [y/N]: ",
+		path,
+		strings.Join(managed.Allow, ", "),
+		strings.Join(managed.Ask, ", "),
+		agentinit.ClaudeToolPrefix,
+	)
+	answer, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && strings.TrimSpace(answer) == "" {
+		fmt.Println(
+			"\nNo console answer; skipped. " +
+				"Use --claude-permissions=yes to apply it without a prompt.",
+		)
+		return false, nil
+	}
+	switch strings.ToLower(strings.TrimSpace(answer)) {
+	case "y", "yes":
+		return true, nil
+	default:
+		return false, nil
+	}
 }
 
 func printUsage(output *os.File) {

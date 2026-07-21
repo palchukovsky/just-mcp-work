@@ -95,6 +95,19 @@ the generated managed block can take ownership of the entry.
 Pass `--write-mcp-config=false` to print the resolved server entry instead of
 writing it.
 
+When `claude` is one of the selected agents, `init` also offers the managed tool
+permissions in `.claude/settings.json`. The task and run tools are added to
+`permissions.allow`, and `run_shell_command` and `start_shell_command` are added
+to `permissions.ask` so a free-form command still needs a confirmation. Every
+`mcp__just-mcp-work` entry is removed from the permission lists first, including
+tools this version does not know, and the current entries are then written back.
+Unrelated permissions and settings are preserved.
+
+This change is confirmed on the console by default; an answer piped into
+standard input is accepted as well. Use `--claude-permissions=yes` to apply it
+without a prompt, for example in a script, and `--claude-permissions=no` to
+leave the file alone. When no answer is available, the change is skipped.
+
 The server discovers nested projects on demand. Use `init --help` and
 `serve --help` for agent targets and server options.
 

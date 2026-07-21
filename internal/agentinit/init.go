@@ -26,6 +26,11 @@ const (
 	codexBegin  = "# >>> just-mcp-work mcp (managed) >>>"
 	codexEnd    = "# <<< just-mcp-work mcp <<<"
 	codexTable  = "[mcp_servers.just-mcp-work]"
+	// claudeSettings holds the Claude tool permission lists.
+	claudeSettings = ".claude/settings.json"
+	// claudeServerRule is the Claude permission entry for this MCP server. Its
+	// tool entries extend it with "__" and the tool name.
+	claudeServerRule = "mcp__just-mcp-work"
 )
 
 // TripWirePrograms returns the programs whose direct shell invocation must be
@@ -119,12 +124,90 @@ program is %s, including in prompts you hand to sub-agents, workflows, or other
 executors. Use direct Bash only for read-only inspection (git status/diff, grep,
 ls).`
 
+// ClaudePermissions selects how init treats the Claude tool permission lists.
+type ClaudePermissions string
+
+const (
+	// ClaudePermissionsAsk confirms the pending change on the console.
+	ClaudePermissionsAsk ClaudePermissions = "ask"
+	// ClaudePermissionsYes writes the change without a confirmation.
+	ClaudePermissionsYes ClaudePermissions = "yes"
+	// ClaudePermissionsNo leaves the Claude permission lists alone.
+	ClaudePermissionsNo ClaudePermissions = "no"
+)
+
+// ParseClaudePermissions resolves the command-line value of the Claude
+// permission mode. An empty value selects the console confirmation.
+func ParseClaudePermissions(value string) (ClaudePermissions, error) {
+	switch mode := ClaudePermissions(strings.ToLower(strings.TrimSpace(value))); mode {
+	case "", ClaudePermissionsAsk:
+		return ClaudePermissionsAsk, nil
+	case ClaudePermissionsYes, ClaudePermissionsNo:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("unsupported Claude permission mode %q: use ask, yes, or no", value)
+	}
+}
+
+// ClaudeToolPrefix is the Claude permission entry prefix of this server's tools.
+const ClaudeToolPrefix = claudeServerRule + "__"
+
+// ClaudeToolPermissions holds the managed Claude permission entries of this MCP
+// server. Allow lists the tools that may run unattended; Ask lists the tools
+// that stay behind a Claude confirmation because they execute a free-form
+// command.
+type ClaudeToolPermissions struct {
+	Allow []string
+	Ask   []string
+}
+
+// ClaudeManagedTools returns the managed Claude permission entries. The tool
+// names must stay in sync with the tools the MCP server registers.
+func ClaudeManagedTools() ClaudeToolPermissions {
+	return ClaudeToolPermissions{
+		Allow: claudeToolRules(
+			"run_task",
+			"start_task",
+			"wait_run",
+			"get_run_status",
+			"get_run",
+			"get_run_logs",
+			"list_runs",
+			"stop_run",
+			"list_projects",
+			"list_tasks",
+			"version_status",
+		),
+		Ask: claudeToolRules(
+			"run_shell_command",
+			"start_shell_command",
+		),
+	}
+}
+
+func claudeToolRules(tools ...string) []string {
+	rules := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		rules = append(rules, ClaudeToolPrefix+tool)
+	}
+	return rules
+}
+
 // Options controls agent instruction injection.
+//
+//nolint:govet // Field order follows the documented option grouping.
 type Options struct {
 	Dir            string
 	Agents         []string
 	DryRun         bool
 	WriteMCPConfig bool
+	// ClaudePermissions selects how the Claude permission lists are treated. The
+	// zero value asks through Confirm.
+	ClaudePermissions ClaudePermissions
+	// Confirm approves a pending Claude permission change. It receives the target
+	// path and the planned diff, and is called only in the ask mode and only when
+	// the file would actually change. A nil Confirm declines the change.
+	Confirm func(path string, diff string) (bool, error)
 }
 
 // Result lists changed or would-change files.
@@ -148,6 +231,7 @@ func Apply(options Options) (Result, error) {
 	if len(options.Agents) == 0 {
 		options.Agents = []string{"claude", "codex", "cursor"}
 	}
+	agents := unique(options.Agents)
 	var codexPath string
 	var codexBefore []byte
 	var codexAfter []byte
@@ -166,7 +250,7 @@ func Apply(options Options) (Result, error) {
 		}
 	}
 	result := Result{}
-	for _, agent := range unique(options.Agents) {
+	for _, agent := range agents {
 		target, ok := agentTarget(agent)
 		if !ok {
 			return Result{}, fmt.Errorf("unsupported agent %q", agent)
@@ -242,7 +326,76 @@ func Apply(options Options) (Result, error) {
 			}
 		}
 	}
+	if err := applyClaudePermissions(scope, agents, options, &result); err != nil {
+		return Result{}, err
+	}
 	return result, nil
+}
+
+// applyClaudePermissions installs the managed tool permissions into the Claude
+// settings file. It does nothing when Claude is not a selected agent, when the
+// operator opted out, or when the confirmation is declined.
+func applyClaudePermissions(
+	scope string,
+	agents []string,
+	options Options,
+	result *Result,
+) error {
+	if !slices.Contains(agents, "claude") || options.ClaudePermissions == ClaudePermissionsNo {
+		return nil
+	}
+	path, err := findClaudeSettings(scope)
+	if err != nil {
+		return err
+	}
+	// #nosec G304 -- path is the Claude settings file validated not to resolve
+	// outside the workspace scope.
+	before, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	after, err := mergeClaudeSettings(before)
+	if err != nil {
+		return fmt.Errorf("merge %s: %w", path, err)
+	}
+	if bytes.Equal(before, after) {
+		return nil
+	}
+	diff := simpleDiff(path, before, after)
+	if !options.DryRun {
+		confirmed, confirmErr := confirmClaudePermissions(path, diff, options)
+		if confirmErr != nil {
+			return confirmErr
+		}
+		if !confirmed {
+			return nil
+		}
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			return fmt.Errorf("create directory for %s: %w", path, mkdirErr)
+		}
+		// #nosec G703 -- findClaudeSettings resolves existing symlinks and rejects
+		// targets outside the workspace scope before any file is changed.
+		if writeErr := os.WriteFile(path, after, 0o600); writeErr != nil {
+			return fmt.Errorf("write %s: %w", path, writeErr)
+		}
+	}
+	result.Paths = append(result.Paths, path)
+	result.Diffs = append(result.Diffs, diff)
+	return nil
+}
+
+func confirmClaudePermissions(path string, diff string, options Options) (bool, error) {
+	if options.ClaudePermissions == ClaudePermissionsYes {
+		return true, nil
+	}
+	if options.Confirm == nil {
+		return false, nil
+	}
+	confirmed, err := options.Confirm(path, diff)
+	if err != nil {
+		return false, fmt.Errorf("confirm %s: %w", path, err)
+	}
+	return confirmed, nil
 }
 
 // findScopeRoot uses the nearest existing MCP config as the workspace boundary.
@@ -342,16 +495,39 @@ func findMCPConfig(dir string) (string, error) {
 	}
 }
 
+// scopedConfig describes an agent configuration file that must stay inside the
+// workspace scope. Go error strings start in lower case, so a message that opens
+// with the label needs its own form.
+type scopedConfig struct {
+	relative string
+	name     string
+	lower    string
+}
+
 func findCodexConfig(scope string) (string, error) {
+	return findScopedConfig(
+		scope,
+		scopedConfig{relative: codexConfig, name: "Codex config", lower: "codex config"},
+	)
+}
+
+func findClaudeSettings(scope string) (string, error) {
+	return findScopedConfig(
+		scope,
+		scopedConfig{relative: claudeSettings, name: "Claude settings", lower: "claude settings"},
+	)
+}
+
+func findScopedConfig(scope string, config scopedConfig) (string, error) {
 	resolvedScope, err := resolveWorkspaceScope(scope)
 	if err != nil {
 		return "", err
 	}
-	resolvedDirectory, err := resolveCodexConfigDirectory(scope, resolvedScope)
+	resolvedDirectory, err := resolveScopedConfigDirectory(scope, resolvedScope, config)
 	if err != nil {
 		return "", err
 	}
-	return resolveCodexConfigFile(scope, resolvedScope, resolvedDirectory)
+	return resolveScopedConfigFile(scope, resolvedScope, resolvedDirectory, config)
 }
 
 func resolveWorkspaceScope(scope string) (string, error) {
@@ -375,14 +551,18 @@ func resolveWorkspaceScope(scope string) (string, error) {
 	}
 }
 
-func resolveCodexConfigDirectory(scope string, resolvedScope string) (string, error) {
-	directory := filepath.Join(scope, filepath.Dir(codexConfig))
+func resolveScopedConfigDirectory(
+	scope string,
+	resolvedScope string,
+	config scopedConfig,
+) (string, error) {
+	directory := filepath.Join(scope, filepath.Dir(config.relative))
 	info, err := os.Lstat(directory)
 	if os.IsNotExist(err) {
-		return filepath.Join(resolvedScope, filepath.Dir(codexConfig)), nil
+		return filepath.Join(resolvedScope, filepath.Dir(config.relative)), nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("inspect Codex config directory %s: %w", directory, err)
+		return "", fmt.Errorf("inspect %s directory %s: %w", config.name, directory, err)
 	}
 	if !info.IsDir() && info.Mode()&os.ModeSymlink == 0 {
 		// Windows directory junctions are reported by Lstat as irregular files.
@@ -390,55 +570,56 @@ func resolveCodexConfigDirectory(scope string, resolvedScope string) (string, er
 		// configuration, such as the installer fallback, remains usable.
 		resolvedInfo, statErr := os.Stat(directory)
 		if statErr != nil || !resolvedInfo.IsDir() {
-			return "", fmt.Errorf("codex config directory %s is not a directory", directory)
+			return "", fmt.Errorf("%s directory %s is not a directory", config.lower, directory)
 		}
 	}
 	resolvedDirectory, err := resolveWithinScope(resolvedScope, directory)
 	if err != nil {
-		return "", fmt.Errorf("resolve Codex config directory: %w", err)
+		return "", fmt.Errorf("resolve %s directory: %w", config.name, err)
 	}
 	resolvedInfo, err := os.Stat(resolvedDirectory)
 	if err != nil {
-		return "", fmt.Errorf("inspect resolved Codex config directory %s: %w", directory, err)
+		return "", fmt.Errorf("inspect resolved %s directory %s: %w", config.name, directory, err)
 	}
 	if !resolvedInfo.IsDir() {
-		return "", fmt.Errorf("codex config directory %s is not a directory", directory)
+		return "", fmt.Errorf("%s directory %s is not a directory", config.lower, directory)
 	}
 	return resolvedDirectory, nil
 }
 
-func resolveCodexConfigFile(
+func resolveScopedConfigFile(
 	scope string,
 	resolvedScope string,
 	resolvedDirectory string,
+	config scopedConfig,
 ) (string, error) {
-	path := filepath.Join(scope, codexConfig)
+	path := filepath.Join(scope, config.relative)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return filepath.Join(resolvedDirectory, filepath.Base(codexConfig)), nil
+		return filepath.Join(resolvedDirectory, filepath.Base(config.relative)), nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("inspect Codex config %s: %w", path, err)
+		return "", fmt.Errorf("inspect %s %s: %w", config.name, path, err)
 	}
 	if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-		return "", fmt.Errorf("codex config %s is not a regular file", path)
+		return "", fmt.Errorf("%s %s is not a regular file", config.lower, path)
 	}
 	// Resolve the directory before appending the file name. On Windows,
 	// EvalSymlinks can fail for a file addressed through a directory junction,
 	// even though the file is present in the junction target.
 	resolvedPath, err := resolveWithinScope(
 		resolvedScope,
-		filepath.Join(resolvedDirectory, filepath.Base(codexConfig)),
+		filepath.Join(resolvedDirectory, filepath.Base(config.relative)),
 	)
 	if err != nil {
-		return "", fmt.Errorf("resolve Codex config: %w", err)
+		return "", fmt.Errorf("resolve %s: %w", config.name, err)
 	}
 	resolvedInfo, err := os.Stat(resolvedPath)
 	if err != nil {
-		return "", fmt.Errorf("inspect resolved Codex config %s: %w", path, err)
+		return "", fmt.Errorf("inspect resolved %s %s: %w", config.name, path, err)
 	}
 	if !resolvedInfo.Mode().IsRegular() {
-		return "", fmt.Errorf("codex config %s is not a regular file", path)
+		return "", fmt.Errorf("%s %s is not a regular file", config.lower, path)
 	}
 	return resolvedPath, nil
 }
@@ -569,6 +750,89 @@ func mergeMCPConfig(before []byte) ([]byte, error) {
 		return nil, fmt.Errorf("encode .mcp.json: %w", err)
 	}
 	return append(data, '\n'), nil
+}
+
+// mergeClaudeSettings replaces the managed permission entries. Every entry of
+// this MCP server is dropped from every permission list first, including tools
+// and wildcards this version does not know, and the current entries are then
+// appended to the allow and ask lists.
+func mergeClaudeSettings(before []byte) ([]byte, error) {
+	settings := map[string]any{}
+	if len(bytes.TrimSpace(before)) > 0 {
+		if err := json.Unmarshal(before, &settings); err != nil {
+			return nil, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+		}
+	}
+	permissions, err := claudePermissionLists(settings)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range permissions {
+		list, isList := value.([]any)
+		if !isList {
+			continue
+		}
+		permissions[key] = withoutManagedClaudeTools(list)
+	}
+	managed := ClaudeManagedTools()
+	if appendErr := appendClaudeTools(permissions, "allow", managed.Allow); appendErr != nil {
+		return nil, appendErr
+	}
+	if appendErr := appendClaudeTools(permissions, "ask", managed.Ask); appendErr != nil {
+		return nil, appendErr
+	}
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode %s: %w", claudeSettings, err)
+	}
+	return append(data, '\n'), nil
+}
+
+func claudePermissionLists(settings map[string]any) (map[string]any, error) {
+	value, exists := settings["permissions"]
+	if !exists || value == nil {
+		permissions := map[string]any{}
+		settings["permissions"] = permissions
+		return permissions, nil
+	}
+	permissions, isObject := value.(map[string]any)
+	if !isObject {
+		return nil, fmt.Errorf("permissions in %s is not an object", claudeSettings)
+	}
+	return permissions, nil
+}
+
+func appendClaudeTools(permissions map[string]any, key string, tools []string) error {
+	list, isList := permissions[key].([]any)
+	if value, exists := permissions[key]; exists && value != nil && !isList {
+		return fmt.Errorf("permissions.%s in %s is not a list", key, claudeSettings)
+	}
+	if list == nil {
+		list = make([]any, 0, len(tools))
+	}
+	for _, tool := range tools {
+		list = append(list, tool)
+	}
+	permissions[key] = list
+	return nil
+}
+
+func withoutManagedClaudeTools(list []any) []any {
+	kept := make([]any, 0, len(list))
+	for _, item := range list {
+		if text, isText := item.(string); isText && isManagedClaudeTool(text) {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	return kept
+}
+
+// isManagedClaudeTool reports whether the permission entry addresses this MCP
+// server. Another server whose name only starts with the same text is kept.
+func isManagedClaudeTool(entry string) bool {
+	entry = strings.TrimSpace(entry)
+	return entry == claudeServerRule || strings.HasPrefix(entry, claudeServerRule+"__")
 }
 
 func mergeCodexConfig(before []byte, root string) ([]byte, error) {

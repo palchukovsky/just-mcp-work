@@ -7,6 +7,7 @@
 package agentinit
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,7 +30,8 @@ func TestApplyUpdatesJunctionedCodexConfigDirectory(t *testing.T) {
 	}
 
 	link := filepath.Join(dir, filepath.Dir(codexConfig))
-	if output, err := exec.Command(
+	if output, err := exec.CommandContext(
+		context.Background(),
 		"cmd.exe",
 		"/d",
 		"/c",

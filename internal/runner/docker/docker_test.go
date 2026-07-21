@@ -525,7 +525,7 @@ func TestBuildCommandReportsMissingProjectFiles(t *testing.T) {
 			t.Fatalf("BuildCommand(%s) accepted a project without its files", name)
 		}
 		if !strings.Contains(err.Error(), expectations.message) ||
-			!strings.Contains(err.Error(), dir) {
+			!strings.Contains(err.Error(), strconv.Quote(dir)) {
 			t.Fatalf("BuildCommand(%s) error = %v, want the missing file and project", name, err)
 		}
 		if !errors.Is(err, os.ErrNotExist) {

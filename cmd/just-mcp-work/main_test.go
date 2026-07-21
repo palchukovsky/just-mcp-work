@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 )
 
 func TestRunPrintsVersionWithFlagAlias(t *testing.T) {
@@ -119,5 +121,49 @@ func TestParseServeOptionsAllowsUnlimitedTimeout(t *testing.T) {
 	}
 	if _, err := parseServeOptions([]string{"--timeout", "500us"}); err == nil {
 		t.Fatal("sub-millisecond timeout must be rejected")
+	}
+}
+
+func TestInitWritesClaudePermissionsWithFlag(t *testing.T) {
+	dir := t.TempDir()
+	initErr := initCommand(
+		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "yes"},
+	)
+	if initErr != nil {
+		t.Fatal(initErr)
+	}
+	path := filepath.Join(dir, ".claude", "settings.json")
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	for _, rule := range []string{
+		agentinit.ClaudeToolPrefix + "run_task",
+		agentinit.ClaudeToolPrefix + "run_shell_command",
+	} {
+		if !strings.Contains(string(data), rule) {
+			t.Fatalf("Claude settings do not contain %q:\n%s", rule, data)
+		}
+	}
+}
+
+func TestInitKeepsClaudePermissionsWhenDeclinedByFlag(t *testing.T) {
+	dir := t.TempDir()
+	initErr := initCommand(
+		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "no"},
+	)
+	if initErr != nil {
+		t.Fatal(initErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".claude", "settings.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("Claude settings were written: %v", statErr)
+	}
+}
+
+func TestInitRejectsUnsupportedClaudePermissionsMode(t *testing.T) {
+	err := initCommand([]string{"--dir", t.TempDir(), "--claude-permissions", "maybe"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported Claude permission mode") {
+		t.Fatalf("initCommand error = %v", err)
 	}
 }

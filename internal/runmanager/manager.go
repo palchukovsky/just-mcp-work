@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/palchukovsky/just-mcp-work/internal/executor"
@@ -117,17 +118,31 @@ func (m *Manager) Start(run *executor.Run) error {
 	m.mu.Unlock()
 	go func() {
 		<-run.Done()
-		m.mu.Lock()
-		delete(m.runs, runID)
-		if run.NeedsMetadataRepair() {
-			m.terminal[runID] = run
-		}
-		m.mu.Unlock()
-		if m.onFinish != nil {
-			m.onFinish()
-		}
+		m.releaseFinishedRun(runID, run)
 	}()
 	return nil
+}
+
+// releaseFinishedRun removes one completed run and reports completion exactly
+// once, regardless of whether the executor watcher or Shutdown reaches it first.
+func (m *Manager) releaseFinishedRun(runID string, run *executor.Run) {
+	needsMetadataRepair := run.NeedsMetadataRepair()
+
+	m.mu.Lock()
+	current, tracked := m.runs[runID]
+	if !tracked || current != run {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.runs, runID)
+	if needsMetadataRepair {
+		m.terminal[runID] = run
+	}
+	m.mu.Unlock()
+
+	if m.onFinish != nil {
+		m.onFinish()
+	}
 }
 
 // Get returns a locally owned live run.
@@ -196,10 +211,8 @@ func (m *Manager) RepairTerminals() (int, error) {
 // Shutdown terminates all locally owned runs or returns when ctx expires.
 func (m *Manager) Shutdown(ctx context.Context) {
 	m.mu.Lock()
-	runs := make([]*executor.Run, 0, len(m.runs))
-	for _, run := range m.runs {
-		runs = append(runs, run)
-	}
+	runs := make(map[string]*executor.Run, len(m.runs))
+	maps.Copy(runs, m.runs)
 	m.mu.Unlock()
 	if len(runs) == 0 {
 		return
@@ -208,12 +221,13 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	go func() {
 		var wait sync.WaitGroup
 		wait.Add(len(runs))
-		for _, run := range runs {
-			go func(run *executor.Run) {
+		for runID, run := range runs {
+			go func(runID string, run *executor.Run) {
 				defer wait.Done()
 				//nolint:errcheck // Shutdown is best-effort; the ledger error is already recorded.
 				_ = run.StopWithReason("server shutdown")
-			}(run)
+				m.releaseFinishedRun(runID, run)
+			}(runID, run)
 		}
 		wait.Wait()
 		close(done)

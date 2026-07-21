@@ -793,3 +793,317 @@ func assertFileMode(t *testing.T, path string, want os.FileMode) {
 func containsPath(paths []string, want string) bool {
 	return slices.Contains(paths, want)
 }
+
+func TestApplyWritesClaudePermissionsWhenAccepted(t *testing.T) {
+	dir := t.TempDir()
+	path := claudeSettingsPath(t, dir)
+	options := Options{
+		Dir:               dir,
+		Agents:            []string{"claude"},
+		ClaudePermissions: ClaudePermissionsYes,
+	}
+	result, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(result.Paths, path) {
+		t.Fatalf("result paths = %#v", result.Paths)
+	}
+	assertFileMode(t, path, 0o600)
+	allow, ask := readClaudePermissions(t, path)
+	managed := ClaudeManagedTools()
+	if !slices.Equal(allow, managed.Allow) || !slices.Equal(ask, managed.Ask) {
+		t.Fatalf("permissions allow = %#v, ask = %#v", allow, ask)
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(second.Paths, path) {
+		t.Fatalf("idempotent apply changed the Claude settings: %#v", second.Paths)
+	}
+}
+
+func TestApplyReplacesEveryManagedClaudeEntry(t *testing.T) {
+	dir := t.TempDir()
+	settings := claudeSettingsPath(t, dir)
+	if err := os.MkdirAll(filepath.Dir(settings), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := `{
+	  "model": "opus",
+	  "permissions": {
+	    "allow": ["Bash(git status:*)", "mcp__just-mcp-work__retired_tool"],
+	    "ask": ["mcp__just-mcp-work", "Bash(git add:*)"],
+	    "deny": ["mcp__just-mcp-work__run_shell_command", "mcp__just-mcp-work-other__keep"]
+	  }
+	}`
+	if err := os.WriteFile(settings, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(
+		Options{
+			Dir:               dir,
+			Agents:            []string{"claude"},
+			ClaudePermissions: ClaudePermissionsYes,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(result.Paths, settings) {
+		t.Fatalf("result paths = %#v", result.Paths)
+	}
+	// #nosec G304 -- settings is created in this test's temporary directory.
+	data, err := os.ReadFile(settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if decodeErr := json.Unmarshal(data, &config); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if config["model"] != "opus" {
+		t.Fatalf("unrelated settings were clobbered: %#v", config)
+	}
+	permissions, ok := config["permissions"].(map[string]any)
+	if !ok {
+		t.Fatalf("permissions = %#v", config["permissions"])
+	}
+	allow := stringList(t, permissions["allow"])
+	ask := stringList(t, permissions["ask"])
+	deny := stringList(t, permissions["deny"])
+	managed := ClaudeManagedTools()
+	if !slices.Equal(allow, append([]string{"Bash(git status:*)"}, managed.Allow...)) {
+		t.Fatalf("allow = %#v", allow)
+	}
+	if !slices.Equal(ask, append([]string{"Bash(git add:*)"}, managed.Ask...)) {
+		t.Fatalf("ask = %#v", ask)
+	}
+	if !slices.Equal(deny, []string{"mcp__just-mcp-work-other__keep"}) {
+		t.Fatalf("deny = %#v", deny)
+	}
+	if strings.Contains(string(data), "retired_tool") {
+		t.Fatalf("unknown managed entry survived:\n%s", data)
+	}
+}
+
+func TestApplySkipsClaudePermissionsWithoutApproval(t *testing.T) {
+	for _, testCase := range []struct {
+		options Options
+		name    string
+	}{
+		{name: "declined", options: Options{
+			ClaudePermissions: ClaudePermissionsAsk,
+			Confirm:           func(string, string) (bool, error) { return false, nil },
+		}},
+		{name: "no confirmation available", options: Options{
+			ClaudePermissions: ClaudePermissionsAsk,
+		}},
+		{name: "opted out", options: Options{ClaudePermissions: ClaudePermissionsNo}},
+		{name: "claude not selected", options: Options{
+			Agents:            []string{"codex"},
+			ClaudePermissions: ClaudePermissionsYes,
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			options := testCase.options
+			options.Dir = dir
+			if options.Agents == nil {
+				options.Agents = []string{"claude"}
+			}
+			result, err := Apply(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := claudeSettingsPath(t, dir)
+			if containsPath(result.Paths, path) {
+				t.Fatalf("result reports an unwritten path: %#v", result.Paths)
+			}
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("Claude settings were written: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestApplyReportsClaudePermissionsDiffWithoutAskingOnDryRun(t *testing.T) {
+	dir := t.TempDir()
+	confirmed := false
+	result, err := Apply(
+		Options{
+			Dir:     dir,
+			Agents:  []string{"claude"},
+			DryRun:  true,
+			Confirm: func(string, string) (bool, error) { confirmed = true; return true, nil },
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed {
+		t.Fatal("dry run asked for a confirmation")
+	}
+	path := claudeSettingsPath(t, dir)
+	if !containsPath(result.Paths, path) {
+		t.Fatalf("result paths = %#v", result.Paths)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("dry run wrote the Claude settings: %v", statErr)
+	}
+	if !strings.Contains(strings.Join(result.Diffs, "\n"), ClaudeToolPrefix+"run_task") {
+		t.Fatalf("diffs do not describe the managed tools: %#v", result.Diffs)
+	}
+}
+
+func TestApplyRejectsInvalidClaudePermissionLists(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		settings  string
+		wantError string
+	}{
+		{
+			name:      "permissions is not an object",
+			settings:  `{"permissions": []}`,
+			wantError: "is not an object",
+		},
+		{
+			name:      "allow is not a list",
+			settings:  `{"permissions": {"allow": "all"}}`,
+			wantError: "permissions.allow",
+		},
+		{
+			name:      "invalid JSON",
+			settings:  "{",
+			wantError: "decode existing",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := claudeSettingsPath(t, dir)
+			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(testCase.settings), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Apply(
+				Options{
+					Dir:               dir,
+					Agents:            []string{"claude"},
+					ClaudePermissions: ClaudePermissionsYes,
+				},
+			)
+			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
+				t.Fatalf("Apply error = %v, want %q", err, testCase.wantError)
+			}
+			// #nosec G304 -- path is created in this test's temporary directory.
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(data) != testCase.settings {
+				t.Fatalf("rejected settings were changed:\n%s", data)
+			}
+		})
+	}
+}
+
+func TestApplyReportsClaudePermissionConfirmationFailure(t *testing.T) {
+	dir := t.TempDir()
+	_, err := Apply(
+		Options{
+			Dir:     dir,
+			Agents:  []string{"claude"},
+			Confirm: func(string, string) (bool, error) { return false, os.ErrClosed },
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "confirm") {
+		t.Fatalf("Apply error = %v", err)
+	}
+}
+
+func TestParseClaudePermissions(t *testing.T) {
+	for _, testCase := range []struct {
+		value string
+		want  ClaudePermissions
+	}{
+		{value: "", want: ClaudePermissionsAsk},
+		{value: "ask", want: ClaudePermissionsAsk},
+		{value: " YES ", want: ClaudePermissionsYes},
+		{value: "No", want: ClaudePermissionsNo},
+	} {
+		got, err := ParseClaudePermissions(testCase.value)
+		if err != nil || got != testCase.want {
+			t.Fatalf("ParseClaudePermissions(%q) = %q, %v", testCase.value, got, err)
+		}
+	}
+	if _, err := ParseClaudePermissions("maybe"); err == nil {
+		t.Fatal("ParseClaudePermissions accepted an unsupported mode")
+	}
+}
+
+func TestClaudeManagedToolsUseTheServerPrefix(t *testing.T) {
+	managed := ClaudeManagedTools()
+	seen := map[string]struct{}{}
+	for _, rule := range slices.Concat(managed.Allow, managed.Ask) {
+		if !strings.HasPrefix(rule, ClaudeToolPrefix) || !isManagedClaudeTool(rule) {
+			t.Fatalf("managed rule %q is not addressed to this server", rule)
+		}
+		if _, exists := seen[rule]; exists {
+			t.Fatalf("managed rule %q is listed twice", rule)
+		}
+		seen[rule] = struct{}{}
+	}
+	if isManagedClaudeTool("mcp__just-mcp-work-other__run_task") {
+		t.Fatal("another server's entry is treated as managed")
+	}
+}
+
+// claudeSettingsPath resolves the settings path the way Apply does, so a
+// temporary directory behind a symlink, such as /var on macOS, still matches.
+func claudeSettingsPath(t *testing.T, dir string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(resolved, ".claude", "settings.json")
+}
+
+func readClaudePermissions(t *testing.T, path string) ([]string, []string) {
+	t.Helper()
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		Permissions struct {
+			Allow []string `json:"allow"`
+			Ask   []string `json:"ask"`
+		} `json:"permissions"`
+	}
+	if decodeErr := json.Unmarshal(data, &config); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	return config.Permissions.Allow, config.Permissions.Ask
+}
+
+func stringList(t *testing.T, value any) []string {
+	t.Helper()
+	items, ok := value.([]any)
+	if !ok {
+		t.Fatalf("value %#v is not a list", value)
+	}
+	result := make([]string, 0, len(items))
+	for _, item := range items {
+		text, isText := item.(string)
+		if !isText {
+			t.Fatalf("list item %#v is not a string", item)
+		}
+		result = append(result, text)
+	}
+	return result
+}

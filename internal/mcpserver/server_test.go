@@ -17,7 +17,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -846,4 +848,34 @@ func (handlerRunner) BuildCommand(
 	cmd.Dir = projectDir
 	cmd.Env = append(os.Environ(), "JMW_TEST_HELPER_PROCESS=1")
 	return cmd, nil
+}
+
+// TestClaudePermissionsCoverEveryRegisteredTool guards the managed Claude
+// permission list against a tool added to the server but not to the list.
+func TestClaudePermissionsCoverEveryRegisteredTool(t *testing.T) {
+	source, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	registered := regexp.MustCompile(`mcp\.Tool\{\s*Name:\s*"([a-z_]+)"`).
+		FindAllStringSubmatch(string(source), -1)
+	if len(registered) == 0 {
+		t.Fatal("no registered tools were found in server.go")
+	}
+	managed := map[string]struct{}{}
+	for _, rule := range slices.Concat(
+		agentinit.ClaudeManagedTools().Allow,
+		agentinit.ClaudeManagedTools().Ask,
+	) {
+		managed[strings.TrimPrefix(rule, agentinit.ClaudeToolPrefix)] = struct{}{}
+	}
+	for _, match := range registered {
+		if _, exists := managed[match[1]]; !exists {
+			t.Errorf("tool %q has no managed Claude permission entry", match[1])
+		}
+		delete(managed, match[1])
+	}
+	for tool := range managed {
+		t.Errorf("managed Claude permission entry %q has no registered tool", tool)
+	}
 }
