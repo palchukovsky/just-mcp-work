@@ -16,9 +16,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -32,6 +34,20 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
+
+// listTasksDescription tells the agent how to ask for one task instead of a
+// whole catalog, because the default full listing of a large project is the
+// most expensive answer this server can give.
+func listTasksDescription() string {
+	return "List runner-neutral tasks for one discovered project. Filter server-side instead of " +
+		"reading a whole catalog: names selects exact task names or task IDs, name_prefix and query " +
+		"search when the exact name is unknown, visibility keeps public or private tasks, and " +
+		"detail: compact keeps identity and parameters, returns at most the first 160 runes of the " +
+		"first description line, and drops runner metadata and run statistics. names, name_prefix, " +
+		"and query answer different questions and must not be combined. applied_filter reports the " +
+		"effective filter, how many tasks it removed, and any requested name that exists nowhere in " +
+		"the project."
+}
 
 // runShellCommandDescription describes the ad-hoc escape hatch of this server.
 func runShellCommandDescription() string {
@@ -167,7 +183,7 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "list_tasks",
-			Description: "List runner-neutral tasks for one discovered project.",
+			Description: listTasksDescription(),
 		},
 		recoverTool(withUpdateNotification(s, s.listTasks)),
 	)
@@ -370,9 +386,28 @@ func projectFilter(input listProjectsInput) (workspace.Filter, appliedFilterOutp
 	return filter, applied
 }
 
+// Task selectors and response modes of list_tasks. The defaults keep the
+// response of a request that names none of them exactly as it was before
+// server-side task filtering existed.
+const (
+	taskVisibilityAll     = "all"
+	taskVisibilityPublic  = "public"
+	taskVisibilityPrivate = "private"
+	taskDetailFull        = "full"
+	taskDetailCompact     = "compact"
+)
+
+//nolint:govet,lll // Field order follows the MCP request shape; the schema help text is one string per field.
 type listTasksInput struct {
-	ProjectPath string `json:"project_path" jsonschema:"relative path returned by list_projects"`
-	Runner      string `json:"runner,omitempty" jsonschema:"optional runner name to filter"`
+	ProjectPath     string   `json:"project_path" jsonschema:"relative path returned by list_projects"`
+	Runner          string   `json:"runner,omitempty" jsonschema:"optional runner name to filter"`
+	Names           []string `json:"names,omitempty" jsonschema:"exact task names or task IDs; not combinable with name_prefix or query"`
+	NamePrefix      string   `json:"name_prefix,omitempty" jsonschema:"case-sensitive task name prefix; not combinable with names or query"`
+	Query           string   `json:"query,omitempty" jsonschema:"case-insensitive substring of the task name or description; not combinable with names or name_prefix"`
+	Visibility      string   `json:"visibility,omitempty" jsonschema:"public, private, or all; default all"`
+	Detail          string   `json:"detail,omitempty" jsonschema:"compact or full; default full"`
+	IncludeStats    *bool    `json:"include_stats,omitempty" jsonschema:"include run statistics; default true with detail full, false with detail compact"`
+	IncludeMetadata *bool    `json:"include_metadata,omitempty" jsonschema:"include runner metadata; default true with detail full, false with detail compact"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -380,14 +415,67 @@ type listTasksOutput struct {
 	Tasks []taskOutput `json:"tasks"`
 	// Errors and Warnings explain a runner that contributes no task here, so
 	// the caller does not have to fall back to list_projects to learn why.
-	Errors   map[string]string `json:"errors,omitempty"`
-	Warnings map[string]string `json:"warnings,omitempty"`
-	Error    *toolError        `json:"error,omitempty"`
+	Errors        map[string]string       `json:"errors,omitempty"`
+	Warnings      map[string]string       `json:"warnings,omitempty"`
+	AppliedFilter appliedTaskFilterOutput `json:"applied_filter"`
+	Error         *toolError              `json:"error,omitempty"`
 }
 
+// taskOutput keeps the field order and the JSON names of runner.Task, and adds
+// the run statistics. The fields are listed explicitly because a compact
+// listing omits some of them.
+//
+//nolint:govet // Field order follows the stable MCP JSON task response shape.
 type taskOutput struct {
-	runner.Task
-	Stats *runstats.Aggregate `json:"stats,omitempty"`
+	ID          string              `json:"task_id"`
+	Runner      string              `json:"runner"`
+	Name        string              `json:"name"`
+	Description string              `json:"description,omitempty"`
+	Params      []runner.Param      `json:"parameters,omitempty"`
+	Private     bool                `json:"private"`
+	Meta        map[string]any      `json:"metadata,omitempty"`
+	Stats       *runstats.Aggregate `json:"stats,omitempty"`
+}
+
+//nolint:govet // Field order follows the stable MCP JSON response shape.
+type appliedTaskFilterOutput struct {
+	ProjectPath     string     `json:"project_path"`
+	Runner          string     `json:"runner"`
+	Names           []string   `json:"names"`
+	NamePrefix      string     `json:"name_prefix"`
+	Query           string     `json:"query"`
+	Visibility      string     `json:"visibility"`
+	Detail          string     `json:"detail"`
+	IncludeStats    bool       `json:"include_stats"`
+	IncludeMetadata bool       `json:"include_metadata"`
+	DefaultsApplied []string   `json:"defaults_applied"`
+	Discovered      int        `json:"discovered"`
+	Returned        int        `json:"returned"`
+	Pruned          taskPruned `json:"pruned"`
+	// UnknownNames lists requested exact names absent from every discovered task.
+	// Runner and visibility removals are reported by Pruned instead.
+	UnknownNames []string `json:"unknown_names,omitempty"`
+}
+
+// taskPruned counts the discovered tasks each filter stage removed. The stages
+// run in field order, so a task removed by one is not counted again by another.
+type taskPruned struct {
+	Runner     int `json:"runner"`
+	Visibility int `json:"visibility"`
+	Name       int `json:"name"`
+}
+
+// taskFilter is the validated task-level selection of one list_tasks request.
+type taskFilter struct {
+	// names is nil unless the caller asked for exact names. It holds both the
+	// task names and the fully qualified task IDs the caller may have used.
+	names           map[string]struct{}
+	namePrefix      string
+	query           string
+	visibility      string
+	compact         bool
+	includeStats    bool
+	includeMetadata bool
 }
 
 func (s *Server) listTasks(
@@ -395,22 +483,28 @@ func (s *Server) listTasks(
 	_ *mcp.CallToolRequest,
 	input listTasksInput,
 ) (*mcp.CallToolResult, listTasksOutput, error) {
+	filter, applied, err := resolveTaskFilter(input)
+	if err != nil {
+		return toolErrorResult(err), listTasksOutput{
+			AppliedFilter: applied,
+			Error:         newToolError(err),
+		}, nil
+	}
 	s.repairTerminalMetadata()
 	project, err := s.workspace.Find(ctx, input.ProjectPath)
 	if err != nil {
-		return toolErrorResult(err), listTasksOutput{Error: newToolError(err)}, nil
-	}
-	if input.Runner != "" {
-		return nil, listTasksOutput{
-			Tasks:    s.taskOutputs(project.RelPath, project.Tasks[input.Runner]),
-			Errors:   selectIssues(project.Errors, input.Runner),
-			Warnings: selectIssues(project.Warnings, input.Runner),
+		return toolErrorResult(err), listTasksOutput{
+			AppliedFilter: applied,
+			Error:         newToolError(err),
 		}, nil
 	}
 	result := listTasksOutput{Errors: project.Errors, Warnings: project.Warnings}
-	for _, name := range project.Runners {
-		result.Tasks = append(result.Tasks, s.taskOutputs(project.RelPath, project.Tasks[name])...)
+	if input.Runner != "" {
+		result.Errors = selectIssues(project.Errors, input.Runner)
+		result.Warnings = selectIssues(project.Warnings, input.Runner)
 	}
+	result.Tasks = s.selectTasks(project, input.Runner, filter, &applied)
+	result.AppliedFilter = applied
 	return nil, result, nil
 }
 
@@ -424,16 +518,293 @@ func selectIssues(issues map[string]string, name string) map[string]string {
 	return map[string]string{name: issue}
 }
 
-func (s *Server) taskOutputs(projectPath string, tasks []runner.Task) []taskOutput {
-	output := make([]taskOutput, 0, len(tasks))
-	for _, task := range tasks {
+// selectTasks applies the runner filter, the task selectors, and the detail
+// mode in one pass over the discovered tasks, and records in applied what the
+// filters removed and which requested name matched nothing.
+func (s *Server) selectTasks(
+	project workspace.Project,
+	runnerName string,
+	filter taskFilter,
+	applied *appliedTaskFilterOutput,
+) []taskOutput {
+	matched := make(map[string]struct{}, len(filter.names))
+	selected := make([]taskOutput, 0, discoveredTaskCount(project))
+	for _, name := range project.Runners {
+		for _, task := range project.Tasks[name] {
+			applied.Discovered++
+			filter.recordExactMatches(task, matched)
+			if runnerName != "" && name != runnerName {
+				applied.Pruned.Runner++
+				continue
+			}
+			if !filter.visible(task) {
+				applied.Pruned.Visibility++
+				continue
+			}
+			if !filter.selects(task) {
+				applied.Pruned.Name++
+				continue
+			}
+			selected = append(selected, s.taskOutput(project.RelPath, task, filter))
+		}
+	}
+	applied.Returned = len(selected)
+	for _, name := range applied.Names {
+		if _, found := matched[name]; !found {
+			applied.UnknownNames = append(applied.UnknownNames, name)
+		}
+	}
+	return selected
+}
+
+func discoveredTaskCount(project workspace.Project) int {
+	total := 0
+	for _, name := range project.Runners {
+		total += len(project.Tasks[name])
+	}
+	return total
+}
+
+// visible answers the visibility selector. Task privacy is reported by the
+// runner, so this filter never has to look at a task name.
+func (f taskFilter) visible(task runner.Task) bool {
+	switch f.visibility {
+	case taskVisibilityPublic:
+		return !task.Private
+	case taskVisibilityPrivate:
+		return task.Private
+	default:
+		return true
+	}
+}
+
+// recordExactMatches records every requested spelling of a discovered task
+// before the runner and visibility filters can remove it from the response.
+func (f taskFilter) recordExactMatches(task runner.Task, matched map[string]struct{}) {
+	if f.names == nil {
+		return
+	}
+	if _, found := f.names[task.Name]; found {
+		matched[task.Name] = struct{}{}
+	}
+	if _, found := f.names[task.ID]; found {
+		matched[task.ID] = struct{}{}
+	}
+}
+
+// selects answers whether a task satisfies the active name selector.
+func (f taskFilter) selects(task runner.Task) bool {
+	switch {
+	case f.names != nil:
+		_, nameFound := f.names[task.Name]
+		_, idFound := f.names[task.ID]
+		return nameFound || idFound
+	case f.namePrefix != "":
+		return strings.HasPrefix(task.Name, f.namePrefix)
+	case f.query != "":
+		return strings.Contains(strings.ToLower(task.Name), f.query) ||
+			strings.Contains(strings.ToLower(task.Description), f.query)
+	default:
+		return true
+	}
+}
+
+func (s *Server) taskOutput(
+	projectPath string,
+	task runner.Task,
+	filter taskFilter,
+) taskOutput {
+	output := taskOutput{
+		ID:          task.ID,
+		Runner:      task.Runner,
+		Name:        task.Name,
+		Description: task.Description,
+		// Parameters stay in a compact listing: without them a parameterized
+		// task cannot be invoked, which is what this listing is for.
+		Params:  task.Params,
+		Private: task.Private,
+	}
+	if filter.compact {
+		output.Description = shortTaskDescription(task.Description)
+	}
+	if filter.includeMetadata {
+		output.Meta = task.Meta
+	}
+	if filter.includeStats {
 		stats, err := s.stats.Task(projectPath, task.ID)
 		if err != nil {
 			s.config.Logger.Warn("read task duration statistics failed", "task_id", task.ID, "error", err)
 		}
-		output = append(output, taskOutput{Task: task, Stats: stats})
+		output.Stats = stats
 	}
 	return output
+}
+
+// compactDescriptionRunes bounds the description a compact listing returns. A
+// task doc is written for a human reader, while an agent only needs its first
+// line to tell one task from another.
+const compactDescriptionRunes = 160
+
+func shortTaskDescription(description string) string {
+	line, _, _ := strings.Cut(description, "\n")
+	line = strings.TrimSpace(line)
+	if utf8.RuneCountInString(line) <= compactDescriptionRunes {
+		return line
+	}
+	return strings.TrimRightFunc(string([]rune(line)[:compactDescriptionRunes]), unicode.IsSpace) + "..."
+}
+
+// resolveTaskFilter validates the task selectors and reports the effective
+// filter. Defaults keep an unfiltered request on its previous behavior: every
+// runner, both visibilities, and the full task detail.
+//
+//nolint:gocyclo // Each optional task selector has a separate validation path.
+func resolveTaskFilter(input listTasksInput) (taskFilter, appliedTaskFilterOutput, error) {
+	applied := appliedTaskFilterOutput{
+		ProjectPath: input.ProjectPath,
+		Runner:      input.Runner,
+		Names:       []string{},
+		Visibility:  taskVisibilityAll,
+		Detail:      taskDetailFull,
+	}
+	filter := taskFilter{visibility: taskVisibilityAll}
+	if input.Runner == "" {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "runner")
+	}
+	names, err := exactTaskNames(input.Names)
+	if err != nil {
+		return taskFilter{}, applied, err
+	}
+	prefix, err := textSelector("name_prefix", input.NamePrefix)
+	if err != nil {
+		return taskFilter{}, applied, err
+	}
+	query, err := textSelector("query", input.Query)
+	if err != nil {
+		return taskFilter{}, applied, err
+	}
+	if err := singleTaskSelector(names != nil, prefix != "", query != ""); err != nil {
+		return taskFilter{}, applied, err
+	}
+	if names == nil {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "names")
+	} else {
+		applied.Names = names
+		filter.names = make(map[string]struct{}, len(names))
+		for _, name := range names {
+			filter.names[name] = struct{}{}
+		}
+	}
+	if prefix == "" {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "name_prefix")
+	}
+	applied.NamePrefix = prefix
+	filter.namePrefix = prefix
+	if query == "" {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "query")
+	}
+	applied.Query = query
+	filter.query = strings.ToLower(query)
+	switch input.Visibility {
+	case "":
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "visibility")
+	case taskVisibilityAll, taskVisibilityPublic, taskVisibilityPrivate:
+		filter.visibility = input.Visibility
+		applied.Visibility = input.Visibility
+	default:
+		return taskFilter{}, applied, fmt.Errorf(
+			"visibility must be %s, %s, or %s",
+			taskVisibilityPublic,
+			taskVisibilityPrivate,
+			taskVisibilityAll,
+		)
+	}
+	switch input.Detail {
+	case "":
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "detail")
+	case taskDetailFull:
+	case taskDetailCompact:
+		filter.compact = true
+		applied.Detail = taskDetailCompact
+	default:
+		return taskFilter{}, applied, fmt.Errorf(
+			"detail must be %s or %s",
+			taskDetailCompact,
+			taskDetailFull,
+		)
+	}
+	filter.includeStats = !filter.compact
+	if input.IncludeStats == nil {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "include_stats")
+	} else {
+		filter.includeStats = *input.IncludeStats
+	}
+	applied.IncludeStats = filter.includeStats
+	filter.includeMetadata = !filter.compact
+	if input.IncludeMetadata == nil {
+		applied.DefaultsApplied = append(applied.DefaultsApplied, "include_metadata")
+	} else {
+		filter.includeMetadata = *input.IncludeMetadata
+	}
+	applied.IncludeMetadata = filter.includeMetadata
+	return filter, applied, nil
+}
+
+// exactTaskNames normalizes the exact selector. A nil result means the caller
+// did not ask for exact names; an empty list is a request that can never match
+// and is rejected instead of being read as "every task".
+func exactTaskNames(values []string) ([]string, error) {
+	if values == nil {
+		return nil, nil
+	}
+	if len(values) == 0 {
+		return nil, fmt.Errorf("names must not be empty")
+	}
+	names := make([]string, 0, len(values))
+	for _, value := range values {
+		name := strings.TrimSpace(value)
+		if name == "" {
+			return nil, fmt.Errorf("names must not contain a blank entry")
+		}
+		if slices.Contains(names, name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
+// textSelector trims a free-text selector and rejects a blank one, so a
+// whitespace-only value cannot silently widen a listing to every task.
+func textSelector(field, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if value != "" && trimmed == "" {
+		return "", fmt.Errorf("%s must not be blank", field)
+	}
+	return trimmed, nil
+}
+
+// singleTaskSelector rejects a request that combines the exact, the prefix, and
+// the substring selector. They answer different questions, and serving such a
+// request would have to guess which one the caller meant.
+func singleTaskSelector(names, prefix, query bool) error {
+	selected := make([]string, 0, 3)
+	if names {
+		selected = append(selected, "names")
+	}
+	if prefix {
+		selected = append(selected, "name_prefix")
+	}
+	if query {
+		selected = append(selected, "query")
+	}
+	if len(selected) > 1 {
+		return fmt.Errorf(
+			"%s must not be combined; use one task selector per request",
+			strings.Join(selected, " and "),
+		)
+	}
+	return nil
 }
 
 //nolint:govet // Field order follows the MCP request shape.

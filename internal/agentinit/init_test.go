@@ -72,6 +72,9 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"stderr_tail",
 		"get_run_logs",
 		"tail_bytes: 0",
+		"first 160 runes",
+		"first description line",
+		"names, name_prefix, and query are mutually exclusive",
 	} {
 		if !strings.Contains(Prompt(), expected) {
 			t.Errorf("Prompt does not mention %q", expected)

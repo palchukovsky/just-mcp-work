@@ -89,7 +89,7 @@ def smoke(_: argparse.Namespace) -> None:
     with tempfile.TemporaryDirectory(prefix="just-mcp-work-smoke-") as temporary:
         root = Path(temporary)
         (root / "justfile").write_text(
-            "hello:\n    @echo hello\nlong:\n    @go run wait.go\n",
+            "hello:\n    @echo hello\nlong:\n    @go run wait.go\n_hidden:\n    @echo hidden\n",
             encoding="utf-8",
         )
         (root / "wait.go").write_text(
@@ -145,6 +145,21 @@ def smoke(_: argparse.Namespace) -> None:
                 required={"run_id"},
             )
             assert_input_schema(
+                tools_by_name["list_tasks"],
+                properties={
+                    "project_path",
+                    "runner",
+                    "names",
+                    "name_prefix",
+                    "query",
+                    "visibility",
+                    "detail",
+                    "include_stats",
+                    "include_metadata",
+                },
+                required={"project_path"},
+            )
+            assert_input_schema(
                 tools_by_name["list_runs"],
                 properties={"status", "project_path", "task_id", "limit", "cursor"},
                 required=set(),
@@ -160,11 +175,36 @@ def smoke(_: argparse.Namespace) -> None:
             tasks = call_tool(process, responses, 4, "list_tasks", {"project_path": project_path})
             if not tasks["tasks"]:
                 raise RuntimeError(f"server returned no tasks: projects={projects!r} tasks={tasks!r}")
-            task_id = tasks["tasks"][0]["task_id"]
-            receipt = call_tool(
+            task_id = next(
+                task["task_id"] for task in tasks["tasks"] if task["task_id"] == "just:hello"
+            )
+            selected = call_tool(
                 process,
                 responses,
                 5,
+                "list_tasks",
+                {"project_path": project_path, "names": ["hello", "absent"], "detail": "compact"},
+            )
+            if [task["task_id"] for task in selected["tasks"]] != [task_id]:
+                raise RuntimeError(f"exact task selection changed: {selected!r}")
+            if "metadata" in selected["tasks"][0] or "stats" in selected["tasks"][0]:
+                raise RuntimeError(f"compact task listing is not compact: {selected!r}")
+            if selected["applied_filter"]["unknown_names"] != ["absent"]:
+                raise RuntimeError(f"unknown task name is not reported: {selected!r}")
+            public = call_tool(
+                process,
+                responses,
+                6,
+                "list_tasks",
+                {"project_path": project_path, "visibility": "public", "detail": "compact"},
+            )
+            public_names = {task["name"] for task in public["tasks"]}
+            if "hello" not in public_names or "_hidden" in public_names:
+                raise RuntimeError(f"public task listing changed: {public!r}")
+            receipt = call_tool(
+                process,
+                responses,
+                7,
                 "run_task",
                 {"project_path": project_path, "task_id": task_id, "arguments": []},
             )
@@ -173,7 +213,7 @@ def smoke(_: argparse.Namespace) -> None:
             logs = call_tool(
                 process,
                 responses,
-                6,
+                8,
                 "get_run_logs",
                 {"run_id": receipt["run_id"], "stream": "stdout", "offset": 0, "limit": 64},
             )
@@ -184,7 +224,7 @@ def smoke(_: argparse.Namespace) -> None:
             shell_receipt = call_tool(
                 process,
                 responses,
-                7,
+                9,
                 "run_shell_command",
                 {"command": "echo " + shell_marker, "working_directory": "."},
             )
@@ -193,7 +233,7 @@ def smoke(_: argparse.Namespace) -> None:
             shell_logs = call_tool(
                 process,
                 responses,
-                8,
+                10,
                 "get_run_logs",
                 {
                     "run_id": shell_receipt["run_id"],
@@ -211,7 +251,7 @@ def smoke(_: argparse.Namespace) -> None:
             started = call_tool(
                 process,
                 responses,
-                9,
+                11,
                 "start_task",
                 {"project_path": project_path, "task_id": long_task_id, "arguments": []},
             )
@@ -222,7 +262,7 @@ def smoke(_: argparse.Namespace) -> None:
             status = call_tool(
                 process,
                 responses,
-                10,
+                12,
                 "get_run_status",
                 {"run_id": run_id, "tail_bytes": 0},
             )
@@ -231,7 +271,7 @@ def smoke(_: argparse.Namespace) -> None:
             waiting = call_tool(
                 process,
                 responses,
-                11,
+                13,
                 "wait_run",
                 {"run_id": run_id, "max_wait_ms": 0, "tail_bytes": 0},
             )
@@ -240,7 +280,7 @@ def smoke(_: argparse.Namespace) -> None:
             listed = call_tool(
                 process,
                 responses,
-                12,
+                14,
                 "list_runs",
                 {"status": ["running"], "task_id": long_task_id},
             )
@@ -249,7 +289,7 @@ def smoke(_: argparse.Namespace) -> None:
             stopped = call_tool(
                 process,
                 responses,
-                13,
+                15,
                 "stop_run",
                 {"run_id": run_id, "tail_bytes": 0},
             )
@@ -259,14 +299,14 @@ def smoke(_: argparse.Namespace) -> None:
             shell_started = call_tool(
                 process,
                 responses,
-                14,
+                16,
                 "start_shell_command",
                 {"command": "echo " + shell_marker, "working_directory": "."},
             )
             if not shell_started.get("run_id"):
                 raise RuntimeError(f"start_shell_command did not return a run: {shell_started!r}")
 
-            version_status = call_tool(process, responses, 15, "version_status", {})
+            version_status = call_tool(process, responses, 17, "version_status", {})
             assert_typed_fields(
                 "version_status",
                 version_status,

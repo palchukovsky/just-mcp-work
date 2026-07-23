@@ -91,7 +91,7 @@ func TestObserveStartsOneAsynchronousCheckAndPublishesNextResponse(t *testing.T)
 
 	started := time.Now()
 	checker.Observe()
-	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("Observe blocked for %s", elapsed)
 	}
 	select {

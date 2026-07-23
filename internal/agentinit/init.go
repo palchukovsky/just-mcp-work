@@ -77,6 +77,13 @@ SPEND AS FEW TOKENS AS THE WORK ALLOWS
 HOW TO DRIVE IT
 - Discover what exists with list_projects and list_tasks. Prefer an existing task
   over a hand-written command line, and do not edit build files unless asked.
+- Ask list_tasks for the tasks you need, not for the catalog: names takes the
+  exact names or task IDs you already expect, name_prefix and query search when
+  you do not, visibility: public hides the private helpers, and detail: compact
+  keeps task identity and parameters, returns at most the first 160 runes of the
+  first description line, and drops runner metadata and run statistics. Only
+  names, name_prefix, and query are mutually exclusive: use one of those per
+  call.
 - run_task runs a discovered task and promotes a long run to the background;
   start_task starts it in the background from the beginning.
 - run_shell_command runs a command that has no task behind it. Set
