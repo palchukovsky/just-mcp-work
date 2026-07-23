@@ -48,12 +48,17 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	}
 }
 
-func TestPromptDescribesCompactReceiptContract(t *testing.T) {
+// TestPromptDescribesTheTokenSavingContract keeps the two halves of the contract
+// in the served instructions: when a compact receipt replaces the output, and
+// when the output itself is the reason not to use this server at all.
+func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 	for _, expected := range []string{
 		"just-mcp-work (JMW)",
-		"docker",
-		"compact execution receipt",
 		"save tokens",
+		"USE JMW WHEN",
+		"RUN IT DIRECTLY WHEN",
+		"output itself is the answer",
+		"delegate",
 		"run_shell_command",
 		"working_directory",
 		"run_task",
@@ -61,11 +66,6 @@ func TestPromptDescribesCompactReceiptContract(t *testing.T) {
 		"start_task",
 		"wait_run",
 		"get_run_status",
-		"execution-and-receipt tool",
-		"not a universal shell wrapper",
-		"itself is the data",
-		"normal shell",
-		"read/navigation tool",
 		"ok: true",
 		"exit code 0",
 		"stdout_tail",
@@ -79,51 +79,64 @@ func TestPromptDescribesCompactReceiptContract(t *testing.T) {
 	}
 }
 
-// TestPromptCoversEveryTripWireProgram compares the program lists of the prompt
-// with TripWirePrograms as lists. A plain substring check would pass on an
-// unrelated word: "go" occurs in "goes", and a program dropped from one list
-// would stay unnoticed while it is still named in the other.
-func TestPromptCoversEveryTripWireProgram(t *testing.T) {
-	for name, list := range map[string][]string{
-		"delegation rule": promptProgramList(t, "MUST NOT contain a hardcoded ", " shell line."),
-		"TRIP-WIRE":       promptProgramList(t, "command whose program is ", ", or the name of"),
+// TestManagedBlockCarriesTheSameContract keeps the block written into AGENTS.md
+// and CLAUDE.md on the same rule as the served prompt, without repeating it in
+// full: the block is read by agents that may not have the server attached yet.
+func TestManagedBlockCarriesTheSameContract(t *testing.T) {
+	flat := strings.Join(strings.Fields(managedBlockText), " ")
+	for _, expected := range []string{
+		"list_tasks -> run_task/start_task",
+		"do not need the full output",
+		"directly when its full output",
+		"sub-agents",
 	} {
-		if want := TripWirePrograms(); !slices.Equal(list, want) {
-			t.Errorf("Prompt %s lists %#v, want %#v", name, list, want)
+		if !strings.Contains(flat, expected) {
+			t.Errorf("managed block does not mention %q: %s", expected, flat)
 		}
 	}
 }
 
-// TestManagedBlockCoversEveryTripWireProgram keeps the block written into
-// AGENTS.md and CLAUDE.md on the same program list as the prompt, so a runner
-// added to one of them cannot stay missing from the other.
-func TestManagedBlockCoversEveryTripWireProgram(t *testing.T) {
-	flat := strings.Join(strings.Fields(managedBlockBody()), " ")
-	want := "program is " + strings.Join(TripWirePrograms(), ", ") + ","
-	if !strings.Contains(flat, want) {
-		t.Errorf("managed block does not list %q: %s", want, flat)
+// TestPromptAndManagedBlockShareTheContract holds the served instructions and
+// the written block to one list of terms. The two texts are worded for
+// different readers, so nothing but a shared check keeps them from drifting
+// into two different rules.
+func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
+	shared := []string{
+		serverName + " (JMW)",
+		"save tokens",
+		"full output",
+		"list_tasks",
+		"run_task",
+		"start_task",
+	}
+	for name, text := range map[string]string{
+		"Prompt":        strings.Join(strings.Fields(Prompt()), " "),
+		"managed block": strings.Join(strings.Fields(managedBlockText), " "),
+	} {
+		for _, expected := range shared {
+			if !strings.Contains(text, expected) {
+				t.Errorf("%s does not carry the shared term %q", name, expected)
+			}
+		}
 	}
 }
 
-// promptProgramList extracts the comma-separated program list that Prompt keeps
-// between prefix and suffix, flattening the wrapped lines first.
-func promptProgramList(t *testing.T, prefix string, suffix string) []string {
-	t.Helper()
-	flat := strings.Join(strings.Fields(Prompt()), " ")
-	start := strings.Index(flat, prefix)
-	if start < 0 {
-		t.Fatalf("Prompt does not contain %q", prefix)
+// TestManagedMarkersCarryTheServerName pins the generated markers and the
+// permission prefix to serverName, so a rename cannot reach only some of them
+// and orphan the blocks a previous init wrote.
+func TestManagedMarkersCarryTheServerName(t *testing.T) {
+	for name, text := range map[string]string{
+		"beginMarker":      beginMarker,
+		"endMarker":        endMarker,
+		"codexBegin":       codexBegin,
+		"codexEnd":         codexEnd,
+		"codexTable":       codexTable,
+		"claudeServerRule": claudeServerRule,
+	} {
+		if !strings.Contains(text, serverName) {
+			t.Errorf("%s = %q does not carry the server name %q", name, text, serverName)
+		}
 	}
-	rest := flat[start+len(prefix):]
-	end := strings.Index(rest, suffix)
-	if end < 0 {
-		t.Fatalf("Prompt does not contain %q after %q", suffix, prefix)
-	}
-	programs := strings.Split(rest[:end], ", ")
-	for i, program := range programs {
-		programs[i] = strings.TrimPrefix(program, "or ")
-	}
-	return programs
 }
 
 func TestApplyReplacesModifiedManagedBlock(t *testing.T) {
@@ -206,6 +219,284 @@ func TestApplyMergesMCPConfigWithoutClobberingOtherServers(t *testing.T) {
 	}
 	if len(second.Paths) != 0 {
 		t.Fatalf("idempotent MCP merge changed paths: %#v", second.Paths)
+	}
+}
+
+// TestApplyKeepsForeignMCPConfigFormatting pins the promise that init only
+// rewrites its own entry: key order, indentation width, and the exact text of
+// every other value stay as the operator wrote them.
+func TestApplyKeepsForeignMCPConfigFormatting(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, mcpConfig)
+	before := strings.Join(
+		[]string{
+			"{",
+			`    "zeta": 1,`,
+			`    "mcpServers": {`,
+			`        "other": { "command": "other", "args": ["serve"] }`,
+			"    },",
+			`    "alpha": [1, 2]`,
+			"}",
+			"",
+		},
+		"\n",
+	)
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"{\n    \"zeta\": 1,\n",
+		`        "other": { "command": "other", "args": ["serve"] },`,
+		"\n    \"alpha\": [1, 2]\n}\n",
+		"\n        \"just-mcp-work\": {\n            \"command\": ",
+	} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("merged config lost %q:\n%s", expected, data)
+		}
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(second.Paths, path) {
+		t.Fatalf("second apply rewrote the config:\n%s", data)
+	}
+}
+
+// TestApplyKeepsForeignClaudeSettingsFormatting checks the same promise for the
+// Claude settings, where init also has to delete its retired entries from lists
+// that belong to somebody else.
+func TestApplyKeepsForeignClaudeSettingsFormatting(t *testing.T) {
+	dir := t.TempDir()
+	path := claudeSettingsPath(t, dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := strings.Join(
+		[]string{
+			"{",
+			`    "model": "opus",`,
+			`    "permissions": {`,
+			`        "allow": [`,
+			`            "mcp__just-mcp-work__retired_tool",`,
+			`            "Bash(git status:*)"`,
+			"        ],",
+			`        "deny": ["Bash(rm:*)"]`,
+			"    },",
+			`    "env": { "JMW": "1" }`,
+			"}",
+			"",
+		},
+		"\n",
+	)
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{Dir: dir, Agents: []string{"claude"}, ClaudePermissions: ClaudePermissionsYes}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		"{\n    \"model\": \"opus\",\n",
+		"\n            \"Bash(git status:*)\",\n            \"mcp__just-mcp-work__run_task\",",
+		`        "deny": ["Bash(rm:*)"],`,
+		"\n    \"env\": { \"JMW\": \"1\" }\n}\n",
+	} {
+		if !strings.Contains(string(data), expected) {
+			t.Fatalf("merged settings lost %q:\n%s", expected, data)
+		}
+	}
+	if strings.Contains(string(data), "retired_tool") {
+		t.Fatalf("retired entry survived:\n%s", data)
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(second.Paths, path) {
+		t.Fatalf("second apply rewrote the settings:\n%s", data)
+	}
+}
+
+// TestApplyKeepsCRLFLineEndings checks that every file init edits keeps the
+// line ending it is written with, so a workspace checked out with CRLF does not
+// end up with two endings mixed in one file.
+func TestApplyKeepsCRLFLineEndings(t *testing.T) {
+	dir := t.TempDir()
+	settings := claudeSettingsPath(t, dir)
+	files := map[string]string{
+		filepath.Join(dir, "CLAUDE.md"): "# Notes\r\n",
+		filepath.Join(dir, "AGENTS.md"): "# Notes\r\n",
+		filepath.Join(dir, codexConfig): "# notes\r\n",
+		filepath.Join(dir, mcpConfig):   " \r\n",
+		settings:                        "{\r\n  \"permissions\": {\r\n    \"allow\": [\r\n    ]\r\n  }\r\n}\r\n",
+	}
+	for path, content := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	options := Options{
+		Dir:               dir,
+		Agents:            []string{"claude", "codex"},
+		WriteMCPConfig:    true,
+		ClaudePermissions: ClaudePermissionsYes,
+	}
+	first, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Paths) != len(files) {
+		t.Fatalf("apply changed %v, want all %d files", first.Paths, len(files))
+	}
+	for path := range files {
+		// #nosec G304 -- path is created in this test's temporary directory.
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		text := string(data)
+		if strings.Count(text, "\n") != strings.Count(text, "\r\n") {
+			t.Fatalf("%s mixes line endings:\n%q", path, text)
+		}
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Paths) != 0 {
+		t.Fatalf("second apply rewrote %v", second.Paths)
+	}
+}
+
+// TestApplyRepairsLegacyLFBlocksInCRLFDocuments checks the upgrade path from
+// init versions that always wrote their managed blocks with LF. The JSON
+// config merged in the same run keeps the ending of its existing content.
+func TestApplyRepairsLegacyLFBlocksInCRLFDocuments(t *testing.T) {
+	dir := t.TempDir()
+	agentsPath := filepath.Join(dir, "AGENTS.md")
+	codexPath := filepath.Join(dir, codexConfig)
+	mcpPath := filepath.Join(dir, mcpConfig)
+	legacyCodexBlock := strings.Join(
+		[]string{
+			codexBegin,
+			codexTable,
+			`command = "stale"`,
+			codexEnd,
+		},
+		"\n",
+	)
+	files := map[string]string{
+		agentsPath: "# Notes\r\n\n" + canonicalBlock(),
+		codexPath:  "# notes\r\n\n" + legacyCodexBlock + "\n",
+		mcpPath:    "{\r\n  \"mcpServers\": {}\r\n}\r\n",
+	}
+	for path, content := range files {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	options := Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefixes := map[string]string{
+		agentsPath: "# Notes\r\n\r\n" + beginMarker + "\r\n",
+		codexPath:  "# notes\r\n\r\n" + codexBegin + "\r\n",
+	}
+	for path := range files {
+		// #nosec G304 -- path is created in this test's temporary directory.
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(data)
+		if strings.Count(text, "\n") != strings.Count(text, "\r\n") {
+			t.Fatalf("%s still mixes line endings:\n%q", path, text)
+		}
+		wantPrefix, checked := wantPrefixes[path]
+		if checked && !strings.HasPrefix(text, wantPrefix) {
+			t.Fatalf("%s kept the legacy block boundary:\n%q", path, text)
+		}
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Paths) != 0 {
+		t.Fatalf("second apply rewrote %v", second.Paths)
+	}
+}
+
+// TestApplyKeepsCodexBlockInPlace checks that a managed block an operator moved
+// is refreshed where it stands instead of being appended again at the end.
+func TestApplyKeepsCodexBlockInPlace(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	before := strings.Join(
+		[]string{
+			codexBegin,
+			codexTable,
+			`command = "stale"`,
+			codexEnd,
+			"",
+			"[mcp_servers.other]",
+			`command = "other"`,
+			"",
+		},
+		"\n",
+	)
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	assertCodexMCPConfig(t, path, dir)
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), codexBegin) {
+		t.Fatalf("managed block moved away from the top:\n%s", data)
+	}
+	if !strings.HasSuffix(string(data), "[mcp_servers.other]\ncommand = \"other\"\n") {
+		t.Fatalf("unmanaged tail was rewritten:\n%s", data)
+	}
+	if strings.Contains(string(data), "stale") {
+		t.Fatalf("stale managed entry survived:\n%s", data)
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(second.Paths, path) {
+		t.Fatalf("second apply rewrote the Codex config:\n%s", data)
 	}
 }
 
@@ -978,6 +1269,11 @@ func TestApplyRejectsInvalidClaudePermissionLists(t *testing.T) {
 			settings:  "{",
 			wantError: "decode existing",
 		},
+		{
+			name:      "duplicate key",
+			settings:  `{"permissions": {"allow": []}, "permissions": {"ask": []}}`,
+			wantError: "occurs more than once",
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1005,6 +1301,83 @@ func TestApplyRejectsInvalidClaudePermissionLists(t *testing.T) {
 			}
 			if string(data) != testCase.settings {
 				t.Fatalf("rejected settings were changed:\n%s", data)
+			}
+		})
+	}
+}
+
+// TestApplyWritesClaudePermissionsOverNullLists covers the settings file that
+// spells an unset permission list as null. validateClaudePermissions accepts
+// that spelling, so the edit has to write the list rather than reject it.
+func TestApplyWritesClaudePermissionsOverNullLists(t *testing.T) {
+	dir := t.TempDir()
+	path := claudeSettingsPath(t, dir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	settings := "{\n  \"permissions\": {\n    \"allow\": null,\n    \"ask\": null\n  }\n}\n"
+	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{Dir: dir, Agents: []string{"claude"}, ClaudePermissions: ClaudePermissionsYes}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	allow, ask := readClaudePermissions(t, path)
+	managed := ClaudeManagedTools()
+	if !slices.Equal(allow, managed.Allow) || !slices.Equal(ask, managed.Ask) {
+		t.Fatalf("allow = %#v, ask = %#v", allow, ask)
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsPath(second.Paths, path) {
+		t.Fatal("second apply rewrote the settings")
+	}
+}
+
+// TestApplyRejectsUnusableMCPConfig keeps init from editing a configuration it
+// cannot merge into, and from touching the file it refused.
+func TestApplyRejectsUnusableMCPConfig(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		config    string
+		wantError string
+	}{
+		{
+			name:      "mcpServers is not an object",
+			config:    `{"mcpServers": "everything"}`,
+			wantError: "mcpServers in .mcp.json is not an object",
+		},
+		{
+			name:      "duplicate key",
+			config:    `{"mcpServers": {}, "mcpServers": {}}`,
+			wantError: `object key "mcpServers" occurs more than once`,
+		},
+		{
+			name:      "duplicate server key",
+			config:    `{"mcpServers": {"other": {}, "other": {}}}`,
+			wantError: `object key "other" occurs more than once`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, mcpConfig)
+			if err := os.WriteFile(path, []byte(testCase.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
+				t.Fatalf("Apply error = %v, want %q", err, testCase.wantError)
+			}
+			// #nosec G304 -- path is created in this test's temporary directory.
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if string(data) != testCase.config {
+				t.Fatalf("rejected config was changed:\n%s", data)
 			}
 		})
 	}

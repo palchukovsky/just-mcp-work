@@ -8,48 +8,25 @@
 
 > Just work with your workspace — over MCP.
 
-**Stop burning agent context on build files.** `just-mcp-work` is a local
-STDIO MCP server: one interface to everything runnable in a workspace, handing
-the agent only the part it asked for.
+Your coding agent spends context reading build files and re-reading logs it
+already ran. `just-mcp-work` is a small local MCP server that gives it one way
+to find and run everything a workspace can run, and answers with a short receipt
+instead of a wall of output.
 
-- **Run it.** The task, or a plain shell command when no task fits.
-- **Browse instead of reading.** [Just](https://just.systems/),
-  [CMake](https://cmake.org/), [Docker](https://www.docker.com/), and
-  [GNU Make](https://www.gnu.org/software/make/) projects, nested anywhere in
-  the workspace — no build file is ever loaded into context.
-- **One task at a time.** Full metadata and parameters for the task the agent
-  picked, and nothing around it.
-- **Output on demand.** A run answers with a short receipt; the full stdout
-  and stderr stay one call away, whenever the agent actually needs them.
+- **No build files in context.** Just, CMake, Docker, and GNU Make projects,
+  nested anywhere in the workspace, are discovered on demand. The agent asks for
+  one task and gets that one task.
+- **Output only when it is wanted.** A run answers with its status, exit code,
+  and short output tails. The full stdout and stderr stay one call away — for
+  the failures where they matter.
+- **Long runs stay out of the way.** Anything slow moves to the background with
+  a run ID the agent can follow, wait on, or stop.
+- **Anything else still runs.** A plain shell command, when no task fits.
 
-## Security
-
-`run_task` executes an existing `just` recipe, CMake target, Docker task, or
-Make target with arguments kept separate. `run_shell_command` intentionally
-passes command text to the operating system shell. Both run with your privileges
-and without a sandbox: trust the selected task or command like you trust a
-project's build scripts. Need isolation? Run `just-mcp-work` in a container. See
-[SECURITY.md](SECURITY.md).
+The agent gets the usage rules from the server itself, so there is nothing here
+you have to teach it.
 
 ## Install
-
-Must be available on `PATH`:
-
-- [`just`](https://just.systems/) for [Just](https://just.systems/) projects.
-- [CMake](https://cmake.org/) must be available for [CMake](https://cmake.org/)
-  projects.
-- [Docker](https://www.docker.com/) with the
-  [Compose](https://docs.docker.com/compose/) v2 plugin must be available for
-  Docker projects.
-- [GNU Make](https://www.gnu.org/software/make/) must be available for
-  [Make](https://www.gnu.org/software/make/) projects.
-
-A tool that is missing on this host keeps its project usable: the runner is
-reported as a project warning instead of an error, and the runners that do work
-keep their tasks. Docker without the Compose v2 plugin is reported the same way,
-and its `Dockerfile` build stays runnable.
-
-### Prebuilt binaries
 
 Download an archive from the [latest GitHub Release][latest-release]:
 
@@ -60,126 +37,47 @@ Download an archive from the [latest GitHub Release][latest-release]:
 | macOS Apple Silicon | [`just-mcp-work_darwin_arm64.tar.gz`][macos-arm64-download] ([opening notes][macos-notes]) |
 | Windows x86_64 | [`just-mcp-work_windows_amd64.zip`][windows-amd64-download] |
 
-Extract the matching archive and place `just-mcp-work` (or
-`just-mcp-work.exe`) on `PATH`. Verify the archive with the release
-[`checksums.txt`][checksums-download] when needed.
-
-### Sources
+Extract it and put `just-mcp-work` (or `just-mcp-work.exe`) on `PATH`. The
+release [`checksums.txt`][checksums-download] verifies the archive. From source:
 
 ```console
 go install github.com/palchukovsky/just-mcp-work/cmd/just-mcp-work@latest
-just-mcp-work version
 ```
 
-## Use with MCP
+[`just`](https://just.systems/), [CMake](https://cmake.org/),
+[Docker](https://www.docker.com/) with the
+[Compose](https://docs.docker.com/compose/) v2 plugin, and
+[GNU Make](https://www.gnu.org/software/make/) are needed only for the project
+types you actually have. A tool missing on this host is reported as a warning,
+and everything else in the workspace keeps working.
 
-Run this once in the workspace to add instructions for supported coding agents.
-It finds the closest selected agent instruction and `.mcp.json` in the
-workspace or its parent directories. The managed instruction block and
-`just-mcp-work` MCP entry are replaced in full, leaving unrelated content and
-servers alone. If none exists, it creates the files in the workspace. The MCP
-entry uses the absolute path of the running executable, so the client does not
-depend on `PATH`:
+## Set it up
+
+Run this once in the workspace:
 
 ```console
 just-mcp-work init
 ```
 
-Run `init` again after updating `just-mcp-work` to a new version so the
-managed agent instructions and MCP entry are refreshed.
+It registers the server and adds a short instruction block for the coding agents
+you use — Claude Code, Codex, Cursor, Copilot, Windsurf. Existing configuration
+is edited in place: only the entries this server owns are rewritten, and your
+own content, ordering, and formatting are left untouched, down to the line
+endings. `init` stops when it cannot edit a configuration safely or finds a
+hand-written Codex entry for this server; it tells you what to fix instead of
+taking the entry over. For Claude Code it also offers matching tool permissions
+and asks before changing them.
 
-`init` does not overwrite a manually configured Codex
-`[mcp_servers.just-mcp-work]` table. Remove that table before running `init` so
-the generated managed block can take ownership of the entry.
+Run `init` again after an update. `init --help` and `serve --help` list the
+agent targets and the server options.
 
-Pass `--write-mcp-config=false` to print the resolved server entry instead of
-writing it.
+## Security
 
-When `claude` is one of the selected agents, `init` also offers the managed tool
-permissions in `.claude/settings.json`. The task and run tools are added to
-`permissions.allow`, and `run_shell_command` and `start_shell_command` are added
-to `permissions.ask` so a free-form command still needs a confirmation. Every
-`mcp__just-mcp-work` entry is removed from the permission lists first, including
-tools this version does not know, and the current entries are then written back.
-Unrelated permissions and settings are preserved.
-
-This change is confirmed on the console by default; an answer piped into
-standard input is accepted as well. Use `--claude-permissions=yes` to apply it
-without a prompt, for example in a script, and `--claude-permissions=no` to
-leave the file alone. When no answer is available, the change is skipped.
-
-The server discovers nested projects on demand. Use `init --help` and
-`serve --help` for agent targets and server options.
-
-## MCP tools
-
-| Tool | Purpose |
-| --- | --- |
-| `list_projects` | List filtered projects, runner errors, and warnings. |
-| `list_tasks` | List tasks, parameters, statistics, and runner issues. |
-| `run_task` | Run a task, promoting a long run to the background. |
-| `start_task` | Start a selected task asynchronously. |
-| `run_shell_command` | Run a shell command; long runs go to background. |
-| `start_shell_command` | Start a shell command asynchronously. |
-| `get_run` | Read stored run metadata. |
-| `get_run_logs` | Page stdout or stderr by byte offset. |
-| `get_run_status` | Read run liveness, output, and duration statistics. |
-| `wait_run` | Wait for completion without killing a run on a wait timeout. |
-| `stop_run` | Stop a running task owned by this server. |
-| `list_runs` | List recent runs, newest first, with the scanned count. |
-| `version_status` | Compare this binary with the latest stable GitHub tag. |
-
-`list_projects` defaults to the workspace root at depth 1 and skips dot-directories.
-Use `path` to choose a subtree, `max_depth` (`-1` is unlimited) or
-`include_hidden` to widen directory coverage, and `runners` to restrict projects.
-`applied_filter.pruned.depth` and `.hidden` count skipped directory subtrees;
-`.runner_mismatch` counts inspected projects removed by `runners`. `excluded`
-reports directories skipped by the operator's policy and cannot be widened. This
-filtering applies only to the list: `list_tasks` and task tools can still address
-any discovered workspace project.
-
-A project reports `errors` when a runner could not be read and `warnings` when a
-runner could not be used without the project being at fault, such as a build tool
-that is missing on this host. Only `errors` set the project status to `"error"`,
-and a runner that fails halfway still contributes the tasks it did discover.
-`list_tasks` repeats the `errors` and `warnings` of the runners it listed, so an
-empty listing carries its own explanation.
-
-Task IDs are runner-qualified across the `just`, `cmake`, `docker`, and `make`
-runners, for example `just:build`, `cmake:build:debug`, `docker:compose:up`, or
-`make:test`. Make projects expose their explicit targets without running recipes
-during task discovery. For a short task, use `run_task`; it waits for up to
-`max_wait_ms`, `--sync-deadline`, or `JMW_SYNC_DEADLINE` (in that precedence
-order). A receipt with `status: "running"`, `completed: false`, and
-`promoted: true` is successful handoff to a background run, not a failure: use
-its `run_id` with `wait_run` or `get_run_status` and do not run the task again.
-Use `start_task` up front for a task with a long historical average.
-
-When an MCP client supplies a progress token, synchronous task calls publish the
-`run_id` immediately and report elapsed time, output age, and byte counts every
-10 seconds. `get_run_status`, `wait_run`, and `list_tasks` expose duration
-statistics derived from retained run metadata; aborted runs are counted but do
-not affect duration averages. `last_output_age_ms` is the anti-hang signal.
-
-`list_runs` returns a bounded page of newest ledger entries. It reports
-`scanned` and, when `truncated` is true, a `next_cursor` for the next page, so
-filters cannot silently hide matching older runs.
-
-`run_shell_command` is separate from project discovery: it accepts command
-text and an optional workspace-relative `working_directory` (default `.`), so
-it can run from directories that have no Just, CMake, Docker, or Make project.
-It uses the current OS shell (`$SHELL`, falling back to `/bin/sh`, on Unix;
-`ComSpec` on Windows). The working directory must exist inside the workspace and
-cannot be a symlink.
-
-`get_run_status` is non-blocking. `wait_run` waits up to `max_wait_ms` (30s by
-default); set it to `0` for an immediate snapshot. Status tools return 4096
-tail bytes by default; set `tail_bytes` to `0` when output is not needed.
-
-Each task has a 15-minute timeout by default. Set `--timeout=0` or
-`JMW_TIMEOUT=0` to disable that timeout entirely; no task timer is created in
-that mode. The selected timeout is recorded with the run, so a later server
-configuration cannot misreport a foreign run's deadline.
+Tasks and shell commands run with your privileges and without a sandbox: trust a
+selected task the way you trust the project's build scripts. `run_task` runs an
+existing recipe or target with its arguments kept separate; `run_shell_command`
+deliberately hands command text to the OS shell. Need isolation? Run
+`just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
 
 ## Configuration
 
@@ -205,14 +103,15 @@ just package
 ```
 
 `just verify` checks formatting, dependencies, strict lint, vet, race-enabled
-tests, build, and the MCP smoke flow. `just build-all` produces Linux, macOS,
-and Windows binaries; `just package` creates the release archives and checksums.
+tests, build, and the MCP smoke flow. `just build-all` produces the Linux,
+macOS, and Windows binaries; `just package` creates the release archives and
+checksums.
 
 `just release patch|minor|major` verifies the project, creates and pushes the
-next tag, then GitHub Actions builds and publishes the release. Use
-`just release-dry [patch|minor|major]` to run the same checks and start a
-pipeline dry run without creating a tag. The dry run needs authenticated
-GitHub CLI access.
+next tag, then GitHub Actions builds and publishes the release.
+`just release-dry [patch|minor|major]` runs the same checks and starts a
+pipeline dry run without creating a tag; it needs authenticated GitHub CLI
+access.
 
 ## License
 

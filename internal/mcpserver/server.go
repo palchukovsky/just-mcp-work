@@ -33,14 +33,12 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
 
-// runShellCommandDescription reuses the shared TRIP-WIRE program list, so a new
-// runner reaches the tool description and the agent prompt at the same time.
+// runShellCommandDescription describes the ad-hoc escape hatch of this server.
 func runShellCommandDescription() string {
-	return "Run ad-hoc shell only when no discovered task maps to it. TRIP-WIRE: a command whose " +
-		"program is " + strings.Join(agentinit.TripWirePrograms(), ", ") +
-		", or a discovered task/gate name must use run_task/start_task, never Bash. Direct Bash " +
-		"is only for read-only inspection with no task. A running receipt with promoted: true is " +
-		"normal: follow its run_id instead of retrying the command."
+	return "Run a shell command that no discovered task covers, and only when a compact receipt " +
+		"is worth more than the full output. Prefer run_task/start_task for a discovered task, " +
+		"and a normal shell when the command's own output is the answer. A running receipt with " +
+		"promoted: true is normal: follow its run_id instead of retrying the command."
 }
 
 // Config controls server-side execution defaults.

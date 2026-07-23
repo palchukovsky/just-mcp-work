@@ -19,110 +19,79 @@ import (
 )
 
 const (
-	beginMarker = "<!-- BEGIN just-mcp-work (managed) -->"
-	endMarker   = "<!-- END just-mcp-work (managed) -->"
+	// serverName is the MCP server name owned by this executable. Every marker,
+	// table, and permission entry below is built from it, so the name cannot
+	// drift apart between the files init manages.
+	serverName  = "just-mcp-work"
+	beginMarker = "<!-- BEGIN " + serverName + " (managed) -->"
+	endMarker   = "<!-- END " + serverName + " (managed) -->"
 	mcpConfig   = ".mcp.json"
 	codexConfig = ".codex/config.toml"
-	codexBegin  = "# >>> just-mcp-work mcp (managed) >>>"
-	codexEnd    = "# <<< just-mcp-work mcp <<<"
-	codexTable  = "[mcp_servers.just-mcp-work]"
+	codexBegin  = "# >>> " + serverName + " mcp (managed) >>>"
+	codexEnd    = "# <<< " + serverName + " mcp <<<"
+	codexTable  = "[mcp_servers." + serverName + "]"
 	// claudeSettings holds the Claude tool permission lists.
 	claudeSettings = ".claude/settings.json"
 	// claudeServerRule is the Claude permission entry for this MCP server. Its
 	// tool entries extend it with "__" and the tool name.
-	claudeServerRule = "mcp__just-mcp-work"
+	claudeServerRule = "mcp__" + serverName
 )
 
-// TripWirePrograms returns the programs whose direct shell invocation must be
-// replaced by a discovered task. Prompt, the managed instruction block, and the
-// MCP tool descriptions all render this one list, so a new runner cannot land
-// in only one of them.
-func TripWirePrograms() []string {
-	return []string{"just", "cargo", "go", "make", "cmake", "docker", "npm", "ruff", "black"}
-}
-
-// tripWireList renders the programs as a plain enumeration.
-func tripWireList() string {
-	return strings.Join(TripWirePrograms(), ", ")
-}
-
-// tripWireChoice renders the programs as an enumeration that reads as a closed
-// choice, for the sentences that end on the list instead of continuing it.
-func tripWireChoice() string {
-	programs := TripWirePrograms()
-	if len(programs) < 2 {
-		return tripWireList()
-	}
-	return strings.Join(programs[:len(programs)-1], ", ") + ", or " + programs[len(programs)-1]
-}
-
 // Prompt returns the canonical JMW usage guidance served as the MCP server's
-// instructions. It renders TripWirePrograms instead of repeating the list.
+// instructions.
 func Prompt() string {
-	return fmt.Sprintf(promptTemplate, tripWireChoice(), tripWireList())
+	return promptText
 }
 
-const promptTemplate = `This workspace exposes runnable project tasks through just-mcp-work (JMW).
+const promptText = `This workspace exposes its runnable project tasks through just-mcp-work (JMW).
 
-SCOPE - including delegated work. These rules bind you AND every sub-agent,
-workflow stage, worktree, or external executor you spawn. When you delegate any
-work that runs a project task (build, test, lint, format, a check/verify gate, or
-a run), your delegated prompt MUST tell the executor to run it through JMW
-(list_tasks -> run_task/start_task) and MUST NOT contain a hardcoded %s shell
-line. A raw build/test/lint shell command embedded in a sub-agent prompt is a
-rule violation, not a convenience.
+JMW exists to save tokens, not to wrap every command. Route work through it when
+the full output is not what you need, and run the command directly when it is.
 
-TRIP-WIRE - stop before these tokens. Before you (or a delegate) run a shell
-command whose program is %s, or the name of any discovered task or gate (check,
-verify, lint, test, build, or a check-*/lint-* variant): STOP. That command is a
-discovered task - run it via run_task/start_task, never Bash. Using Bash for a
-task JMW already exposes is a violation even when it "works".
+USE JMW WHEN
+- You only need to know whether something worked - build, test, lint, format,
+  check/verify gates. The receipt carries status, exit code, and short output
+  tails instead of the whole log.
+- You only need a slice of the output: the failing tail, or a byte range of a
+  large log.
+- The command is long or should not block: start_task returns a run_id at once,
+  wait_run and get_run_status follow it, stop_run ends it.
+- You delegate. Give sub-agents, workflow stages, and other executors the same
+  rule, so a delegated build does not pour a full log into their context either.
 
-GATES ARE LONG TASKS. Any check/verify/CI-style gate has a long average duration:
-launch it with start_task + wait_run, never a blocking Bash and never a bare
-run_task you might mistake for hung. While a run_id is active, never launch the
-task again.
+RUN IT DIRECTLY WHEN
+- The output itself is the answer: git diff, search results, source excerpts,
+  generated reports, or anything the user asked to see in full. Sending that
+  through JMW pays for the same text twice and buys nothing.
 
-WHERE BASH IS STILL FINE. Direct Bash is acceptable only for ad-hoc, read-only
-inspection with no task representation - git status/diff/log, grep, sed -n, ls.
-Anything runnable-as-a-task, and anything that mutates the tree or build, goes
-through JMW.
+SPEND AS FEW TOKENS AS THE WORK ALLOWS
+- On success, trust the receipt. ok: true with exit code 0 is the answer; do not
+  fetch logs to double-check a green run unless the current task needs that
+  output.
+- On failure, start with stdout_tail and stderr_tail. Reach for get_run_logs only
+  when the tails do not explain the failure.
+- Use tail_bytes: 0 on status tools when even the tails are noise.
+- A receipt with status: running and a run_id is normal, not a failure: follow it
+  with wait_run or get_run_status, and never launch the same task twice.
 
-- Discover existing tasks with list_projects and list_tasks.
-- Use JMW to save tokens when a compact execution receipt is enough: success
-  status, exit code, and short stdout/stderr tails, especially for successful
-  checks where the full log is not needed.
-- Run an existing task with run_task when that compact receipt is enough. A
-  receipt with status: running and a run_id is normal: follow it with wait_run or
-  get_run_status and do not start the task again. Prefer start_task for a task
-  whose statistics show a long average duration.
-- JMW is an execution-and-receipt tool, not a universal shell wrapper. If stdout
-  itself is the data that must be inspected in full or quoted - for example git
-  diff, large search results, source excerpts, generated reports, or command
-  output explicitly requested by the user - use the normal shell or a specialized
-  read/navigation tool instead of JMW.
-- Use run_shell_command only for commands without an existing task and only when a
-  compact receipt is sufficient; never for a command that maps to a discovered
-  task (see TRIP-WIRE). Set working_directory to a workspace-relative directory
-  (default .).
-- On success, trust ok: true and exit code 0. Do not fetch logs merely to
-  double-check the output.
-- On failure, inspect stdout_tail and stderr_tail from the receipt first. Use
-  get_run_logs only when the tails are missing or insufficient for diagnosis. Use
-  tail_bytes: 0 on status tools to suppress output tails.
-- Prefer existing tasks; do not edit build files unless asked.`
+HOW TO DRIVE IT
+- Discover what exists with list_projects and list_tasks. Prefer an existing task
+  over a hand-written command line, and do not edit build files unless asked.
+- run_task runs a discovered task and promotes a long run to the background;
+  start_task starts it in the background from the beginning.
+- run_shell_command runs a command that has no task behind it. Set
+  working_directory to a workspace-relative directory (default .).`
 
-func managedBlockBody() string {
-	return fmt.Sprintf(managedBlockTemplate, tripWireList())
-}
-
-const managedBlockTemplate = `This workspace uses just-mcp-work (JMW) for its runnable tasks. Full usage rules
-are provided by the JMW MCP server (its instructions and tool descriptions). Core
-rule: run project tasks - build, test, lint, format, check/verify gates -
-through JMW (list_tasks -> run_task/start_task), never a raw shell line whose
-program is %s, including in prompts you hand to sub-agents, workflows, or other
-executors. Use direct Bash only for read-only inspection (git status/diff, grep,
-ls).`
+// managedBlockText is the instruction block written into the agent files. It
+// carries the same contract as promptText in a form an agent can read before
+// the server is attached, so the two must not drift apart.
+const managedBlockText = `This workspace uses just-mcp-work (JMW) for its runnable tasks; the JMW MCP
+server itself carries the full usage rules. Core rule: JMW is there to save
+tokens. Run a task through it (list_tasks -> run_task/start_task) whenever you do
+not need the full output - build, test, lint, format, check/verify gates - and
+trust its receipt instead of re-reading the log of a successful run. Run a
+command directly when its full output is the thing you actually need. Pass the
+same rule on to sub-agents and other executors.`
 
 // ClaudePermissions selects how init treats the Claude tool permission lists.
 type ClaudePermissions string
@@ -305,7 +274,8 @@ func Apply(options Options) (Result, error) {
 			result.Paths = append(result.Paths, path)
 			result.Diffs = append(result.Diffs, simpleDiff(path, before, after))
 			if !options.DryRun {
-				// #nosec G306 -- a local .mcp.json must be readable by its host agent.
+				// #nosec G306,G703 -- findMCPConfig resolves the nearest regular config
+				// at or above Dir, and a local .mcp.json must be readable by its agent.
 				if err := os.WriteFile(path, after, 0o644); err != nil {
 					return Result{}, fmt.Errorf("write %s: %w", path, err)
 				}
@@ -694,138 +664,315 @@ func agentTarget(agent string) (target, bool) {
 }
 
 func canonicalBlock() string {
-	return beginMarker + "\n" + managedBlockBody() + "\n" + endMarker + "\n"
+	return beginMarker + "\n" + managedBlockText + "\n" + endMarker + "\n"
 }
 
 func managedContent(before []byte, header string) ([]byte, error) {
 	text := string(before)
+	// The instruction file keeps the line ending it is written with, so the
+	// managed block does not turn a CRLF document into a mixed one.
+	lineBreak := documentLineBreak(before)
 	start := strings.Index(text, beginMarker)
 	end := strings.Index(text, endMarker)
-	block := canonicalBlock()
+	block := withLineBreak(canonicalBlock(), lineBreak)
 	if start >= 0 || end >= 0 {
 		if start < 0 || end < start {
 			return nil, fmt.Errorf("managed block markers are malformed")
 		}
+		prefix := normalizeTrailingLineBreak(text[:start], lineBreak)
 		end += len(endMarker)
-		if end < len(text) && text[end] == '\n' {
-			end++
-		}
-		return []byte(text[:start] + block + text[end:]), nil
+		suffix, _ := trimLeadingLineBreak(text[end:])
+		return []byte(prefix + block + suffix), nil
 	}
 	if text == "" {
+		// A file created here has no ending of its own to keep, so the header
+		// and the block go in with the bare newline they are written with.
 		return []byte(header + block), nil
 	}
-	if !strings.HasSuffix(text, "\n") {
-		text += "\n"
+	text = normalizeTrailingLineBreak(text, lineBreak)
+	if !strings.HasSuffix(text, lineBreak) {
+		text += lineBreak
 	}
-	return []byte(text + "\n" + block), nil
+	return []byte(text + lineBreak + block), nil
 }
 
-func mergeMCPConfig(before []byte) ([]byte, error) {
+// serverEntry is the managed MCP server definition of this executable. The
+// field order defines the order of the generated JSON keys.
+type serverEntry struct {
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+}
+
+func managedServerEntry() (serverEntry, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return nil, fmt.Errorf("resolve executable: %w", err)
+		return serverEntry{}, fmt.Errorf("resolve executable: %w", err)
 	}
 	executable, err = filepath.Abs(executable)
 	if err != nil {
-		return nil, fmt.Errorf("make executable path absolute: %w", err)
+		return serverEntry{}, fmt.Errorf("make executable path absolute: %w", err)
 	}
-	config := map[string]any{}
-	if len(bytes.TrimSpace(before)) > 0 {
-		if decodeErr := json.Unmarshal(before, &config); decodeErr != nil {
-			return nil, fmt.Errorf("decode existing .mcp.json: %w", decodeErr)
-		}
-	}
-	servers, ok := config["mcpServers"].(map[string]any)
-	if !ok {
-		servers = map[string]any{}
-		config["mcpServers"] = servers
-	}
-	servers["just-mcp-work"] = map[string]any{
-		"command": executable,
-		"args":    []string{"serve", "--root", "."},
-	}
-	data, err := json.MarshalIndent(config, "", "  ")
+	return serverEntry{Command: executable, Args: []string{"serve", "--root", "."}}, nil
+}
+
+// mergeMCPConfig writes the managed server entry into the configuration text.
+// Only that entry is rewritten: unrelated servers, key order, and the file's
+// own formatting are left exactly as they were.
+func mergeMCPConfig(before []byte) ([]byte, error) {
+	entry, err := managedServerEntry()
 	if err != nil {
-		return nil, fmt.Errorf("encode .mcp.json: %w", err)
+		return nil, err
 	}
-	return append(data, '\n'), nil
+	data := emptyJSONObject(before)
+	root, err := decodeJSONObject(data, mcpConfig)
+	if err != nil {
+		return nil, err
+	}
+	members, err := jsonObjectMembers(data, root)
+	if err != nil {
+		return nil, fmt.Errorf("decode existing %s: %w", mcpConfig, err)
+	}
+	servers, found := jsonFindMember(members, "mcpServers")
+	if !found || isJSONNull(data, servers.value) {
+		merged, setErr := jsonSetMember(data, root, "mcpServers", map[string]any{serverName: entry})
+		if setErr != nil {
+			return nil, fmt.Errorf("update %s: %w", mcpConfig, setErr)
+		}
+		return merged, nil
+	}
+	if data[servers.value.start] != '{' {
+		return nil, fmt.Errorf(
+			"mcpServers in %s is not an object; init refuses to replace it, "+
+				"fix or remove that entry and run init again",
+			mcpConfig,
+		)
+	}
+	merged, err := jsonSetMember(data, servers.value, serverName, entry)
+	if err != nil {
+		return nil, fmt.Errorf("update %s: %w", mcpConfig, err)
+	}
+	return merged, nil
+}
+
+// emptyJSONObject substitutes an empty object for a missing or blank file, so
+// a created file and an edited one take the same code path.
+func emptyJSONObject(before []byte) []byte {
+	if len(bytes.TrimSpace(before)) == 0 {
+		return []byte("{}" + documentLineBreak(before))
+	}
+	return before
+}
+
+// isJSONNull reports whether the span holds the null literal, which init treats
+// as an unset value it may take over.
+func isJSONNull(data []byte, span jsonSpan) bool {
+	return string(data[span.start:span.end]) == "null"
+}
+
+// decodeJSONObject validates that data holds a JSON object and returns its span.
+func decodeJSONObject(data []byte, name string) (jsonSpan, error) {
+	decoded := map[string]any{}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return jsonSpan{}, fmt.Errorf("decode existing %s: %w", name, err)
+	}
+	span, err := jsonDocumentSpan(data)
+	if err != nil {
+		return jsonSpan{}, fmt.Errorf("decode existing %s: %w", name, err)
+	}
+	return span, nil
 }
 
 // mergeClaudeSettings replaces the managed permission entries. Every entry of
 // this MCP server is dropped from every permission list first, including tools
 // and wildcards this version does not know, and the current entries are then
-// appended to the allow and ask lists.
+// appended to the allow and ask lists. Foreign entries, unrelated settings, and
+// the file's own formatting are preserved byte for byte.
 func mergeClaudeSettings(before []byte) ([]byte, error) {
-	settings := map[string]any{}
-	if len(bytes.TrimSpace(before)) > 0 {
-		if err := json.Unmarshal(before, &settings); err != nil {
-			return nil, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
-		}
-	}
-	permissions, err := claudePermissionLists(settings)
+	data := emptyJSONObject(before)
+	root, err := decodeJSONObject(data, claudeSettings)
 	if err != nil {
 		return nil, err
 	}
-	for key, value := range permissions {
-		list, isList := value.([]any)
-		if !isList {
+	if validateErr := validateClaudePermissions(data); validateErr != nil {
+		return nil, validateErr
+	}
+	members, err := jsonObjectMembers(data, root)
+	if err != nil {
+		return nil, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+	}
+	owned := claudeOwnedLists()
+	permissions, found := jsonFindMember(members, "permissions")
+	if !found || isJSONNull(data, permissions.value) {
+		lists := make(map[string]any, len(owned))
+		for _, list := range owned {
+			lists[list.key] = list.tools
+		}
+		settings, setErr := jsonSetMember(data, root, "permissions", lists)
+		if setErr != nil {
+			return nil, fmt.Errorf("update %s: %w", claudeSettings, setErr)
+		}
+		return settings, nil
+	}
+	// The owning lists lose the retired entries and gain the current ones in one
+	// rewrite each. Emptying them first and refilling them afterwards would
+	// destroy the layout in between and make a repeated init rewrite the file.
+	owning := make([]string, 0, len(owned))
+	for _, list := range owned {
+		owning = append(owning, list.key)
+		data, err = appendClaudeTools(data, list.key, list.tools)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return dropManagedClaudeTools(data, owning)
+}
+
+// claudeOwnedList is one permission list this server maintains.
+type claudeOwnedList struct {
+	key   string
+	tools []string
+}
+
+// claudeOwnedLists reports the permission lists this server owns. Validation,
+// the refill, and the exclusion from the sweep all read the keys from here, so
+// a list added to it cannot be validated by halves or stripped again.
+func claudeOwnedLists() []claudeOwnedList {
+	managed := ClaudeManagedTools()
+	return []claudeOwnedList{
+		{key: "allow", tools: managed.Allow},
+		{key: "ask", tools: managed.Ask},
+	}
+}
+
+// validateClaudePermissions rejects a settings file whose permission lists this
+// server cannot edit, before any byte of it is changed.
+func validateClaudePermissions(data []byte) error {
+	var settings struct {
+		Permissions any `json:"permissions"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+	}
+	if settings.Permissions == nil {
+		return nil
+	}
+	permissions, isObject := settings.Permissions.(map[string]any)
+	if !isObject {
+		return fmt.Errorf(
+			"permissions in %s is not an object; fix that entry and run init again",
+			claudeSettings,
+		)
+	}
+	for _, list := range claudeOwnedLists() {
+		key := list.key
+		value, exists := permissions[key]
+		if !exists || value == nil {
 			continue
 		}
-		permissions[key] = withoutManagedClaudeTools(list)
+		if _, isList := value.([]any); !isList {
+			return fmt.Errorf(
+				"permissions.%s in %s is not a list; fix that entry and run init again",
+				key,
+				claudeSettings,
+			)
+		}
 	}
-	managed := ClaudeManagedTools()
-	if appendErr := appendClaudeTools(permissions, "allow", managed.Allow); appendErr != nil {
-		return nil, appendErr
-	}
-	if appendErr := appendClaudeTools(permissions, "ask", managed.Ask); appendErr != nil {
-		return nil, appendErr
-	}
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("encode %s: %w", claudeSettings, err)
-	}
-	return append(data, '\n'), nil
-}
-
-func claudePermissionLists(settings map[string]any) (map[string]any, error) {
-	value, exists := settings["permissions"]
-	if !exists || value == nil {
-		permissions := map[string]any{}
-		settings["permissions"] = permissions
-		return permissions, nil
-	}
-	permissions, isObject := value.(map[string]any)
-	if !isObject {
-		return nil, fmt.Errorf("permissions in %s is not an object", claudeSettings)
-	}
-	return permissions, nil
-}
-
-func appendClaudeTools(permissions map[string]any, key string, tools []string) error {
-	list, isList := permissions[key].([]any)
-	if value, exists := permissions[key]; exists && value != nil && !isList {
-		return fmt.Errorf("permissions.%s in %s is not a list", key, claudeSettings)
-	}
-	if list == nil {
-		list = make([]any, 0, len(tools))
-	}
-	for _, tool := range tools {
-		list = append(list, tool)
-	}
-	permissions[key] = list
 	return nil
 }
 
-func withoutManagedClaudeTools(list []any) []any {
-	kept := make([]any, 0, len(list))
-	for _, item := range list {
-		if text, isText := item.(string); isText && isManagedClaudeTool(text) {
-			continue
-		}
-		kept = append(kept, item)
+// claudePermissionsSpan locates the permissions object of the settings file.
+func claudePermissionsSpan(data []byte) (jsonSpan, error) {
+	root, err := jsonDocumentSpan(data)
+	if err != nil {
+		return jsonSpan{}, fmt.Errorf("read %s: %w", claudeSettings, err)
 	}
-	return kept
+	members, err := jsonObjectMembers(data, root)
+	if err != nil {
+		return jsonSpan{}, fmt.Errorf("read %s: %w", claudeSettings, err)
+	}
+	permissions, found := jsonFindMember(members, "permissions")
+	if !found {
+		return jsonSpan{}, fmt.Errorf("permissions in %s is missing", claudeSettings)
+	}
+	return permissions.value, nil
+}
+
+// dropManagedClaudeTools removes every entry of this server from every
+// permission list except the ones already rewritten, keeping the foreign
+// entries of those lists untouched.
+func dropManagedClaudeTools(data []byte, rewritten []string) ([]byte, error) {
+	permissions, err := claudePermissionsSpan(data)
+	if err != nil {
+		return nil, err
+	}
+	members, err := jsonObjectMembers(data, permissions)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", claudeSettings, err)
+	}
+	keys := make([]string, 0, len(members))
+	for _, member := range members {
+		if data[member.value.start] == '[' && !slices.Contains(rewritten, member.key) {
+			keys = append(keys, member.key)
+		}
+	}
+	// Every edit shifts the spans that follow it, so each list is located again.
+	for _, key := range keys {
+		data, err = editClaudeList(data, key, nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return data, nil
+}
+
+// appendClaudeTools appends the managed tools to a permission list, writing the
+// list anew when the settings file has no list to append to. A null value is an
+// unset list, the same way validateClaudePermissions accepts it.
+func appendClaudeTools(data []byte, key string, tools []string) ([]byte, error) {
+	permissions, err := claudePermissionsSpan(data)
+	if err != nil {
+		return nil, err
+	}
+	members, err := jsonObjectMembers(data, permissions)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", claudeSettings, err)
+	}
+	if member, found := jsonFindMember(members, key); !found || isJSONNull(data, member.value) {
+		settings, setErr := jsonSetMember(data, permissions, key, tools)
+		if setErr != nil {
+			return nil, fmt.Errorf("update %s: %w", claudeSettings, setErr)
+		}
+		return settings, nil
+	}
+	return editClaudeList(data, key, tools)
+}
+
+// editClaudeList rewrites one permission list in place.
+func editClaudeList(data []byte, key string, add []string) ([]byte, error) {
+	permissions, err := claudePermissionsSpan(data)
+	if err != nil {
+		return nil, err
+	}
+	members, err := jsonObjectMembers(data, permissions)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", claudeSettings, err)
+	}
+	member, found := jsonFindMember(members, key)
+	if !found {
+		return nil, fmt.Errorf("permissions.%s in %s is missing", key, claudeSettings)
+	}
+	if data[member.value.start] != '[' {
+		return nil, fmt.Errorf(
+			"permissions.%s in %s is not a list; fix that entry and run init again",
+			key,
+			claudeSettings,
+		)
+	}
+	edited, err := jsonRewriteStringList(data, member.value, isManagedClaudeTool, add)
+	if err != nil {
+		return nil, fmt.Errorf("update permissions.%s in %s: %w", key, claudeSettings, err)
+	}
+	return edited, nil
 }
 
 // isManagedClaudeTool reports whether the permission entry addresses this MCP
@@ -848,28 +995,6 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve workspace root: %w", err)
 	}
-	text := string(before)
-	if start := strings.Index(text, codexBegin); start >= 0 {
-		end := strings.Index(text[start:], codexEnd)
-		if end < 0 {
-			return nil, fmt.Errorf("managed Codex MCP block markers are malformed")
-		}
-		end += start + len(codexEnd)
-		if end < len(text) && text[end] == '\n' {
-			end++
-		}
-		text = text[:start] + text[end:]
-	}
-	containsServer, parseErr := containsCodexServerTable(text)
-	if parseErr != nil {
-		return nil, fmt.Errorf("decode Codex config: %w", parseErr)
-	}
-	if containsServer {
-		return nil, fmt.Errorf(
-			"unmanaged %s table already exists; remove it before running init",
-			codexTable,
-		)
-	}
 	executableValue, err := tomlString(executable)
 	if err != nil {
 		return nil, fmt.Errorf("encode executable path: %w", err)
@@ -878,6 +1003,9 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode workspace root: %w", err)
 	}
+	// The config keeps the line ending it is written with, the same way the
+	// instruction files and the JSON configs do.
+	lineBreak := documentLineBreak(before)
 	block := strings.Join(
 		[]string{
 			codexBegin,
@@ -887,13 +1015,52 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 			"startup_timeout_sec = 120",
 			codexEnd,
 		},
-		"\n",
+		lineBreak,
 	)
-	text = strings.TrimSpace(text)
-	if text != "" {
-		text += "\n\n"
+	text := string(before)
+	// An existing managed block is replaced where it stands, so the operator's
+	// own ordering and spacing around it survive.
+	if start := strings.Index(text, codexBegin); start >= 0 {
+		end := strings.Index(text[start:], codexEnd)
+		if end < 0 {
+			return nil, fmt.Errorf("managed Codex MCP block markers are malformed")
+		}
+		end += start + len(codexEnd)
+		if err := rejectUnmanagedCodexServer(text[:start] + text[end:]); err != nil {
+			return nil, err
+		}
+		prefix := normalizeTrailingLineBreak(text[:start], lineBreak)
+		suffix := text[end:]
+		if rest, found := trimLeadingLineBreak(suffix); found {
+			suffix = lineBreak + rest
+		}
+		return []byte(prefix + block + suffix), nil
 	}
-	return []byte(text + block + "\n"), nil
+	if err := rejectUnmanagedCodexServer(text); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(text) == "" {
+		text = ""
+	} else {
+		text = strings.TrimRight(text, "\r\n") + lineBreak + lineBreak
+	}
+	return []byte(text + block + lineBreak), nil
+}
+
+// rejectUnmanagedCodexServer refuses to take over a manually configured server
+// entry instead of silently replacing it.
+func rejectUnmanagedCodexServer(text string) error {
+	containsServer, err := containsCodexServerTable(text)
+	if err != nil {
+		return fmt.Errorf("decode Codex config: %w", err)
+	}
+	if containsServer {
+		return fmt.Errorf(
+			"unmanaged %s table already exists; remove it before running init",
+			codexTable,
+		)
+	}
+	return nil
 }
 
 func containsCodexServerTable(text string) (bool, error) {

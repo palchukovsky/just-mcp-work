@@ -34,17 +34,14 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
 
-// TestRunShellCommandDescriptionCoversEveryTripWireProgram checks the whole
-// rendered list instead of each program separately: a substring check would
-// also pass on an unrelated word that merely contains the program name.
-func TestRunShellCommandDescriptionCoversEveryTripWireProgram(t *testing.T) {
-	programs := strings.Join(agentinit.TripWirePrograms(), ", ")
-	if !strings.Contains(runShellCommandDescription(), "program is "+programs+",") {
-		t.Errorf(
-			"run_shell_command does not list the TRIP-WIRE programs %q: %s",
-			programs,
-			runShellCommandDescription(),
-		)
+// TestRunShellCommandDescriptionNamesItsAlternatives keeps the tool description
+// pointing at the cheaper and the fuller option, so the agent can tell when this
+// escape hatch is not the right tool.
+func TestRunShellCommandDescriptionNamesItsAlternatives(t *testing.T) {
+	for _, expected := range []string{"run_task", "start_task", "normal shell", "promoted: true"} {
+		if !strings.Contains(runShellCommandDescription(), expected) {
+			t.Errorf("run_shell_command description does not mention %q", expected)
+		}
 	}
 }
 
