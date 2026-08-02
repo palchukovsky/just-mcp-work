@@ -7,22 +7,29 @@ decide how much to trust it in a given setup.
 ## What jmw executes
 
 jmw runs **tasks that already exist in a project** - a `just` recipe, a `make`
-target, a `cmake` preset, or a Docker build and Compose service — addressed as
-`<runner>:<task>` (e.g. `just:build`). It discovers projects under a root and
-invokes their existing tasks through the real runner binary.
+target, a `cmake` preset or configured build target, or a Docker build and
+Compose service — addressed as `<runner>:<task>` (e.g. `just:build`). It
+discovers projects under a root and invokes their existing tasks through the
+real runner binary.
 
-It does **not** accept arbitrary shell from the agent. The MCP surface lets a
-caller run named tasks that are already in the repo; it adds no new "execute
-anything" primitive. The agent's blast radius is bounded by what the
-project's task files already contain.
+The `run_shell_command` and `start_shell_command` tools are explicit escape
+hatches for commands that no discovered task covers. They pass caller-provided
+command text to the operating system shell, so their blast radius is not bounded
+by project task definitions. Grant access to them only when arbitrary shell
+execution is acceptable.
+
+CMake target discovery reads an existing `CMakeCache.txt` and `build.ninja`;
+listing does not configure or regenerate the build tree. Treat generated build
+trees as executable metadata: a selected target is passed to `cmake --build`
+with the same privileges as every other task.
 
 ## What jmw does NOT do
 
-jmw does **not** sandbox execution. A task, once invoked, runs as a child
-process with the same privileges, filesystem access, and environment as the
-jmw process itself. It can read and write anywhere that process can, open
-network connections, and spawn further processes — whatever the task
-definition tells it to.
+jmw does **not** sandbox execution. A task or shell command, once invoked, runs
+as a child process with the same privileges, filesystem access, and environment
+as the jmw process itself. It can read and write anywhere that process can,
+open network connections, and spawn further processes — whatever the task
+definition or command text tells it to.
 
 A task file (justfile, Makefile, Dockerfile, Compose manifest, …) is code.
 Pointing jmw at a project is the same act as running that project's build

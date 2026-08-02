@@ -26,6 +26,17 @@ func TestMarkMissingToolReportsAnAbsentBinary(t *testing.T) {
 	}
 }
 
+func TestMarkWarningDoesNotImplyMissingTool(t *testing.T) {
+	cause := errors.New("unsupported generator")
+	warning := runner.MarkWarning(cause)
+	if errors.Is(warning, runner.ErrToolUnavailable) {
+		t.Fatalf("MarkWarning = %v, unexpectedly matches ErrToolUnavailable", warning)
+	}
+	if !errors.Is(warning, cause) {
+		t.Fatalf("MarkWarning = %v, want the original cause kept", warning)
+	}
+}
+
 // TestMarkMissingToolKeepsOtherFailures pins the boundary of the warning: a
 // tool that is installed but fails must stay a project error, or a broken
 // build file would silently look like an unconfigured host.

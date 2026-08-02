@@ -162,9 +162,11 @@ func (r *Runner) checkInstalled() error {
 		lookPath = exec.LookPath
 	}
 	if _, err := lookPath(r.binary); err != nil {
+		// The marker already names the binary it failed to find, so the wrapper
+		// names the step instead of repeating "find the binary".
 		return fmt.Errorf(
-			"find the Docker binary %q: %w: %w",
-			r.binary, runner.ErrToolUnavailable, err,
+			"check the Docker installation: %w",
+			runner.MarkMissingTool(r.binary, err),
 		)
 	}
 	return nil

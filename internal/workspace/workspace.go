@@ -7,7 +7,6 @@ package workspace
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -438,11 +437,16 @@ func (r *Registry) excluded(path string) bool {
 // this host is a warning: the checkout is fine, the machine just cannot run
 // that runner, and failing the whole project would bury the runners it can run.
 func (p *Project) addIssue(name string, err error) {
-	if errors.Is(err, runner.ErrToolUnavailable) {
-		p.Warnings = addError(p.Warnings, name, err)
+	if err == nil {
 		return
 	}
-	p.Errors = addError(p.Errors, name, err)
+	warning, failure := runner.SplitIssues(err)
+	if warning != nil {
+		p.Warnings = addError(p.Warnings, name, warning)
+	}
+	if failure != nil {
+		p.Errors = addError(p.Errors, name, failure)
+	}
 }
 
 func addError(errors map[string]string, name string, err error) map[string]string {

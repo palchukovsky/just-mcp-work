@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os/exec"
+	"strings"
 )
 
 // ErrToolUnavailable reports that the build tool of a runner is missing on this
@@ -18,6 +19,91 @@ import (
 // does not have is not a broken project, so the workspace keeps such a runner
 // visible as a warning instead of failing the project.
 var ErrToolUnavailable = errors.New("runner tool is unavailable")
+
+type warningMarker interface {
+	error
+	runnerWarning()
+}
+
+type warningError struct {
+	cause error
+}
+
+func (e *warningError) Error() string {
+	return e.cause.Error()
+}
+
+func (e *warningError) Unwrap() error {
+	return e.cause
+}
+
+func (*warningError) runnerWarning() {}
+
+// MarkWarning marks a discovery issue that leaves the project usable. The
+// concrete marker keeps a joined warning from hiding a real failure beside it.
+//
+// The mark covers everything it wraps, so it must be applied to the warning
+// alone: marking an error that also carries a real failure would report that
+// failure as a warning too.
+func MarkWarning(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &warningError{cause: err}
+}
+
+// SplitIssues separates runner warnings from failures without allowing a
+// warning joined with a failure to downgrade that failure.
+func SplitIssues(err error) (warning, failure error) {
+	if err == nil {
+		return
+	}
+	if isMarkedWarning(err) {
+		return err, nil
+	}
+	joined, isJoined := err.(interface {
+		Unwrap() []error
+	})
+	if isJoined {
+		for _, child := range joined.Unwrap() {
+			childWarning, childFailure := SplitIssues(child)
+			warning = errors.Join(warning, childWarning)
+			failure = errors.Join(failure, childFailure)
+		}
+		return warning, failure
+	}
+	wrapped := errors.Unwrap(err)
+	if wrapped != nil {
+		warning, failure = SplitIssues(wrapped)
+		switch {
+		case warning != nil && failure == nil:
+			return err, nil
+		case warning == nil && failure != nil:
+			return nil, err
+		case warning != nil && failure != nil:
+			return warning, preserveFailureContext(err, wrapped, failure)
+		}
+	}
+	if errors.Is(err, ErrToolUnavailable) {
+		return err, nil
+	}
+	return nil, err
+}
+
+// isMarkedWarning requires the marker to be the current error. errors.As would
+// traverse a joined sibling failure and classify the whole error as a warning.
+func isMarkedWarning(err error) bool {
+	_, marked := err.(warningMarker) //nolint:errorlint // The marker must not be unwrapped.
+	return marked
+}
+
+func preserveFailureContext(err error, wrapped error, failure error) error {
+	prefix, found := strings.CutSuffix(err.Error(), wrapped.Error())
+	if !found || prefix == "" {
+		return failure
+	}
+	return fmt.Errorf("%s%w", prefix, failure)
+}
 
 // MarkMissingTool reports err as ErrToolUnavailable when a command failed
 // because its binary does not exist on this host. Every other failure is
@@ -30,7 +116,9 @@ func MarkMissingTool(binary string, err error) error {
 	if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	return fmt.Errorf("find the %s binary: %w: %w", binary, ErrToolUnavailable, err)
+	return MarkWarning(
+		fmt.Errorf("find the %s binary: %w: %w", binary, ErrToolUnavailable, err),
+	)
 }
 
 // ParamKind describes how a task parameter accepts values.

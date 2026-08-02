@@ -147,11 +147,15 @@ func TestMissingDockerBinaryIsReportedNotHidden(t *testing.T) {
 	if err == nil {
 		t.Fatal("ListTasks accepted a project without the Docker binary")
 	}
-	if !strings.Contains(err.Error(), "Docker binary") {
+	if !strings.Contains(err.Error(), "find the docker binary") {
 		t.Fatalf("ListTasks error = %v, want the missing Docker binary", err)
 	}
 	if !errors.Is(err, runner.ErrToolUnavailable) {
 		t.Fatalf("ListTasks error = %v, want runner.ErrToolUnavailable", err)
+	}
+	warning, failure := runner.SplitIssues(err)
+	if warning == nil || failure != nil {
+		t.Fatalf("SplitIssues = (%v, %v), want warning only", warning, failure)
 	}
 }
 

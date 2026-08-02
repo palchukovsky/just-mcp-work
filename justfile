@@ -5,7 +5,7 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 repo_dir := justfile_directory()
 go_version := env_var_or_default("CI_GO", "1.25.11")
 golangci_lint_version := env_var_or_default("CI_GOLANGCI_LINT", "2.12.2")
-local_tool_dir := repo_dir / ".." / "tools" / ".bin"
+local_tool_dir := repo_dir / ".tmp" / "bin"
 default_golangci_lint := if os_family() == "windows" { local_tool_dir / "golangci-lint.exe" } else { local_tool_dir / "golangci-lint" }
 golangci_lint := env_var_or_default("GOLANGCI_LINT", default_golangci_lint)
 go_cache := env_var_or_default("GOCACHE", repo_dir / ".tmp" / "go-build-cache")
@@ -76,7 +76,7 @@ check-dry: lint vet test test-race build
 verify: check
     {{ python }} scripts/dev.py smoke
 
-# Install the pinned golangci-lint binary into the workspace-local tools/.bin.
+# Install the pinned golangci-lint binary into the ignored repo-local .tmp/bin.
 install-lint:
     GOBIN="{{ local_tool_dir }}" go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v{{ golangci_lint_version }}
 

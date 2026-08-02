@@ -98,6 +98,100 @@ func TestDiscoverReportsMissingToolAsWarning(t *testing.T) {
 	}
 }
 
+func TestProjectAddIssueKeepsMarkedMissingToolAsWarning(t *testing.T) {
+	_, lookupErr := exec.LookPath("jmw-absent-tool-fixture")
+	if lookupErr == nil {
+		t.Skip("the fixture name resolves on this host")
+	}
+
+	project := Project{}
+	project.addIssue(
+		"cmake",
+		fmt.Errorf(
+			"list CMake tasks: %w",
+			runner.MarkMissingTool("jmw-absent-tool-fixture", lookupErr),
+		),
+	)
+
+	if len(project.Errors) != 0 {
+		t.Fatalf("project errors = %#v, want none", project.Errors)
+	}
+	if !strings.Contains(
+		project.Warnings["cmake"],
+		"runner tool is unavailable",
+	) {
+		t.Fatalf("project warnings = %#v", project.Warnings)
+	}
+}
+
+func TestProjectAddIssueSplitsWarningsAndErrors(t *testing.T) {
+	_, lookupErr := exec.LookPath("jmw-absent-tool-fixture")
+	if lookupErr == nil {
+		t.Skip("the fixture name resolves on this host")
+	}
+
+	project := Project{}
+	project.addIssue(
+		"cmake",
+		fmt.Errorf(
+			"list CMake tasks: %w",
+			errors.Join(
+				runner.MarkMissingTool(
+					"jmw-absent-tool-fixture",
+					lookupErr,
+				),
+				errors.New("parse configured build tree"),
+			),
+		),
+	)
+
+	if !strings.Contains(
+		project.Warnings["cmake"],
+		"runner tool is unavailable",
+	) {
+		t.Fatalf("project warnings = %#v", project.Warnings)
+	}
+	if !strings.Contains(
+		project.Errors["cmake"],
+		"parse configured build tree",
+	) || strings.Contains(
+		project.Errors["cmake"],
+		"runner tool is unavailable",
+	) {
+		t.Fatalf("project errors = %#v", project.Errors)
+	}
+	if !strings.Contains(
+		project.Errors["cmake"],
+		"list CMake tasks: parse configured build tree",
+	) {
+		t.Fatalf("project errors = %#v, want the operation context", project.Errors)
+	}
+}
+
+func TestProjectAddIssueDoesNotDowngradeJoinedUnavailableSentinel(t *testing.T) {
+	project := Project{}
+	project.addIssue(
+		"cmake",
+		errors.Join(
+			runner.ErrToolUnavailable,
+			errors.New("parse configured build tree"),
+		),
+	)
+
+	if !strings.Contains(
+		project.Warnings["cmake"],
+		"runner tool is unavailable",
+	) {
+		t.Fatalf("project warnings = %#v", project.Warnings)
+	}
+	if !strings.Contains(
+		project.Errors["cmake"],
+		"parse configured build tree",
+	) {
+		t.Fatalf("project errors = %#v", project.Errors)
+	}
+}
+
 // TestDiscoverKeepsProjectWithOnlyWarnings covers the directory whose single
 // signal is a warning: dropping it would hide the diagnosis of why a project
 // the operator expects to see reports nothing at all.
