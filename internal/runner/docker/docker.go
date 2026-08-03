@@ -121,6 +121,15 @@ func New(binary string) *Runner {
 	}
 }
 
+// Registration explicitly keeps the unreviewed Docker command policy enabled.
+func Registration(binary string) runner.Registration {
+	return runner.NewRegistration(
+		runnerName,
+		runner.UnreviewedPermissions(),
+		func(runner.Mode) (runner.Runner, error) { return New(binary), nil },
+	)
+}
+
 // Name returns the stable runner name.
 func (*Runner) Name() string { return runnerName }
 

@@ -85,7 +85,7 @@ func newCatalogTestServer(t *testing.T) *Server {
 	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(catalogRunner{})
+	runners, err := runner.NewRegistry(testRegistration(catalogRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}

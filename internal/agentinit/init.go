@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/palchukovsky/just-mcp-work/internal/runner"
 )
 
 const (
@@ -86,8 +87,12 @@ HOW TO DRIVE IT
   call.
 - run_task runs a discovered task and promotes a long run to the background;
   start_task starts it in the background from the beginning.
-- run_shell_command runs a command that has no task behind it. Set
-  working_directory to a workspace-relative directory (default .).`
+- A task may be absent because the operator withheld it through a runner mode.
+  Never recreate or run such a task through run_shell_command,
+  start_shell_command, or another shell path.
+- Shell tools remain available for genuinely ad-hoc commands outside the
+  discovered or withheld task surfaces. Set working_directory to a
+  workspace-relative directory (default .).`
 
 // managedBlockText is the instruction block written into the agent files. It
 // carries the same contract as promptText in a form an agent can read before
@@ -98,7 +103,11 @@ tokens. Run a task through it (list_tasks -> run_task/start_task) whenever you d
 not need the full output - build, test, lint, format, check/verify gates - and
 trust its receipt instead of re-reading the log of a successful run. Run a
 command directly when its full output is the thing you actually need. Pass the
-same rule on to sub-agents and other executors.`
+same rule on to sub-agents and other executors. A task may be absent because the
+operator withheld it through a runner mode; never recreate or run such a task
+through run_shell_command, start_shell_command, or another shell path. Shell
+tools remain available for genuinely ad-hoc commands outside the discovered or
+withheld task surfaces.`
 
 // ClaudePermissions selects how init treats the Claude tool permission lists.
 type ClaudePermissions string
@@ -108,7 +117,7 @@ const (
 	ClaudePermissionsAsk ClaudePermissions = "ask"
 	// ClaudePermissionsYes writes the change without a confirmation.
 	ClaudePermissionsYes ClaudePermissions = "yes"
-	// ClaudePermissionsNo leaves the Claude permission lists alone.
+	// ClaudePermissionsNo removes this server's entries without adding them back.
 	ClaudePermissionsNo ClaudePermissions = "no"
 )
 
@@ -177,12 +186,15 @@ type Options struct {
 	Agents         []string
 	DryRun         bool
 	WriteMCPConfig bool
+	// RunnerModes is the complete, catalog-ordered runner selection persisted in
+	// every managed MCP server command.
+	RunnerModes runner.ValidatedSelections
 	// ClaudePermissions selects how the Claude permission lists are treated. The
 	// zero value asks through Confirm.
 	ClaudePermissions ClaudePermissions
 	// Confirm approves a pending Claude permission change. It receives the target
-	// path and the planned diff, and is called only in the ask mode and only when
-	// the file would actually change. A nil Confirm declines the change.
+	// path and the planned diff, and is called only in the ask mode. A nil Confirm
+	// declines the managed permissions and leaves only the cleanup plan.
 	Confirm func(path string, diff string) (bool, error)
 }
 
@@ -192,15 +204,27 @@ type Result struct {
 	Diffs []string
 }
 
-// Apply creates or updates selected agent instruction files.
-//
-//nolint:gocyclo // Agent-file updates have independent validation and write paths.
+type plannedEdit struct {
+	path         string
+	before       []byte
+	after        []byte
+	mode         os.FileMode
+	beforeExists bool
+	remove       bool
+}
+
+// Apply makes the current invocation authoritative for every workspace-local
+// surface owned by JMW. All paths and contents are planned before the first
+// write, so a malformed later target cannot leave an earlier one updated.
 func Apply(options Options) (Result, error) {
+	if _, err := options.RunnerModes.Args(); err != nil {
+		return Result{}, fmt.Errorf("validate runner mode arguments: %w", err)
+	}
 	dir, err := filepath.Abs(options.Dir)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve workspace directory: %w", err)
 	}
-	scope, err := findScopeRoot(dir)
+	scope, preserveMCPAnchor, err := findScopeRoot(dir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -208,156 +232,267 @@ func Apply(options Options) (Result, error) {
 		options.Agents = []string{"claude", "codex", "cursor"}
 	}
 	agents := unique(options.Agents)
-	var codexPath string
-	var codexBefore []byte
-	var codexAfter []byte
-	if options.WriteMCPConfig {
-		codexPath, err = findCodexConfig(scope)
-		if err != nil {
-			return Result{}, err
-		}
-		codexBefore, err = os.ReadFile(codexPath)
-		if err != nil && !os.IsNotExist(err) {
-			return Result{}, fmt.Errorf("read %s: %w", codexPath, err)
-		}
-		codexAfter, err = mergeCodexConfig(codexBefore, scope)
-		if err != nil {
-			return Result{}, fmt.Errorf("merge %s: %w", codexPath, err)
-		}
-	}
-	result := Result{}
+	selected := make(map[string]struct{}, len(agents))
 	for _, agent := range agents {
-		target, ok := agentTarget(agent)
-		if !ok {
+		if _, ok := agentTarget(agent); !ok {
 			return Result{}, fmt.Errorf("unsupported agent %q", agent)
 		}
-		path, err := findAgentInstruction(scope, target)
-		if err != nil {
-			return Result{}, err
-		}
-		// #nosec G304 -- path is a selected agent target below Dir or the closest
-		// ancestor target validated not to escape its containing directory.
-		before, err := os.ReadFile(path)
-		if err != nil && !os.IsNotExist(err) {
-			return Result{}, fmt.Errorf("read %s: %w", path, err)
-		}
-		after, err := managedContent(before, target.header)
-		if err != nil {
-			return Result{}, fmt.Errorf("%s: %w", path, err)
-		}
-		if bytes.Equal(before, after) {
-			continue
-		}
-		result.Paths = append(result.Paths, path)
-		result.Diffs = append(result.Diffs, simpleDiff(path, before, after))
-		if options.DryRun {
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			return Result{}, fmt.Errorf("create directory for %s: %w", path, err)
-		}
-		// #nosec G306,G703 -- path is selected from the static target map. Instruction
-		// files are intentionally readable by local coding agents.
-		if err := os.WriteFile(path, after, 0o644); err != nil {
-			return Result{}, fmt.Errorf("write %s: %w", path, err)
-		}
+		selected[agent] = struct{}{}
 	}
-	if options.WriteMCPConfig {
-		path, err := findMCPConfig(scope)
-		if err != nil {
-			return Result{}, err
-		}
-		// #nosec G304 -- path is either .mcp.json below Dir or the nearest regular
-		// ancestor config discovered from Dir.
-		before, err := os.ReadFile(path)
-		if err != nil && !os.IsNotExist(err) {
-			return Result{}, fmt.Errorf("read %s: %w", path, err)
-		}
-		after, err := mergeMCPConfig(before)
-		if err != nil {
-			return Result{}, err
-		}
-		if !bytes.Equal(before, after) {
-			result.Paths = append(result.Paths, path)
-			result.Diffs = append(result.Diffs, simpleDiff(path, before, after))
-			if !options.DryRun {
-				// #nosec G306,G703 -- findMCPConfig resolves the nearest regular config
-				// at or above Dir, and a local .mcp.json must be readable by its agent.
-				if err := os.WriteFile(path, after, 0o644); err != nil {
-					return Result{}, fmt.Errorf("write %s: %w", path, err)
-				}
-			}
-		}
-		if !bytes.Equal(codexBefore, codexAfter) {
-			result.Paths = append(result.Paths, codexPath)
-			result.Diffs = append(result.Diffs, simpleDiff(codexPath, codexBefore, codexAfter))
-			if !options.DryRun {
-				if mkdirErr := os.MkdirAll(filepath.Dir(codexPath), 0o750); mkdirErr != nil {
-					return Result{}, fmt.Errorf("create directory for %s: %w", codexPath, mkdirErr)
-				}
-				// #nosec G703 -- findCodexConfig resolves existing symlinks and rejects
-				// targets outside the workspace scope before any file is changed.
-				if writeErr := os.WriteFile(codexPath, codexAfter, 0o600); writeErr != nil {
-					return Result{}, fmt.Errorf("write %s: %w", codexPath, writeErr)
-				}
-			}
-		}
+	edits, err := planAgentInstructions(scope, selected)
+	if err != nil {
+		return Result{}, err
 	}
-	if err := applyClaudePermissions(scope, agents, options, &result); err != nil {
+	mcpEdit, err := planMCPConfig(scope, preserveMCPAnchor, options)
+	if err != nil {
+		return Result{}, err
+	}
+	edits = appendEdit(edits, mcpEdit)
+	codexEdit, err := planCodexConfig(scope, options)
+	if err != nil {
+		return Result{}, err
+	}
+	edits = appendEdit(edits, codexEdit)
+	// The Claude settings file belongs to the claude agent, so an invocation that
+	// does not select claude plans nothing for it, whatever ClaudePermissions says.
+	if _, claudeSelected := selected["claude"]; claudeSelected {
+		claudeEdit, claudeErr := planClaudeSettings(scope, options)
+		if claudeErr != nil {
+			return Result{}, claudeErr
+		}
+		edits = appendEdit(edits, claudeEdit)
+	}
+	result := resultForEdits(edits)
+	if options.DryRun {
+		return result, nil
+	}
+	if err := applyEdits(edits); err != nil {
 		return Result{}, err
 	}
 	return result, nil
 }
 
-// applyClaudePermissions installs the managed tool permissions into the Claude
-// settings file. It does nothing when Claude is not a selected agent, when the
-// operator opted out, or when the confirmation is declined.
-func applyClaudePermissions(
+// planAgentInstructions plans the managed block for the selected agents only. An
+// agent the operator did not select is left alone, so init neither rewrites nor
+// removes its instruction file. That also keeps two agent targets that resolve
+// to one file, such as an AGENTS.md and a CLAUDE.md symlinked to the same
+// document, from cancelling each other out.
+func planAgentInstructions(
 	scope string,
-	agents []string,
-	options Options,
-	result *Result,
-) error {
-	if !slices.Contains(agents, "claude") || options.ClaudePermissions == ClaudePermissionsNo {
-		return nil
+	selected map[string]struct{},
+) ([]plannedEdit, error) {
+	edits := make([]plannedEdit, 0, len(selected))
+	for _, named := range agentTargets() {
+		if _, keep := selected[named.name]; !keep {
+			continue
+		}
+		path, err := findAgentInstruction(scope, named.target)
+		if err != nil {
+			return nil, err
+		}
+		before, beforeExists, err := readOptionalFile(path)
+		if err != nil {
+			return nil, err
+		}
+		after, err := managedContent(before, named.target.header)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", path, err)
+		}
+		edits = appendEdit(
+			edits,
+			newEdit(path, before, after, 0o644, beforeExists, false),
+		)
 	}
+	return edits, nil
+}
+
+func planMCPConfig(
+	scope string,
+	preserveAnchor bool,
+	options Options,
+) (*plannedEdit, error) {
+	path, err := findMCPConfig(scope)
+	if err != nil {
+		return nil, err
+	}
+	before, beforeExists, err := readOptionalFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if options.WriteMCPConfig {
+		after, mergeErr := mergeMCPConfig(before, options.RunnerModes)
+		if mergeErr != nil {
+			return nil, mergeErr
+		}
+		return newEdit(path, before, after, 0o644, beforeExists, false), nil
+	}
+	after, remove, err := removeMCPConfig(before)
+	if err != nil {
+		return nil, err
+	}
+	if remove && !preserveAnchor {
+		preserveAnchor, err = hasHigherMCPConfig(scope)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if remove && preserveAnchor {
+		after = []byte("{}" + documentLineBreak(before))
+		remove = false
+	}
+	return newEdit(path, before, after, 0o644, beforeExists, remove), nil
+}
+
+func planCodexConfig(scope string, options Options) (*plannedEdit, error) {
+	path, err := findCodexConfig(scope)
+	if err != nil {
+		return nil, err
+	}
+	before, beforeExists, err := readOptionalFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if options.WriteMCPConfig {
+		after, mergeErr := mergeCodexConfig(before, scope, options.RunnerModes)
+		if mergeErr != nil {
+			return nil, fmt.Errorf("merge %s: %w", path, mergeErr)
+		}
+		return newEdit(path, before, after, 0o600, beforeExists, false), nil
+	}
+	after, remove, err := removeCodexConfig(before)
+	if err != nil {
+		return nil, fmt.Errorf("clean %s: %w", path, err)
+	}
+	remove, err = preserveScopedFileSymlink(scope, codexConfig, remove)
+	if err != nil {
+		return nil, err
+	}
+	return newEdit(path, before, after, 0o600, beforeExists, remove), nil
+}
+
+// planClaudeSettings plans the Claude permission lists of a selected claude
+// agent. Its caller decides whether the agent is selected at all.
+func planClaudeSettings(scope string, options Options) (*plannedEdit, error) {
 	path, err := findClaudeSettings(scope)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	// #nosec G304 -- path is the Claude settings file validated not to resolve
-	// outside the workspace scope.
-	before, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read %s: %w", path, err)
+	before, beforeExists, err := readOptionalFile(path)
+	if err != nil {
+		return nil, err
+	}
+	cleaned, remove, err := removeManagedClaudeSettings(before)
+	if err != nil {
+		return nil, fmt.Errorf("clean %s: %w", path, err)
+	}
+	if options.ClaudePermissions == ClaudePermissionsNo {
+		remove, err = preserveScopedFileSymlink(scope, claudeSettings, remove)
+		if err != nil {
+			return nil, err
+		}
+		return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil
 	}
 	after, err := mergeClaudeSettings(before)
 	if err != nil {
-		return fmt.Errorf("merge %s: %w", path, err)
+		return nil, fmt.Errorf("merge %s: %w", path, err)
 	}
-	if bytes.Equal(before, after) {
+	edit := newEdit(path, before, after, 0o600, beforeExists, false)
+	if options.DryRun || options.ClaudePermissions == ClaudePermissionsYes {
+		return edit, nil
+	}
+	confirmed, err := confirmClaudePermissions(
+		path,
+		simpleDiff(path, before, after, beforeExists),
+		options,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if confirmed {
+		return edit, nil
+	}
+	remove, err = preserveScopedFileSymlink(scope, claudeSettings, remove)
+	if err != nil {
+		return nil, err
+	}
+	return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil
+}
+
+func readOptionalFile(path string) ([]byte, bool, error) {
+	// #nosec G304 -- callers pass a validated workspace-local managed path.
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return data, true, nil
+	}
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	return nil, false, fmt.Errorf("read %s: %w", path, err)
+}
+
+func newEdit(
+	path string,
+	before []byte,
+	after []byte,
+	mode os.FileMode,
+	beforeExists bool,
+	remove bool,
+) *plannedEdit {
+	if bytes.Equal(before, after) && !remove {
 		return nil
 	}
-	diff := simpleDiff(path, before, after)
-	if !options.DryRun {
-		confirmed, confirmErr := confirmClaudePermissions(path, diff, options)
-		if confirmErr != nil {
-			return confirmErr
+	return &plannedEdit{
+		path:         path,
+		before:       before,
+		after:        after,
+		mode:         mode,
+		beforeExists: beforeExists,
+		remove:       remove,
+	}
+}
+
+func appendEdit(edits []plannedEdit, edit *plannedEdit) []plannedEdit {
+	if edit == nil {
+		return edits
+	}
+	return append(edits, *edit)
+}
+
+func resultForEdits(edits []plannedEdit) Result {
+	result := Result{Paths: make([]string, 0, len(edits)), Diffs: make([]string, 0, len(edits))}
+	for _, edit := range edits {
+		result.Paths = append(result.Paths, edit.path)
+		result.Diffs = append(
+			result.Diffs,
+			simpleDiffWithRemoval(
+				edit.path,
+				edit.before,
+				edit.after,
+				edit.beforeExists,
+				edit.remove,
+			),
+		)
+	}
+	return result
+}
+
+func applyEdits(edits []plannedEdit) error {
+	for _, edit := range edits {
+		if edit.remove {
+			if err := os.Remove(edit.path); err != nil {
+				return fmt.Errorf("remove %s: %w", edit.path, err)
+			}
+			continue
 		}
-		if !confirmed {
-			return nil
+		if err := os.MkdirAll(filepath.Dir(edit.path), 0o750); err != nil {
+			return fmt.Errorf("create directory for %s: %w", edit.path, err)
 		}
-		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
-			return fmt.Errorf("create directory for %s: %w", path, mkdirErr)
-		}
-		// #nosec G703 -- findClaudeSettings resolves existing symlinks and rejects
-		// targets outside the workspace scope before any file is changed.
-		if writeErr := os.WriteFile(path, after, 0o600); writeErr != nil {
-			return fmt.Errorf("write %s: %w", path, writeErr)
+		// #nosec G306,G703 -- every edit path was resolved and validated within
+		// the current workspace scope before this write phase began.
+		if err := os.WriteFile(edit.path, edit.after, edit.mode); err != nil {
+			return fmt.Errorf("write %s: %w", edit.path, err)
 		}
 	}
-	result.Paths = append(result.Paths, path)
-	result.Diffs = append(result.Diffs, diff)
 	return nil
 }
 
@@ -376,100 +511,84 @@ func confirmClaudePermissions(path string, diff string, options Options) (bool, 
 }
 
 // findScopeRoot uses the nearest existing MCP config as the workspace boundary.
+// The bool reports that an ancestor config anchored a nested invocation, so
+// cleanup can preserve that boundary even when the config is otherwise JMW-only.
 // Without one, dir is a standalone project and owns all generated files.
-func findScopeRoot(dir string) (string, error) {
+func findScopeRoot(dir string) (string, bool, error) {
 	for current := dir; ; current = filepath.Dir(current) {
 		path := filepath.Join(current, mcpConfig)
 		info, err := os.Lstat(path)
 		if err == nil {
 			if !info.Mode().IsRegular() {
-				return "", fmt.Errorf("mcp config %s is not a regular file", path)
+				return "", false, fmt.Errorf("mcp config %s is not a regular file", path)
 			}
-			return current, nil
+			return current, current != dir, nil
 		}
 		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("inspect %s: %w", path, err)
+			return "", false, fmt.Errorf("inspect %s: %w", path, err)
 		}
 		if filepath.Dir(current) == current {
-			return dir, nil
+			return dir, false, nil
 		}
 	}
 }
 
-// findAgentInstruction finds the closest selected instruction file at or above dir.
-// When none exists, it returns the workspace-local path that should be created.
-func findAgentInstruction(dir string, target target) (string, error) {
-	for current := dir; ; current = filepath.Dir(current) {
-		path := filepath.Join(current, target.path)
-		found, err := validateAgentInstruction(path)
-		if err != nil {
-			return "", err
-		}
-		if found {
-			return path, nil
-		}
-		if filepath.Dir(current) == current {
-			return filepath.Join(dir, target.path), nil
-		}
-	}
-}
-
-func validateAgentInstruction(path string) (bool, error) {
-	info, err := os.Lstat(path)
-	if os.IsNotExist(err) {
+// hasHigherMCPConfig reports whether removing the config at scope would expose
+// another MCP config as the boundary of the next identical invocation.
+func hasHigherMCPConfig(scope string) (bool, error) {
+	current := filepath.Dir(scope)
+	if current == scope {
 		return false, nil
 	}
-	if err != nil {
-		return false, fmt.Errorf("inspect %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 {
-		return false, fmt.Errorf("agent instruction %s is not a regular file", path)
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return false, fmt.Errorf("resolve %s: %w", path, err)
-	}
-	base, err := filepath.EvalSymlinks(filepath.Dir(path))
-	if err != nil {
-		return false, fmt.Errorf("resolve agent instruction directory %s: %w", path, err)
-	}
-	relative, err := filepath.Rel(base, resolved)
-	if err != nil {
-		return false, fmt.Errorf("check agent instruction %s: %w", path, err)
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
-		filepath.IsAbs(relative) {
-		return false, fmt.Errorf("agent instruction %s resolves outside its directory", path)
-	}
-	resolvedInfo, err := os.Stat(resolved)
-	if err != nil {
-		return false, fmt.Errorf("inspect resolved agent instruction %s: %w", path, err)
-	}
-	if !resolvedInfo.Mode().IsRegular() {
-		return false, fmt.Errorf("agent instruction %s is not a regular file", path)
-	}
-	return true, nil
-}
-
-// findMCPConfig finds the closest regular .mcp.json at or above dir. When none
-// exists, it returns the path where a workspace-local configuration should be created.
-func findMCPConfig(dir string) (string, error) {
-	for current := dir; ; current = filepath.Dir(current) {
+	for {
 		path := filepath.Join(current, mcpConfig)
 		info, err := os.Lstat(path)
 		if err == nil {
 			if !info.Mode().IsRegular() {
-				return "", fmt.Errorf("mcp config %s is not a regular file", path)
+				return false, fmt.Errorf("mcp config %s is not a regular file", path)
 			}
-			return path, nil
+			return true, nil
 		}
 		if !os.IsNotExist(err) {
-			return "", fmt.Errorf("inspect %s: %w", path, err)
+			return false, fmt.Errorf("inspect %s: %w", path, err)
 		}
-		if filepath.Dir(current) == current {
-			return filepath.Join(dir, mcpConfig), nil
+		parent := filepath.Dir(current)
+		if parent == current {
+			return false, nil
 		}
+		current = parent
 	}
+}
+
+// findAgentInstruction resolves one fixed workspace-local instruction target.
+func findAgentInstruction(dir string, target target) (string, error) {
+	if _, err := findScopedConfig(
+		dir,
+		scopedConfig{
+			relative: target.path,
+			name:     "agent instruction",
+			lower:    "agent instruction",
+		},
+	); err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, target.path), nil
+}
+
+// findMCPConfig resolves the workspace-local .mcp.json only.
+func findMCPConfig(dir string) (string, error) {
+	path := filepath.Join(dir, mcpConfig)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return path, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("mcp config %s is not a regular file", path)
+	}
+	return path, nil
 }
 
 // scopedConfig describes an agent configuration file that must stay inside the
@@ -507,6 +626,28 @@ func findScopedConfig(scope string, config scopedConfig) (string, error) {
 	return resolveScopedConfigFile(scope, resolvedScope, resolvedDirectory, config)
 }
 
+// preserveScopedFileSymlink converts a planned deletion into a truncation when
+// the fixed lexical file itself is a symlink. A symlink in a parent directory
+// does not match, so directory-symlink cleanup keeps its existing behavior.
+func preserveScopedFileSymlink(
+	scope string,
+	relative string,
+	remove bool,
+) (bool, error) {
+	if !remove {
+		return false, nil
+	}
+	path := filepath.Join(scope, relative)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, fmt.Errorf("inspect scoped config %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, nil
+	}
+	return true, nil
+}
+
 func resolveWorkspaceScope(scope string) (string, error) {
 	var missing []string
 	for current := scope; ; current = filepath.Dir(current) {
@@ -536,7 +677,14 @@ func resolveScopedConfigDirectory(
 	directory := filepath.Join(scope, filepath.Dir(config.relative))
 	info, err := os.Lstat(directory)
 	if os.IsNotExist(err) {
-		return filepath.Join(resolvedScope, filepath.Dir(config.relative)), nil
+		resolvedDirectory, resolveErr := resolveWorkspaceScope(directory)
+		if resolveErr != nil {
+			return "", fmt.Errorf("resolve %s directory: %w", config.name, resolveErr)
+		}
+		if scopeErr := validateWithinScope(resolvedScope, resolvedDirectory); scopeErr != nil {
+			return "", fmt.Errorf("resolve %s directory: %w", config.name, scopeErr)
+		}
+		return resolvedDirectory, nil
 	}
 	if err != nil {
 		return "", fmt.Errorf("inspect %s directory %s: %w", config.name, directory, err)
@@ -606,15 +754,22 @@ func resolveWithinScope(scope string, path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve %s: %w", path, err)
 	}
+	if err := validateWithinScope(scope, resolved); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+func validateWithinScope(scope string, resolved string) error {
 	relative, err := filepath.Rel(scope, resolved)
 	if err != nil {
-		return "", fmt.Errorf("check %s against workspace scope: %w", path, err)
+		return fmt.Errorf("check %s against workspace scope: %w", resolved, err)
 	}
 	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
 		filepath.IsAbs(relative) {
-		return "", fmt.Errorf("%s resolves outside workspace scope %s", path, scope)
+		return fmt.Errorf("%s resolves outside workspace scope %s", resolved, scope)
 	}
-	return resolved, nil
+	return nil
 }
 
 func resolvePath(path string) (string, error) {
@@ -637,8 +792,8 @@ func resolvePath(path string) (string, error) {
 }
 
 // MCPConfigSnippet is a ready-to-paste local MCP configuration.
-func MCPConfigSnippet() (string, error) {
-	data, err := mergeMCPConfig(nil)
+func MCPConfigSnippet(selections runner.ValidatedSelections) (string, error) {
+	data, err := mergeMCPConfig(nil, selections)
 	if err != nil {
 		return "", err
 	}
@@ -650,24 +805,40 @@ type target struct {
 	header string
 }
 
-func agentTarget(agent string) (target, bool) {
-	switch agent {
-	case "claude":
-		return target{path: "CLAUDE.md", header: "# Workspace instructions\n\n"}, true
-	case "codex":
-		return target{path: "AGENTS.md", header: "# Workspace instructions\n\n"}, true
-	case "cursor":
-		return target{
-			path:   ".cursor/rules/just-mcp-work.mdc",
-			header: "---\ndescription: Use workspace tasks through just-mcp-work\n---\n\n",
-		}, true
-	case "copilot":
-		return target{path: ".github/copilot-instructions.md", header: "# Copilot instructions\n\n"}, true
-	case "windsurf":
-		return target{path: ".windsurfrules", header: "# Workspace instructions\n\n"}, true
-	default:
-		return target{}, false
+type namedTarget struct {
+	name   string
+	target target
+}
+
+func agentTargets() []namedTarget {
+	return []namedTarget{
+		{name: "claude", target: target{path: "CLAUDE.md", header: "# Workspace instructions\n\n"}},
+		{name: "codex", target: target{path: "AGENTS.md", header: "# Workspace instructions\n\n"}},
+		{
+			name: "cursor",
+			target: target{
+				path:   ".cursor/rules/just-mcp-work.mdc",
+				header: "---\ndescription: Use workspace tasks through just-mcp-work\n---\n\n",
+			},
+		},
+		{
+			name:   "copilot",
+			target: target{path: ".github/copilot-instructions.md", header: "# Copilot instructions\n\n"},
+		},
+		{
+			name:   "windsurf",
+			target: target{path: ".windsurfrules", header: "# Workspace instructions\n\n"},
+		},
 	}
+}
+
+func agentTarget(agent string) (target, bool) {
+	for _, named := range agentTargets() {
+		if named.name == agent {
+			return named.target, true
+		}
+	}
+	return target{}, false
 }
 
 func canonicalBlock() string {
@@ -679,28 +850,46 @@ func managedContent(before []byte, header string) ([]byte, error) {
 	// The instruction file keeps the line ending it is written with, so the
 	// managed block does not turn a CRLF document into a mixed one.
 	lineBreak := documentLineBreak(before)
-	start := strings.Index(text, beginMarker)
-	end := strings.Index(text, endMarker)
+	start, end, found, err := managedBlockRange(text)
+	if err != nil {
+		return nil, err
+	}
 	block := withLineBreak(canonicalBlock(), lineBreak)
-	if start >= 0 || end >= 0 {
-		if start < 0 || end < start {
-			return nil, fmt.Errorf("managed block markers are malformed")
-		}
+	if found {
 		prefix := normalizeTrailingLineBreak(text[:start], lineBreak)
-		end += len(endMarker)
-		suffix, _ := trimLeadingLineBreak(text[end:])
-		return []byte(prefix + block + suffix), nil
+		return []byte(prefix + block + text[end:]), nil
 	}
 	if text == "" {
 		// A file created here has no ending of its own to keep, so the header
 		// and the block go in with the bare newline they are written with.
 		return []byte(header + block), nil
 	}
-	text = normalizeTrailingLineBreak(text, lineBreak)
-	if !strings.HasSuffix(text, lineBreak) {
-		text += lineBreak
+	separator := lineBreak + lineBreak
+	if strings.HasSuffix(text, "\n") {
+		separator = lineBreak
 	}
-	return []byte(text + lineBreak + block), nil
+	return []byte(text + separator + block), nil
+}
+
+func managedBlockRange(text string) (int, int, bool, error) {
+	beginCount := strings.Count(text, beginMarker)
+	endCount := strings.Count(text, endMarker)
+	if beginCount == 0 && endCount == 0 {
+		return 0, 0, false, nil
+	}
+	if beginCount != 1 || endCount != 1 {
+		return 0, 0, false, fmt.Errorf("managed block markers are malformed")
+	}
+	start := strings.Index(text, beginMarker)
+	end := strings.Index(text, endMarker)
+	if end < start {
+		return 0, 0, false, fmt.Errorf("managed block markers are malformed")
+	}
+	end += len(endMarker)
+	if suffix, found := trimLeadingLineBreak(text[end:]); found {
+		end = len(text) - len(suffix)
+	}
+	return start, end, true, nil
 }
 
 // serverEntry is the managed MCP server definition of this executable. The
@@ -710,7 +899,7 @@ type serverEntry struct {
 	Args    []string `json:"args"`
 }
 
-func managedServerEntry() (serverEntry, error) {
+func managedServerEntry(selections runner.ValidatedSelections) (serverEntry, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("resolve executable: %w", err)
@@ -719,14 +908,18 @@ func managedServerEntry() (serverEntry, error) {
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("make executable path absolute: %w", err)
 	}
-	return serverEntry{Command: executable, Args: []string{"serve", "--root", "."}}, nil
+	args, err := managedServerArgs(".", selections)
+	if err != nil {
+		return serverEntry{}, err
+	}
+	return serverEntry{Command: executable, Args: args}, nil
 }
 
 // mergeMCPConfig writes the managed server entry into the configuration text.
 // Only that entry is rewritten: unrelated servers, key order, and the file's
 // own formatting are left exactly as they were.
-func mergeMCPConfig(before []byte) ([]byte, error) {
-	entry, err := managedServerEntry()
+func mergeMCPConfig(before []byte, selections runner.ValidatedSelections) ([]byte, error) {
+	entry, err := managedServerEntry(selections)
 	if err != nil {
 		return nil, err
 	}
@@ -759,6 +952,45 @@ func mergeMCPConfig(before []byte) ([]byte, error) {
 		return nil, fmt.Errorf("update %s: %w", mcpConfig, err)
 	}
 	return merged, nil
+}
+
+func removeMCPConfig(before []byte) ([]byte, bool, error) {
+	if len(bytes.TrimSpace(before)) == 0 {
+		return before, false, nil
+	}
+	root, err := decodeJSONObject(before, mcpConfig)
+	if err != nil {
+		return nil, false, err
+	}
+	members, err := jsonObjectMembers(before, root)
+	if err != nil {
+		return nil, false, fmt.Errorf("decode existing %s: %w", mcpConfig, err)
+	}
+	servers, found := jsonFindMember(members, "mcpServers")
+	if !found || isJSONNull(before, servers.value) {
+		return before, false, nil
+	}
+	if before[servers.value.start] != '{' {
+		return nil, false, fmt.Errorf(
+			"mcpServers in %s is not an object; init cannot identify its managed entry",
+			mcpConfig,
+		)
+	}
+	serverMembers, err := jsonObjectMembers(before, servers.value)
+	if err != nil {
+		return nil, false, fmt.Errorf("decode existing %s: %w", mcpConfig, err)
+	}
+	if _, found := jsonFindMember(serverMembers, serverName); !found {
+		return before, false, nil
+	}
+	if len(members) == 1 && len(serverMembers) == 1 {
+		return nil, true, nil
+	}
+	after, err := jsonRemoveMember(before, servers.value, serverName)
+	if err != nil {
+		return nil, false, fmt.Errorf("update %s: %w", mcpConfig, err)
+	}
+	return after, false, nil
 }
 
 // emptyJSONObject substitutes an empty object for a missing or blank file, so
@@ -832,6 +1064,91 @@ func mergeClaudeSettings(before []byte) ([]byte, error) {
 		}
 	}
 	return dropManagedClaudeTools(data, owning)
+}
+
+func removeManagedClaudeSettings(before []byte) ([]byte, bool, error) {
+	if len(bytes.TrimSpace(before)) == 0 {
+		return before, false, nil
+	}
+	root, err := decodeJSONObject(before, claudeSettings)
+	if err != nil {
+		return nil, false, err
+	}
+	if validateErr := validateClaudePermissions(before); validateErr != nil {
+		return nil, false, validateErr
+	}
+	members, err := jsonObjectMembers(before, root)
+	if err != nil {
+		return nil, false, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+	}
+	permissions, found := jsonFindMember(members, "permissions")
+	if !found || isJSONNull(before, permissions.value) {
+		return before, false, nil
+	}
+	if before[permissions.value.start] != '{' {
+		return nil, false, fmt.Errorf(
+			"permissions in %s is not an object; fix that entry and run init again",
+			claudeSettings,
+		)
+	}
+	toolOnly, err := claudeSettingsAreToolOnly(before, members, permissions.value)
+	if err != nil {
+		return nil, false, err
+	}
+	cleaned, err := dropManagedClaudeTools(before, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	if bytes.Equal(before, cleaned) {
+		return before, false, nil
+	}
+	if toolOnly {
+		return nil, true, nil
+	}
+	return cleaned, false, nil
+}
+
+func claudeSettingsAreToolOnly(
+	data []byte,
+	rootMembers []jsonMember,
+	permissions jsonSpan,
+) (bool, error) {
+	if len(rootMembers) != 1 || rootMembers[0].key != "permissions" {
+		return false, nil
+	}
+	members, err := jsonObjectMembers(data, permissions)
+	if err != nil {
+		return false, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+	}
+	ownedKeys := make(map[string]struct{}, len(claudeOwnedLists()))
+	for _, list := range claudeOwnedLists() {
+		ownedKeys[list.key] = struct{}{}
+	}
+	foundManaged := false
+	for _, member := range members {
+		if _, owned := ownedKeys[member.key]; !owned {
+			return false, nil
+		}
+		if data[member.value.start] != '[' {
+			return false, nil
+		}
+		elements, elementsErr := jsonArrayElements(data, member.value)
+		if elementsErr != nil {
+			return false, fmt.Errorf("decode existing %s: %w", claudeSettings, elementsErr)
+		}
+		for _, element := range elements {
+			var value any
+			if decodeErr := json.Unmarshal(data[element.start:element.end], &value); decodeErr != nil {
+				return false, fmt.Errorf("decode existing %s: %w", claudeSettings, decodeErr)
+			}
+			entry, isString := value.(string)
+			if !isString || !isManagedClaudeTool(entry) {
+				return false, nil
+			}
+			foundManaged = true
+		}
+	}
+	return foundManaged, nil
 }
 
 // claudeOwnedList is one permission list this server maintains.
@@ -989,7 +1306,14 @@ func isManagedClaudeTool(entry string) bool {
 	return entry == claudeServerRule || strings.HasPrefix(entry, claudeServerRule+"__")
 }
 
-func mergeCodexConfig(before []byte, root string) ([]byte, error) {
+func mergeCodexConfig(
+	before []byte,
+	root string,
+	selections runner.ValidatedSelections,
+) ([]byte, error) {
+	if _, _, _, err := codexBlockRange(string(before)); err != nil {
+		return nil, err
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("resolve executable: %w", err)
@@ -1006,9 +1330,13 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode executable path: %w", err)
 	}
-	rootValue, err := tomlString(root)
+	args, err := managedServerArgs(root, selections)
 	if err != nil {
-		return nil, fmt.Errorf("encode workspace root: %w", err)
+		return nil, err
+	}
+	argsValue, err := tomlStringArray(args)
+	if err != nil {
+		return nil, fmt.Errorf("encode server arguments: %w", err)
 	}
 	// The config keeps the line ending it is written with, the same way the
 	// instruction files and the JSON configs do.
@@ -1018,7 +1346,7 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 			codexBegin,
 			codexTable,
 			"command = " + executableValue,
-			"args = [\"serve\", \"--root\", " + rootValue + "]",
+			"args = " + argsValue,
 			"startup_timeout_sec = 120",
 			codexEnd,
 		},
@@ -1054,6 +1382,53 @@ func mergeCodexConfig(before []byte, root string) ([]byte, error) {
 	return []byte(text + block + lineBreak), nil
 }
 
+func removeCodexConfig(before []byte) ([]byte, bool, error) {
+	text := string(before)
+	start, end, found, err := codexBlockRange(text)
+	if err != nil {
+		return before, false, err
+	}
+	if !found {
+		if rejectErr := rejectUnmanagedCodexServer(text); rejectErr != nil {
+			return nil, false, rejectErr
+		}
+		return before, false, nil
+	}
+	if rejectErr := rejectUnmanagedCodexServer(text[:start] + text[end:]); rejectErr != nil {
+		return nil, false, rejectErr
+	}
+	if start == 0 && end == len(text) {
+		return nil, true, nil
+	}
+	prefix := trimManagedSeparator(text[:start])
+	suffix := text[end:]
+	if prefix != "" && suffix != "" && !strings.HasSuffix(prefix, "\n") {
+		prefix += documentLineBreak(before)
+	}
+	return []byte(prefix + suffix), false, nil
+}
+
+func codexBlockRange(text string) (int, int, bool, error) {
+	beginCount := strings.Count(text, codexBegin)
+	endCount := strings.Count(text, codexEnd)
+	if beginCount == 0 && endCount == 0 {
+		return 0, 0, false, nil
+	}
+	if beginCount != 1 || endCount != 1 {
+		return 0, 0, false, fmt.Errorf("managed Codex MCP block markers are malformed")
+	}
+	start := strings.Index(text, codexBegin)
+	end := strings.Index(text, codexEnd)
+	if end < start {
+		return 0, 0, false, fmt.Errorf("managed Codex MCP block markers are malformed")
+	}
+	end += len(codexEnd)
+	if suffix, found := trimLeadingLineBreak(text[end:]); found {
+		end = len(text) - len(suffix)
+	}
+	return start, end, true, nil
+}
+
 // rejectUnmanagedCodexServer refuses to take over a manually configured server
 // entry instead of silently replacing it.
 func rejectUnmanagedCodexServer(text string) error {
@@ -1087,6 +1462,27 @@ func tomlString(value string) (string, error) {
 	return string(encoded), nil
 }
 
+func tomlStringArray(values []string) (string, error) {
+	encoded := make([]string, 0, len(values))
+	for _, value := range values {
+		item, err := tomlString(value)
+		if err != nil {
+			return "", err
+		}
+		encoded = append(encoded, item)
+	}
+	return "[" + strings.Join(encoded, ", ") + "]", nil
+}
+
+func managedServerArgs(root string, selections runner.ValidatedSelections) ([]string, error) {
+	modeArgs, err := selections.Args()
+	if err != nil {
+		return nil, fmt.Errorf("build runner mode arguments: %w", err)
+	}
+	args := []string{"serve", "--root", root}
+	return append(args, modeArgs...), nil
+}
+
 func unique(values []string) []string {
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))
@@ -1104,10 +1500,28 @@ func unique(values []string) []string {
 	return result
 }
 
-func simpleDiff(path string, before, after []byte) string {
+func simpleDiff(path string, before, after []byte, beforeExists bool) string {
+	return simpleDiffWithRemoval(path, before, after, beforeExists, false)
+}
+
+func simpleDiffWithRemoval(
+	path string,
+	before []byte,
+	after []byte,
+	beforeExists bool,
+	remove bool,
+) string {
+	beforePath := path
+	afterPath := path
+	if !beforeExists {
+		beforePath = "/dev/null"
+	}
+	if remove {
+		afterPath = "/dev/null"
+	}
 	return "--- " +
-		path +
-		"\n+++ " + path +
+		beforePath +
+		"\n+++ " + afterPath +
 		"\n-" + strings.ReplaceAll(string(before), "\n", "\n-") +
 		"\n+" + strings.ReplaceAll(string(after), "\n", "\n+")
 }

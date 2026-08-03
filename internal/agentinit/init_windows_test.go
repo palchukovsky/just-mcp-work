@@ -43,7 +43,9 @@ func TestApplyUpdatesJunctionedCodexConfigDirectory(t *testing.T) {
 		t.Fatalf("create directory junction: %v\n%s", err, output)
 	}
 
-	result, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	result, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -167,6 +167,40 @@ func jsonSetMember(data []byte, span jsonSpan, key string, value any) ([]byte, e
 	return jsonAppendMember(data, span, members, key, value, unit, lineBreak)
 }
 
+// jsonRemoveMember removes one object member while keeping every remaining
+// member byte-for-byte. A missing member leaves the document untouched.
+func jsonRemoveMember(data []byte, span jsonSpan, key string) ([]byte, error) {
+	members, err := jsonObjectMembers(data, span)
+	if err != nil {
+		return nil, err
+	}
+	index := -1
+	for candidate, member := range members {
+		if member.key == key {
+			index = candidate
+			break
+		}
+	}
+	if index < 0 {
+		return data, nil
+	}
+	if len(members) == 1 {
+		return jsonReplace(data, span, []byte("{}")), nil
+	}
+	if index < len(members)-1 {
+		return jsonReplace(
+			data,
+			jsonSpan{start: members[index].span.start, end: members[index+1].span.start},
+			nil,
+		), nil
+	}
+	return jsonReplace(
+		data,
+		jsonSpan{start: members[index-1].span.end, end: members[index].span.end},
+		nil,
+	), nil
+}
+
 func jsonAppendMember(
 	data []byte,
 	span jsonSpan,

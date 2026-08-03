@@ -6,17 +6,49 @@ decide how much to trust it in a given setup.
 
 ## What jmw executes
 
-jmw runs **tasks that already exist in a project** - a `just` recipe, a `make`
-target, a `cmake` preset or configured build target, or a Docker build and
-Compose service — addressed as `<runner>:<task>` (e.g. `just:build`). It
-discovers projects under a root and invokes their existing tasks through the
-real runner binary.
+jmw runs tasks addressed as `<runner>:<task>` (for example, `just:build`). Just,
+Make, CMake, and Docker tasks come from project recipes, targets, presets,
+Dockerfiles, and Compose manifests. Go tasks are synthesized by jmw from a
+fixed command table when it finds a regular `go.mod`.
 
-The `run_shell_command` and `start_shell_command` tools are explicit escape
-hatches for commands that no discovered task covers. They pass caller-provided
-command text to the operating system shell, so their blast radius is not bounded
-by project task definitions. Grant access to them only when arbitrary shell
-execution is acceptable.
+## Runner authorization
+
+Every runner must register a permission declaration before it can enter the
+runtime catalog. `init` asks for a mode from each declaration and persists the
+complete selection in the server arguments. A repeatable
+`init --runner-mode <name>=<mode>` option answers selected questions
+non-interactively; manual `serve` uses the same repeatable option.
+
+The reviewed Go declaration provides these modes:
+
+| Mode | Surface | Caller arguments |
+| --- | --- | --- |
+| `safe` (default) | Four fixed commands | Rejected |
+| `all` | Safe plus three commands | Accepted only by `go:any` |
+| `disabled` | No Go commands | Not applicable |
+
+Safe exposes fixed `go build ./...`, `go test ./...`, `go vet ./...`, and
+`go mod download`. All adds fixed `go fmt ./...`, fixed `go mod tidy`, and
+`go:any`, which forwards any non-empty Go argv exactly. Disabled does not
+construct the Go runner, so it discovers and runs nothing.
+
+Safe mode reduces the exposed command surface; it does not create an isolation
+boundary. Tests execute code from the checkout, Go may invoke toolchains and
+helper programs, and module download may access the network and write the
+module cache. All mode also permits arbitrary Go argv. Go exec and tool hooks
+can launch external programs without using a shell.
+
+Just, Make, CMake, and Docker are currently explicit unreviewed declarations.
+For compatibility they offer their existing unrestricted `all` behavior by
+default or `disabled`; their command review is tracked separately.
+
+The `run_shell_command` and `start_shell_command` tools pass caller-provided
+command text to the operating system shell. They remain available for genuinely
+ad-hoc commands outside the discovered or withheld task surfaces. A task may be
+absent because its runner mode withheld it; agents must not recreate or run that
+task through either shell tool or another shell path. Runner selections do not
+implement a general shell authorization policy, so grant access to the shell
+tools only when arbitrary shell execution is acceptable.
 
 CMake target discovery reads an existing `CMakeCache.txt` and `build.ninja`;
 listing does not configure or regenerate the build tree. Treat generated build
@@ -25,11 +57,12 @@ with the same privileges as every other task.
 
 ## What jmw does NOT do
 
-jmw does **not** sandbox execution. A task or shell command, once invoked, runs
-as a child process with the same privileges, filesystem access, and environment
-as the jmw process itself. It can read and write anywhere that process can,
-open network connections, and spawn further processes — whatever the task
-definition or command text tells it to.
+jmw does **not** sandbox execution. No runner mode provides isolation. A task or
+shell command, once invoked, runs as a child process with the same privileges,
+filesystem access, and environment as the jmw process itself. It can read and
+write anywhere that process can, open network connections, and spawn further
+processes — whatever the task definition, synthesized command, or command text
+tells it to.
 
 A task file (justfile, Makefile, Dockerfile, Compose manifest, …) is code.
 Pointing jmw at a project is the same act as running that project's build
@@ -45,7 +78,8 @@ started detached, so their containers outlive the run that started them until
 
 ## Lifecycle controls
 
-These bound *runaway* processes, not what a process is allowed to do:
+Lifecycle controls are separate from runner authorization. They bound
+*runaway* processes, not what a process is allowed to do:
 
 - Every run has a timeout.
 - On timeout or cancellation, jmw terminates the whole child process tree.

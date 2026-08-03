@@ -51,10 +51,20 @@ func listTasksDescription() string {
 
 // runShellCommandDescription describes the ad-hoc escape hatch of this server.
 func runShellCommandDescription() string {
-	return "Run a shell command that no discovered task covers, and only when a compact receipt " +
-		"is worth more than the full output. Prefer run_task/start_task for a discovered task, " +
-		"and a normal shell when the command's own output is the answer. A running receipt with " +
-		"promoted: true is normal: follow its run_id instead of retrying the command."
+	return "Run a genuinely ad-hoc shell command outside the discovered or withheld task " +
+		"surfaces, and only when a compact receipt is worth more than the full output. A task " +
+		"may be absent because the operator withheld it through a runner mode; never recreate " +
+		"or run that task through this or another shell path. Prefer run_task/start_task for a " +
+		"discovered task, and a normal shell when an ad-hoc command's own output is the answer. " +
+		"A running receipt with promoted: true is normal: follow its run_id instead of retrying " +
+		"the command."
+}
+
+func startShellCommandDescription() string {
+	return "Start a genuinely ad-hoc shell command outside the discovered or withheld task " +
+		"surfaces asynchronously and return its run_id immediately. A task may be absent because " +
+		"the operator withheld it through a runner mode; never recreate or run that task through " +
+		"this or another shell path."
 }
 
 // Config controls server-side execution defaults.
@@ -218,7 +228,7 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "start_shell_command",
-			Description: "Start a shell command asynchronously and return its run_id immediately.",
+			Description: startShellCommandDescription(),
 		},
 		recoverTool(withUpdateNotification(s, s.startShellCommand)),
 	)
@@ -930,6 +940,11 @@ func (s *Server) startTaskRun(
 	}
 	handle.Meta.Runner = runnerName
 	handle.Meta.CWD = project.Dir
+	if validator, supportsValidation := candidate.(runner.TaskInputValidator); supportsValidation {
+		if validationErr := validator.ValidateTaskInput(task, input.Arguments); validationErr != nil {
+			return nil, stats, runTaskOutput{Result: s.reject(handle, validationErr)}
+		}
+	}
 	if versionProvider, ok := candidate.(runner.VersionProvider); ok {
 		if runnerVersion, versionErr := versionProvider.RunnerVersion(ctx); versionErr == nil {
 			handle.Meta.RunnerVersion = runnerVersion

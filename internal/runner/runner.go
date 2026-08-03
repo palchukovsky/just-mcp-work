@@ -164,6 +164,14 @@ type Runner interface {
 	BuildCommand(ctx context.Context, projectDir string, task Task, args []string) (*exec.Cmd, error)
 }
 
+// TaskInputValidator is an optional, side-effect-free authorization check run
+// before runner metadata collection or process startup. Implementations must
+// validate only the selected task and caller arguments; they must not inspect
+// the project, invoke external tools, or mutate runtime state.
+type TaskInputValidator interface {
+	ValidateTaskInput(task Task, args []string) error
+}
+
 // VersionProvider is an optional runner capability used for run metadata.
 // It is deliberately separate from Runner so new backends need only implement
 // task discovery and execution to join the MCP API.

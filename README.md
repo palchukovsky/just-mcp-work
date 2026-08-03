@@ -13,15 +13,17 @@ already ran. `just-mcp-work` is a small local MCP server that gives it one way
 to find and run everything a workspace can run, and answers with a short receipt
 instead of a wall of output.
 
-- **No build files in context.** Just, CMake, Docker, and GNU Make projects,
-  nested anywhere in the workspace, are discovered on demand. The agent asks for
-  one task and gets that one task.
+- **No build files in context.** Go modules, Just, CMake, Docker, and GNU Make
+  projects nested anywhere in the workspace are discovered on demand. The agent
+  asks for one task and gets that one task.
 - **Output only when it is wanted.** A run answers with its status, exit code,
   and short output tails. The full stdout and stderr stay one call away — for
   the failures where they matter.
 - **Long runs stay out of the way.** Anything slow moves to the background with
   a run ID the agent can follow, wait on, or stop.
-- **Anything else still runs.** A plain shell command, when no task fits.
+- **Genuinely ad-hoc commands still run.** A plain shell command is only for
+  work outside both the discovered tasks and any task surface withheld by a
+  runner mode.
 
 The agent gets the usage rules from the server itself, so there is nothing here
 you have to teach it.
@@ -44,12 +46,36 @@ release [`checksums.txt`][checksums-download] verifies the archive. From source:
 go install github.com/palchukovsky/just-mcp-work/cmd/just-mcp-work@latest
 ```
 
-[`just`](https://just.systems/), [CMake](https://cmake.org/),
-[Docker](https://www.docker.com/) with the
+The [Go toolchain](https://go.dev/), [`just`](https://just.systems/),
+[CMake](https://cmake.org/), [Docker](https://www.docker.com/) with the
 [Compose](https://docs.docker.com/compose/) v2 plugin, and
 [GNU Make](https://www.gnu.org/software/make/) are needed only for the project
 types you actually have. A tool missing on this host is reported as a warning,
 and everything else in the workspace keeps working.
+
+### Go runner authorization
+
+A regular `go.mod` exposes synthesized Go tasks according to the selected
+runner mode:
+
+| Mode | Surface | Caller arguments |
+| --- | --- | --- |
+| `safe` (default) | Four fixed tasks | Rejected |
+| `all` | Safe plus three tasks | Accepted only by `go:any` |
+| `disabled` | No Go tasks | Not applicable |
+
+Safe mode exposes `go:build`, `go:test`, `go:vet`, and `go:mod:download`.
+Their argv are fixed as `go build ./...`, `go test ./...`, `go vet ./...`, and
+`go mod download`. All mode adds fixed `go:fmt` (`go fmt ./...`) and
+`go:mod:tidy` (`go mod tidy`) tasks. It also adds `go:any`, which forwards any
+non-empty Go argv exactly as supplied. Disabled mode does not construct the Go
+runner or discover or run Go tasks.
+
+`safe` is reduced access, not a sandbox. `go test` executes checkout code, Go
+may run toolchains and helper programs, and `go mod download` may use the
+network and write the module cache. `all` also permits arbitrary Go argv;
+Go exec and tool hooks can launch external programs without going through a
+shell.
 
 ## Set it up
 
@@ -59,25 +85,61 @@ Run this once in the workspace:
 just-mcp-work init
 ```
 
-It registers the server and adds a short instruction block for the coding agents
-you use — Claude Code, Codex, Cursor, Copilot, Windsurf. Existing configuration
-is edited in place: only the entries this server owns are rewritten, and your
-own content, ordering, and formatting are left untouched, down to the line
-endings. `init` stops when it cannot edit a configuration safely or finds a
-hand-written Codex entry for this server; it tells you what to fix instead of
-taking the entry over. For Claude Code it also offers matching tool permissions
-and asks before changing them.
+Each invocation is authoritative inside the workspace scope resolved from
+`--dir`, for the surfaces it manages. It adds the canonical instruction block
+for the selected agents — Claude Code, Codex, Cursor, Copilot, and Windsurf —
+and never reads or changes the instruction file of an agent that is not
+selected. `.claude/settings.json` is touched only when `claude` is one of the
+selected agents, and then follows the permission answer. `.mcp.json` and
+`.codex/config.toml` follow `--write-mcp-config` rather than `--agents`: they
+are rewritten when it is true and stripped of their JMW entries when it is
+false, whether or not `codex` was selected. Two agent targets that resolve to
+one document — a `CLAUDE.md` symlinked to an `AGENTS.md`, say — are each
+written with their own header, so keep such a document under a single selected
+agent, or give it text of its own before the first `init`.
+
+A file left holding nothing but JMW state is removed, which can happen to
+`.mcp.json`, `.codex/config.toml`, and `.claude/settings.json`, except that a
+JMW-only `.mcp.json` scope anchor is kept as an empty object whenever deleting
+it would change the scope of an identical repeated `init`. Instruction files
+are never removed: an agent dropped from `--agents` keeps the block an earlier
+run wrote for it and goes on obeying it, so delete that block by hand once the
+agent should stop.
+
+Every target this invocation manages is planned before any of them is written,
+so a failure on a later target cannot leave an earlier one already changed.
+Existing foreign entries and text are edited in place without broad
+reformatting: their content, ordering, formatting, and line endings are
+preserved. When removing an appended managed block, `init` also removes its
+separator from a newline-terminated foreign file; a legacy file that had no
+final newline is kept as valid text with one final line break because the
+previous state is no longer distinguishable. `init` stops when it cannot edit a
+target safely or finds a hand-written Codex entry for this server; it tells you
+what to fix instead of taking the entry over. It never searches for instruction
+or agent configuration targets above the resolved workspace scope.
+
+Every runner must register a permission declaration before it can enter the
+runtime catalog. `init` asks about every declared runner; Go defaults to
+`safe`. Just, Make, CMake, and Docker are currently unreviewed and offer their
+existing `all` behavior by default or `disabled` for compatibility while their
+command surfaces are reviewed separately. Pass the repeatable
+`init --runner-mode <name>=<mode>` option to answer selected runner questions
+non-interactively. `init` persists the complete canonical selection in managed
+MCP and Codex server arguments, and those arguments drive `serve`. Manual
+`serve` invocations support the same repeatable `--runner-mode` option.
 
 Run `init` again after an update. `init --help` and `serve --help` list the
 agent targets and the server options.
 
 ## Security
 
-Tasks and shell commands run with your privileges and without a sandbox: trust a
-selected task the way you trust the project's build scripts. `run_task` runs an
-existing recipe or target with its arguments kept separate; `run_shell_command`
-deliberately hands command text to the OS shell. Need isolation? Run
-`just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
+Tasks and shell commands run with your privileges and without a sandbox: trust
+a selected task the way you trust the project's build scripts. Runner modes
+reduce the task surface but do not isolate it. `run_shell_command` and
+`start_shell_command` remain explicit shell tools for genuinely ad-hoc work,
+but a task withheld by a runner mode must not be recreated through them or any
+other shell path. Need isolation? Run `just-mcp-work` in a container. See
+[SECURITY.md](SECURITY.md).
 
 ## Configuration
 
@@ -88,6 +150,7 @@ deliberately hands command text to the OS shell. Need isolation? Run
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` |
 | `--retention` | `JMW_RETENTION` | `72h` |
 | `--exclude` | — | None |
+| `--runner-mode <name>=<mode>` | — | Each runner's declared default |
 
 Run data is kept under `.just-mcp-work/log/` in the selected workspace.
 

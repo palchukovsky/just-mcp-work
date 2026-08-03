@@ -6,6 +6,7 @@ package agentinit
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -14,7 +15,43 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/palchukovsky/just-mcp-work/internal/runner"
 )
+
+func testRunnerModes(t *testing.T) runner.ValidatedSelections {
+	t.Helper()
+	catalog, err := runner.NewCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	selections, err := catalog.CanonicalSelections(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selections
+}
+
+func validatedTestRunnerModes(
+	t *testing.T,
+	overrides []runner.Selection,
+) runner.ValidatedSelections {
+	t.Helper()
+	unusedFactory := func(runner.Mode) (runner.Runner, error) {
+		return nil, errors.New("test factory must not be called")
+	}
+	catalog, err := runner.NewCatalog(
+		runner.NewRegistration("just", runner.UnreviewedPermissions(), unusedFactory),
+		runner.NewRegistration("go", runner.UnreviewedPermissions(), unusedFactory),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selections, err := catalog.CanonicalSelections(overrides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selections
+}
 
 func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	dir := t.TempDir()
@@ -22,7 +59,7 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	if err := os.WriteFile(path, []byte("# Existing\n\nKeep this.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := Options{Dir: dir, Agents: []string{"codex"}}
+	options := Options{Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t)}
 	first, err := Apply(options)
 	if err != nil {
 		t.Fatal(err)
@@ -46,6 +83,717 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	if len(second.Paths) != 0 {
 		t.Fatalf("idempotent apply changed paths: %#v", second.Paths)
 	}
+}
+
+// TestApplyCodexConfigRoundTripPreservesTerminatedForeignContent covers the
+// managed block init appends to a foreign Codex config and later removes again:
+// the document has to come back byte for byte with either line ending.
+func TestApplyCodexConfigRoundTripPreservesTerminatedForeignContent(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		lineBreak string
+	}{
+		{name: "LF", lineBreak: "\n"},
+		{name: "CRLF", lineBreak: "\r\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, codexConfig)
+			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			before := []byte("# Existing" + testCase.lineBreak + testCase.lineBreak +
+				`title = "keep"` + testCase.lineBreak)
+			if err := os.WriteFile(path, before, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			modes := testRunnerModes(t)
+			if _, err := Apply(Options{
+				Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Apply(Options{
+				Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// #nosec G304 -- path is created in this test's temporary directory.
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(after, before) {
+				t.Fatalf("Codex config round trip = %q, want %q", after, before)
+			}
+		})
+	}
+}
+
+// TestApplyCodexConfigCleanupKeepsLegacyTextValid covers a foreign file that had
+// no final line break before init appended its managed block. Both states are
+// identical after the append, so cleanup leaves valid text with one final line
+// break instead of guessing the missing one back.
+func TestApplyCodexConfigCleanupKeepsLegacyTextValid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`title = "keep"`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	modes := testRunnerModes(t)
+	if _, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G304 -- path is created in this test's temporary directory.
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "title = \"keep\"\n" {
+		t.Fatalf("legacy Codex cleanup = %q, want valid terminated text", after)
+	}
+}
+
+// TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles pins the rule that
+// an agent missing from the selection is left alone: the block an earlier run
+// wrote stays in its instruction file, the Claude settings keep their managed
+// entries, and neither surface appears in the result. The opt-out case carries
+// its own weight: the selection gate sits in Apply, ahead of the permission
+// check inside planClaudeSettings, so a reordering of the two would re-open
+// cleanup on a deselected claude while the default case stayed green.
+func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		permissions ClaudePermissions
+	}{
+		{name: "default ask", permissions: ClaudePermissionsAsk},
+		{name: "opted out", permissions: ClaudePermissionsNo},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			all := []string{"claude", "codex", "cursor", "copilot", "windsurf"}
+			if _, err := Apply(Options{
+				Dir: dir, Agents: all, RunnerModes: testRunnerModes(t),
+				ClaudePermissions: ClaudePermissionsYes,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			settings := claudeSettingsPath(t, dir)
+			// #nosec G304 -- settings is created in this test's temporary directory.
+			settingsBefore, err := os.ReadFile(settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := Apply(Options{
+				Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+				ClaudePermissions: testCase.permissions,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Paths) != 0 {
+				t.Fatalf("narrow selection changed paths: %#v", result.Paths)
+			}
+			for _, named := range agentTargets() {
+				path := filepath.Join(dir, named.target.path)
+				// #nosec G304 -- path is created in this test's temporary directory.
+				data, readErr := os.ReadFile(path)
+				if readErr != nil || !strings.Contains(string(data), canonicalBlock()) {
+					t.Fatalf("%s instructions = %q, %v", named.name, data, readErr)
+				}
+			}
+			// #nosec G304 -- settings is created in this test's temporary directory.
+			settingsAfter, err := os.ReadFile(settings)
+			if err != nil || !slices.Equal(settingsAfter, settingsBefore) {
+				t.Fatalf("deselected Claude settings changed: %q, %v", settingsAfter, err)
+			}
+		})
+	}
+}
+
+// TestApplyKeepsAliasedInstructionOfDeselectedAgent covers two agent targets
+// that resolve to one document, the way a workspace can symlink AGENTS.md and
+// CLAUDE.md to a single shared contract. Selecting one of the two agents has to
+// leave that document with its managed block: nothing may plan a removal for
+// the other agent that would undo the selected agent's own write.
+func TestApplyKeepsAliasedInstructionOfDeselectedAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	for _, selected := range []string{"claude", "codex"} {
+		t.Run(selected, func(t *testing.T) {
+			dir := t.TempDir()
+			sharedDirectory := filepath.Join(dir, "tools", "agents")
+			if err := os.MkdirAll(sharedDirectory, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			shared := filepath.Join(sharedDirectory, "AGENTS.md")
+			foreign := "# Workspace contract\n\nKeep this line.\n"
+			if err := os.WriteFile(shared, []byte(foreign), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+				if err := os.Symlink(
+					filepath.Join("tools", "agents", "AGENTS.md"),
+					filepath.Join(dir, name),
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			modes := testRunnerModes(t)
+			if _, err := Apply(Options{
+				Dir: dir, Agents: []string{"claude", "codex"}, RunnerModes: modes,
+				ClaudePermissions: ClaudePermissionsNo,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Apply(Options{
+				Dir: dir, Agents: []string{selected}, RunnerModes: modes,
+				ClaudePermissions: ClaudePermissionsNo,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// #nosec G304 -- shared is created in this test's temporary directory.
+			after, err := os.ReadFile(shared)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(after), canonicalBlock()) {
+				t.Fatalf("narrow selection destroyed the aliased managed block:\n%s", after)
+			}
+			if strings.Count(string(after), beginMarker) != 1 {
+				t.Fatalf("aliased targets duplicated the managed block:\n%s", after)
+			}
+			if !strings.HasPrefix(string(after), foreign) {
+				t.Fatalf("aliased targets lost the foreign contract:\n%s", after)
+			}
+			for _, name := range []string{"AGENTS.md", "CLAUDE.md"} {
+				assertFileSymlink(t, filepath.Join(dir, name))
+			}
+		})
+	}
+}
+
+func TestApplyWriteMCPConfigFalseRemovesManagedConfigs(t *testing.T) {
+	dir := t.TempDir()
+	modes := testRunnerModes(t)
+	if _, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{mcpConfig, codexConfig} {
+		path := filepath.Join(dir, relative)
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("stale config %s still exists: %v", path, statErr)
+		}
+		expected := path
+		if relative == codexConfig {
+			expected = resolvedTestPath(t, path)
+		}
+		if !containsPath(result.Paths, expected) {
+			t.Fatalf("result paths = %#v, missing removed %s", result.Paths, path)
+		}
+	}
+}
+
+func TestApplyNestedCleanupPreservesMCPConfigScopeAnchor(t *testing.T) {
+	workspace := t.TempDir()
+	project := filepath.Join(workspace, "projects", "service")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(workspace, mcpConfig)
+	managed, err := mergeMCPConfig(nil, testRunnerModes(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed = []byte(strings.ReplaceAll(string(managed), "\n", "\r\n"))
+	if writeErr := os.WriteFile(path, managed, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	options := Options{
+		Dir: project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	}
+	first, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(first.Paths, path) {
+		t.Fatalf("first result paths = %#v, want preserved anchor %s", first.Paths, path)
+	}
+	// #nosec G304 -- path is created in this test's temporary directory.
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != "{}\r\n" {
+		t.Fatalf("preserved MCP anchor = %q, want empty CRLF object", after)
+	}
+	if _, statErr := os.Stat(filepath.Join(project, mcpConfig)); !os.IsNotExist(statErr) {
+		t.Fatalf("nested MCP config unexpectedly exists: %v", statErr)
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Paths) != 0 {
+		t.Fatalf("second nested cleanup changed paths: %#v", second.Paths)
+	}
+}
+
+func TestApplyLocalCleanupPreservesScopeWhenHigherMCPConfigExists(t *testing.T) {
+	ancestor := t.TempDir()
+	scope := filepath.Join(ancestor, "workspace")
+	if err := os.Mkdir(scope, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ancestorMCPPath := filepath.Join(ancestor, mcpConfig)
+	ancestorMCPBefore := []byte(`{"mcpServers":{"other":{"command":"keep"}}}` + "\n")
+	if err := os.WriteFile(ancestorMCPPath, ancestorMCPBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ancestorAgentPath := filepath.Join(ancestor, "AGENTS.md")
+	ancestorAgentBefore := []byte("# Ancestor instructions\n")
+	if err := os.WriteFile(ancestorAgentPath, ancestorAgentBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	localMCPPath := filepath.Join(scope, mcpConfig)
+	localMCPBefore, err := mergeMCPConfig(nil, testRunnerModes(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(localMCPPath, localMCPBefore, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	options := Options{
+		Dir: scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	}
+	first, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(first.Paths, localMCPPath) {
+		t.Fatalf("first result paths = %#v, want local anchor %s", first.Paths, localMCPPath)
+	}
+	// #nosec G304 -- paths are created in this test's temporary directory.
+	localMCPAfter, err := os.ReadFile(localMCPPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(localMCPAfter) != "{}\n" {
+		t.Fatalf("local MCP anchor = %q, want empty object", localMCPAfter)
+	}
+	for path, want := range map[string][]byte{
+		ancestorMCPPath:   ancestorMCPBefore,
+		ancestorAgentPath: ancestorAgentBefore,
+	} {
+		// #nosec G304 -- paths are created in this test's temporary directory.
+		got, readErr := os.ReadFile(path)
+		if readErr != nil || !slices.Equal(got, want) {
+			t.Fatalf("ancestor surface %s changed: %q, %v", path, got, readErr)
+		}
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Paths) != 0 {
+		t.Fatalf("second local cleanup changed paths: %#v", second.Paths)
+	}
+}
+
+func TestApplyRejectsNonRegularHigherMCPConfigBeforeLocalCleanup(t *testing.T) {
+	ancestor := t.TempDir()
+	scope := filepath.Join(ancestor, "workspace")
+	if err := os.Mkdir(scope, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(ancestor, mcpConfig), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	localMCPPath := filepath.Join(scope, mcpConfig)
+	localMCPBefore, err := mergeMCPConfig(nil, testRunnerModes(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(localMCPPath, localMCPBefore, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	_, err = Apply(Options{
+		Dir: scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
+		t.Fatalf("Apply error = %v, want non-regular higher MCP config error", err)
+	}
+	// #nosec G304 -- path is created in this test's temporary directory.
+	localMCPAfter, readErr := os.ReadFile(localMCPPath)
+	if readErr != nil || !slices.Equal(localMCPAfter, localMCPBefore) {
+		t.Fatalf("local MCP config changed before rejection: %q, %v", localMCPAfter, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(scope, "AGENTS.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("agent instructions changed before rejection: %v", statErr)
+	}
+}
+
+func TestApplyCleanupPreservesForeignConfigContent(t *testing.T) {
+	dir := t.TempDir()
+	modes := testRunnerModes(t)
+	mcpPath := filepath.Join(dir, mcpConfig)
+	mcpBefore := "{\n  \"foreign\": {\"keep\": true},\n  \"mcpServers\": {\n" +
+		"    \"other\": {\"command\": \"keep\"}\n  }\n}\n"
+	if err := os.WriteFile(mcpPath, []byte(mcpBefore), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte("# keep exactly\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G304 -- paths are created in this test's temporary directory.
+	mcpAfter, err := os.ReadFile(mcpPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, foreign := range []string{`"foreign": {"keep": true}`, `"other": {"command": "keep"}`} {
+		if !strings.Contains(string(mcpAfter), foreign) {
+			t.Fatalf("MCP cleanup lost %q:\n%s", foreign, mcpAfter)
+		}
+	}
+	// #nosec G304 -- paths are created in this test's temporary directory.
+	codexAfter, err := os.ReadFile(codexPath)
+	if err != nil || string(codexAfter) != "# keep exactly\n" {
+		t.Fatalf("Codex cleanup changed foreign bytes: %q, %v", codexAfter, err)
+	}
+}
+
+func TestApplyClaudePermissionNoAndDeclineRemoveManagedPermissions(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		confirm     func(string, string) (bool, error)
+		permissions ClaudePermissions
+	}{
+		{name: "no", permissions: ClaudePermissionsNo},
+		{
+			name:        "declined",
+			permissions: ClaudePermissionsAsk,
+			confirm:     func(string, string) (bool, error) { return false, nil },
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			modes := testRunnerModes(t)
+			if _, err := Apply(Options{
+				Dir: dir, Agents: []string{"claude"}, RunnerModes: modes,
+				ClaudePermissions: ClaudePermissionsYes,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			result, err := Apply(Options{
+				Dir:               dir,
+				Agents:            []string{"claude"},
+				RunnerModes:       modes,
+				ClaudePermissions: testCase.permissions,
+				Confirm:           testCase.confirm,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := claudeSettingsPath(t, dir)
+			if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+				t.Fatalf("managed Claude settings still exist: %v", statErr)
+			}
+			if !containsPath(result.Paths, path) {
+				t.Fatalf("result paths = %#v, missing %s", result.Paths, path)
+			}
+		})
+	}
+}
+
+func TestApplyClaudePermissionCleanupSweepsEveryListAndKeepsForeignEntries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, claudeSettings)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{
+  "foreign": true,
+  "permissions": {
+    "allow": ["foreign-allow", "mcp__just-mcp-work"],
+    "ask": ["mcp__just-mcp-work__retired"],
+    "deny": ["foreign-deny", "mcp__just-mcp-work__old"]
+  }
+}
+`
+	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(Options{
+		Dir:               dir,
+		Agents:            []string{"claude"},
+		RunnerModes:       testRunnerModes(t),
+		ClaudePermissions: ClaudePermissionsNo,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "mcp__just-mcp-work") {
+		t.Fatalf("managed Claude permission survived cleanup:\n%s", text)
+	}
+	for _, foreign := range []string{"foreign-allow", "foreign-deny", `"foreign": true`} {
+		if !strings.Contains(text, foreign) {
+			t.Fatalf("foreign Claude setting %q was lost:\n%s", foreign, text)
+		}
+	}
+}
+
+func TestApplyClaudeCleanupKeepsForeignEmptyPermissionKeys(t *testing.T) {
+	for _, foreignKey := range []string{"deny", "custom"} {
+		t.Run(foreignKey, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, claudeSettings)
+			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			before := `{"permissions":{"allow":["mcp__just-mcp-work"],"` +
+				foreignKey + `":[]}}` + "\n"
+			if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Apply(Options{
+				Dir:               dir,
+				Agents:            []string{"claude"},
+				RunnerModes:       testRunnerModes(t),
+				ClaudePermissions: ClaudePermissionsNo,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			// #nosec G304 -- path is created in this test's temporary directory.
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := `{"permissions":{"allow":[],"` + foreignKey + `":[]}}` + "\n"
+			if string(after) != want {
+				t.Fatalf("Claude cleanup = %q, want %q", after, want)
+			}
+		})
+	}
+}
+
+func TestRemoveCodexConfigPreservesMiddleForeignBoundary(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		lineBreak string
+	}{
+		{name: "LF", lineBreak: "\n"},
+		{name: "CRLF", lineBreak: "\r\n"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			block := strings.Join(
+				[]string{
+					codexBegin,
+					codexTable,
+					`command = "just-mcp-work"`,
+					codexEnd,
+				},
+				testCase.lineBreak,
+			)
+			before := `title = "keep"` + testCase.lineBreak + block +
+				testCase.lineBreak + `[other]` + testCase.lineBreak +
+				`enabled = true` + testCase.lineBreak
+			want := `title = "keep"` + testCase.lineBreak + `[other]` +
+				testCase.lineBreak + `enabled = true` + testCase.lineBreak
+			after, remove, err := removeCodexConfig([]byte(before))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if remove || string(after) != want {
+				t.Fatalf("Codex cleanup = %q, remove %t, want %q", after, remove, want)
+			}
+			var parsed struct {
+				Title string
+				Other struct {
+					Enabled bool
+				}
+			}
+			if _, err := toml.Decode(string(after), &parsed); err != nil {
+				t.Fatalf("cleaned Codex config is invalid TOML: %v\n%s", err, after)
+			}
+			if parsed.Title != "keep" || !parsed.Other.Enabled {
+				t.Fatalf("cleaned foreign Codex values = %#v", parsed)
+			}
+		})
+	}
+}
+
+func TestApplyDryRunPlansCleanupWithoutWriting(t *testing.T) {
+	dir := t.TempDir()
+	modes := testRunnerModes(t)
+	if _, err := Apply(Options{
+		Dir:               dir,
+		Agents:            []string{"claude", "codex", "cursor", "copilot", "windsurf"},
+		WriteMCPConfig:    true,
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsYes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{
+		filepath.Join(dir, "CLAUDE.md"),
+		filepath.Join(dir, "AGENTS.md"),
+		filepath.Join(dir, ".cursor/rules/just-mcp-work.mdc"),
+		filepath.Join(dir, ".github/copilot-instructions.md"),
+		filepath.Join(dir, ".windsurfrules"),
+		filepath.Join(dir, mcpConfig),
+		filepath.Join(dir, codexConfig),
+		filepath.Join(dir, claudeSettings),
+	}
+	before := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = data
+	}
+	confirmed := false
+	result, err := Apply(Options{
+		Dir:               dir,
+		Agents:            []string{"claude", "codex"},
+		DryRun:            true,
+		WriteMCPConfig:    false,
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsAsk,
+		Confirm:           func(string, string) (bool, error) { confirmed = true; return true, nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if confirmed {
+		t.Fatal("dry run asked for confirmation")
+	}
+	if !strings.Contains(strings.Join(result.Diffs, "\n"), "+++ /dev/null") {
+		t.Fatalf("dry-run diffs do not report deletions: %#v", result.Diffs)
+	}
+	for path, want := range before {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil || !slices.Equal(data, want) {
+			t.Fatalf("dry run changed %s: %v", path, readErr)
+		}
+	}
+}
+
+func TestApplyDryRunDistinguishesEmptyExistingFromMissingAgentFile(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		exists bool
+	}{
+		{name: "existing empty", exists: true},
+		{name: "missing"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "AGENTS.md")
+			if testCase.exists {
+				if err := os.WriteFile(path, nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := Apply(Options{
+				Dir: dir, Agents: []string{"codex"}, DryRun: true,
+				RunnerModes: testRunnerModes(t),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			diff := resultDiffForPath(t, result, path)
+			beforePath := "/dev/null"
+			if testCase.exists {
+				beforePath = path
+			}
+			wantPrefix := "--- " + beforePath + "\n+++ " + path + "\n"
+			if !strings.HasPrefix(diff, wantPrefix) {
+				t.Fatalf("agent diff = %q, want prefix %q", diff, wantPrefix)
+			}
+			info, statErr := os.Stat(path)
+			if testCase.exists {
+				if statErr != nil || info.Size() != 0 {
+					t.Fatalf("dry run changed existing empty file: %v, %#v", statErr, info)
+				}
+			} else if !os.IsNotExist(statErr) {
+				t.Fatalf("dry run created missing file: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestApplyPreflightsEverySurfaceBeforeWriting(t *testing.T) {
+	dir := t.TempDir()
+	agentPath := filepath.Join(dir, "AGENTS.md")
+	want := []byte("# Existing\n")
+	if err := os.WriteFile(agentPath, want, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, claudeSettings)
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Apply(Options{
+		Dir: dir, Agents: []string{"claude", "codex"}, RunnerModes: testRunnerModes(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "decode existing .claude/settings.json") {
+		t.Fatalf("Apply error = %v, want malformed later target", err)
+	}
+	data, readErr := os.ReadFile(agentPath)
+	if readErr != nil || !slices.Equal(data, want) {
+		t.Fatalf("agent file changed before preflight completed: %q, %v", data, readErr)
+	}
+}
+
+func resolvedTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolvedDirectory, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(resolvedDirectory, filepath.Base(path))
 }
 
 // TestPromptDescribesTheTokenSavingContract keeps the two halves of the contract
@@ -75,6 +823,9 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"first 160 runes",
 		"first description line",
 		"names, name_prefix, and query are mutually exclusive",
+		"withheld it through a runner mode",
+		"Never recreate or run such a task",
+		"genuinely ad-hoc commands",
 	} {
 		if !strings.Contains(Prompt(), expected) {
 			t.Errorf("Prompt does not mention %q", expected)
@@ -92,6 +843,8 @@ func TestManagedBlockCarriesTheSameContract(t *testing.T) {
 		"do not need the full output",
 		"directly when its full output",
 		"sub-agents",
+		"withheld it through a runner mode",
+		"another shell path",
 	} {
 		if !strings.Contains(flat, expected) {
 			t.Errorf("managed block does not mention %q: %s", expected, flat)
@@ -149,7 +902,7 @@ func TestApplyReplacesModifiedManagedBlock(t *testing.T) {
 	if err := os.WriteFile(path, []byte(modified), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := Options{Dir: dir, Agents: []string{"claude"}}
+	options := Options{Dir: dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t)}
 	if _, err := Apply(options); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -171,7 +924,9 @@ func TestApplyUpdatesEarlierManagedPrompt(t *testing.T) {
 	if err := os.WriteFile(path, []byte(previous), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Apply(Options{Dir: dir, Agents: []string{"claude"}})
+	result, err := Apply(Options{
+		Dir: dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
+	})
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -195,7 +950,9 @@ func TestApplyMergesMCPConfigWithoutClobberingOtherServers(t *testing.T) {
 	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}
+	options := Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
@@ -225,6 +982,66 @@ func TestApplyMergesMCPConfigWithoutClobberingOtherServers(t *testing.T) {
 	}
 }
 
+func TestApplyPersistsRunnerModesInEveryServerConfigAndIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	selections := []runner.Selection{
+		{Name: "just", Mode: runner.ModeAll},
+		{Name: "go", Mode: runner.ModeDisabled},
+	}
+	validated := validatedTestRunnerModes(t, selections)
+	options := Options{
+		Dir:            dir,
+		Agents:         []string{"codex"},
+		WriteMCPConfig: true,
+		RunnerModes:    validated,
+	}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	assertRunnerModeArgs(t, readJSONServerArgs(t, filepath.Join(dir, mcpConfig)), selections)
+	assertRunnerModeArgs(t, readCodexServerArgs(t, filepath.Join(dir, codexConfig)), selections)
+
+	snippet, err := MCPConfigSnippet(validated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snippetConfig struct {
+		MCPServers map[string]serverEntry `json:"mcpServers"`
+	}
+	if decodeErr := json.Unmarshal([]byte(snippet), &snippetConfig); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	assertRunnerModeArgs(t, snippetConfig.MCPServers[serverName].Args, selections)
+
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Paths) != 0 {
+		t.Fatalf("idempotent runner-mode apply changed paths: %#v", second.Paths)
+	}
+}
+
+func TestApplyRejectsUnvalidatedRunnerModesBeforeWriting(t *testing.T) {
+	if _, err := MCPConfigSnippet(runner.ValidatedSelections{}); err == nil {
+		t.Fatal("MCPConfigSnippet accepted unvalidated runner modes")
+	}
+	dir := t.TempDir()
+	_, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not validated by a catalog") {
+		t.Fatalf("Apply error = %v, want unvalidated runner-mode rejection", err)
+	}
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("unvalidated runner modes wrote files: %#v", entries)
+	}
+}
+
 // TestApplyKeepsForeignMCPConfigFormatting pins the promise that init only
 // rewrites its own entry: key order, indentation width, and the exact text of
 // every other value stay as the operator wrote them.
@@ -247,7 +1064,9 @@ func TestApplyKeepsForeignMCPConfigFormatting(t *testing.T) {
 	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}
+	options := Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +1123,10 @@ func TestApplyKeepsForeignClaudeSettingsFormatting(t *testing.T) {
 	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := Options{Dir: dir, Agents: []string{"claude"}, ClaudePermissions: ClaudePermissionsYes}
+	options := Options{
+		Dir: dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
+		ClaudePermissions: ClaudePermissionsYes,
+	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
@@ -360,6 +1182,7 @@ func TestApplyKeepsCRLFLineEndings(t *testing.T) {
 		Dir:               dir,
 		Agents:            []string{"claude", "codex"},
 		WriteMCPConfig:    true,
+		RunnerModes:       testRunnerModes(t),
 		ClaudePermissions: ClaudePermissionsYes,
 	}
 	first, err := Apply(options)
@@ -419,7 +1242,9 @@ func TestApplyRepairsLegacyLFBlocksInCRLFDocuments(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	options := Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}
+	options := Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +1300,9 @@ func TestApplyKeepsCodexBlockInPlace(t *testing.T) {
 	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}
+	options := Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
@@ -520,6 +1347,7 @@ func TestApplyMergesNearestMCPConfig(t *testing.T) {
 			Dir:            project,
 			Agents:         []string{"codex"},
 			WriteMCPConfig: true,
+			RunnerModes:    testRunnerModes(t),
 		},
 	)
 	if err != nil {
@@ -565,6 +1393,7 @@ func TestApplyCreatesMCPConfigInWorkspaceWhenNoneExists(t *testing.T) {
 			Dir:            dir,
 			Agents:         []string{"codex"},
 			WriteMCPConfig: true,
+			RunnerModes:    testRunnerModes(t),
 		},
 	)
 	if err != nil {
@@ -615,6 +1444,7 @@ func TestApplySupportsMissingStandaloneWorkspace(t *testing.T) {
 					Agents:         []string{"codex"},
 					DryRun:         test.dryRun,
 					WriteMCPConfig: true,
+					RunnerModes:    testRunnerModes(t),
 				},
 			)
 			if err != nil {
@@ -652,7 +1482,9 @@ func TestApplyMergesWorkspaceCodexMCPConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true}); err != nil {
+	if _, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	}); err != nil {
 		t.Fatal(err)
 	}
 	assertCodexMCPConfig(t, path, dir)
@@ -686,7 +1518,9 @@ func TestApplyRejectsUnmanagedCodexServerWithoutChangingFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	_, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	})
 	if err == nil || !strings.Contains(err.Error(), "unmanaged "+codexTable) {
 		t.Fatalf("Apply error = %v, want an unmanaged Codex server error", err)
 	}
@@ -700,6 +1534,55 @@ func TestApplyRejectsUnmanagedCodexServerWithoutChangingFiles(t *testing.T) {
 	for _, unexpected := range []string{"AGENTS.md", mcpConfig} {
 		if _, statErr := os.Stat(filepath.Join(dir, unexpected)); !os.IsNotExist(statErr) {
 			t.Fatalf("%s was changed before the Codex config rejection: %v", unexpected, statErr)
+		}
+	}
+}
+
+func TestApplyDisableRejectsUnmanagedCodexServerWithoutPartialChanges(t *testing.T) {
+	dir := t.TempDir()
+	agentPath := filepath.Join(dir, "AGENTS.md")
+	agentBefore := []byte("# Existing\n")
+	if err := os.WriteFile(agentPath, agentBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	mcpPath := filepath.Join(dir, mcpConfig)
+	mcpBefore, err := mergeMCPConfig(nil, testRunnerModes(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(mcpPath, mcpBefore, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	codexPath := filepath.Join(dir, codexConfig)
+	if mkdirErr := os.MkdirAll(filepath.Dir(codexPath), 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	codexBefore := []byte(
+		"[mcp_servers.just-mcp-work]\ncommand = \"just-mcp-work\"\n",
+	)
+	if writeErr := os.WriteFile(codexPath, codexBefore, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	_, err = Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: false,
+		RunnerModes: testRunnerModes(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "unmanaged "+codexTable) {
+		t.Fatalf("Apply error = %v, want an unmanaged Codex server error", err)
+	}
+	for path, want := range map[string][]byte{
+		agentPath: agentBefore,
+		mcpPath:   mcpBefore,
+		codexPath: codexBefore,
+	} {
+		// #nosec G304 -- paths are created in this test's temporary directory.
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s changed before the Codex rejection:\n%s", path, got)
 		}
 	}
 }
@@ -722,7 +1605,9 @@ func TestApplyRejectsInlineCodexServerWithoutChangingFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	_, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	})
 	if err == nil || !strings.Contains(err.Error(), "unmanaged "+codexTable) {
 		t.Fatalf("Apply error = %v, want an unmanaged Codex server error", err)
 	}
@@ -761,7 +1646,9 @@ func TestApplyUpdatesSafeSymlinkedCodexConfigDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	result, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -796,11 +1683,13 @@ func TestApplyUpdatesSafeSymlinkedCodexConfigFile(t *testing.T) {
 	if err := os.WriteFile(target, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join("..", filepath.Base(target)), path); err != nil {
-		t.Fatal(err)
+	if linkErr := os.Symlink(filepath.Join("..", filepath.Base(target)), path); linkErr != nil {
+		t.Fatal(linkErr)
 	}
 
-	result, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	result, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -821,6 +1710,135 @@ func TestApplyUpdatesSafeSymlinkedCodexConfigFile(t *testing.T) {
 	}
 }
 
+func TestApplyDisablePreservesSafeSymlinkedCodexConfigFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "shared-codex-config.toml")
+	modes := testRunnerModes(t)
+	managed, err := mergeCodexConfig(nil, dir, modes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(target, managed, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if linkErr := os.Symlink(filepath.Join("..", filepath.Base(target)), path); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		Dir: dir, Agents: []string{"codex"}, RunnerModes: modes,
+	}
+	dryRunOptions := options
+	dryRunOptions.DryRun = true
+	dryRun, err := Apply(dryRunOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTruncationDiff(t, dryRun, resolvedTarget)
+	result, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTruncationDiff(t, result, resolvedTarget)
+	assertFileSymlink(t, path)
+	// #nosec G304 -- target is created in this test's temporary directory.
+	after, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("Codex symlink target kept managed content:\n%s", after)
+	}
+	if _, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertFileSymlink(t, path)
+	assertCodexMCPConfig(t, target, dir)
+}
+
+// TestApplyClaudePermissionNoPreservesSafeSymlinkedClaudeSettingsFile checks the
+// opt-out cleanup of a settings file the workspace exposes as a symlink: the
+// managed entries go through the link and the link itself stays in place.
+func TestApplyClaudePermissionNoPreservesSafeSymlinkedClaudeSettingsFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, claudeSettings)
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "shared-claude-settings.json")
+	managed, err := mergeClaudeSettings(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(target, managed, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	if linkErr := os.Symlink(filepath.Join("..", filepath.Base(target)), path); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modes := testRunnerModes(t)
+	options := Options{
+		Dir:               dir,
+		Agents:            []string{"claude"},
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsNo,
+	}
+	dryRunOptions := options
+	dryRunOptions.DryRun = true
+	dryRun, err := Apply(dryRunOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTruncationDiff(t, dryRun, resolvedTarget)
+	result, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertTruncationDiff(t, result, resolvedTarget)
+	assertFileSymlink(t, path)
+	// #nosec G304 -- target is created in this test's temporary directory.
+	after, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("Claude symlink target kept managed content:\n%s", after)
+	}
+	if _, err := Apply(Options{
+		Dir:               dir,
+		Agents:            []string{"claude"},
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsYes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	assertFileSymlink(t, path)
+	allow, ask := readClaudePermissions(t, target)
+	managedTools := ClaudeManagedTools()
+	if !slices.Equal(allow, managedTools.Allow) || !slices.Equal(ask, managedTools.Ask) {
+		t.Fatalf("restored Claude permissions allow = %#v, ask = %#v", allow, ask)
+	}
+}
+
 func TestApplyRejectsEscapingCodexConfigSymlinkWithoutChanges(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires privileges on Windows")
@@ -831,7 +1849,9 @@ func TestApplyRejectsEscapingCodexConfigSymlinkWithoutChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+	_, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
+	})
 	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace scope") {
 		t.Fatalf("Apply error = %v, want an escaping Codex directory error", err)
 	}
@@ -890,7 +1910,10 @@ func TestApplyRejectsInvalidCodexConfigSymlinks(t *testing.T) {
 			}
 
 			_, err := Apply(
-				Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true},
+				Options{
+					Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true,
+					RunnerModes: testRunnerModes(t),
+				},
 			)
 			if err == nil || !strings.Contains(err.Error(), test.wantError) {
 				t.Fatalf("Apply error = %v, want error containing %q", err, test.wantError)
@@ -913,6 +1936,7 @@ func TestApplyRejectsNonRegularNearestMCPConfig(t *testing.T) {
 			Dir:            dir,
 			Agents:         []string{"codex"},
 			WriteMCPConfig: true,
+			RunnerModes:    testRunnerModes(t),
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
@@ -920,7 +1944,7 @@ func TestApplyRejectsNonRegularNearestMCPConfig(t *testing.T) {
 	}
 }
 
-func TestApplyUpdatesNearestAgentInstruction(t *testing.T) {
+func TestApplyKeepsAgentInstructionsWithinResolvedScope(t *testing.T) {
 	workspace := t.TempDir()
 	project := filepath.Join(workspace, "projects", "service")
 	if err := os.MkdirAll(project, 0o750); err != nil {
@@ -931,23 +1955,62 @@ func TestApplyUpdatesNearestAgentInstruction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := Apply(Options{Dir: project, Agents: []string{"codex"}})
+	result, err := Apply(Options{
+		Dir: project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsPath(result.Paths, path) {
-		t.Fatalf("updated paths = %#v, want %s", result.Paths, path)
-	}
-	if _, statErr := os.Stat(filepath.Join(project, "AGENTS.md")); !os.IsNotExist(statErr) {
-		t.Fatalf("child agent instructions unexpectedly exist: %v", statErr)
+	localPath := filepath.Join(project, "AGENTS.md")
+	if !containsPath(result.Paths, localPath) {
+		t.Fatalf("updated paths = %#v, want %s", result.Paths, localPath)
 	}
 	// #nosec G304 -- path is created in this test's temporary directory.
-	data, err := os.ReadFile(path)
+	ancestor, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(ancestor) != "# Existing\n" {
+		t.Fatalf("ancestor agent instructions changed:\n%s", ancestor)
+	}
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(localPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), canonicalBlock()) {
 		t.Fatalf("agent instructions do not contain the managed block:\n%s", data)
+	}
+}
+
+func TestApplyDoesNotSearchAboveResolvedWorkspaceScope(t *testing.T) {
+	ancestor := t.TempDir()
+	workspace := filepath.Join(ancestor, "workspace")
+	project := filepath.Join(workspace, "project")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	ancestorPath := filepath.Join(ancestor, "AGENTS.md")
+	ancestorBefore := []byte("# Shared ancestor\n")
+	if err := os.WriteFile(ancestorPath, ancestorBefore, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, mcpConfig), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(Options{
+		Dir: project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G304 -- paths are created in this test's temporary directory.
+	ancestorAfter, err := os.ReadFile(ancestorPath)
+	if err != nil || !slices.Equal(ancestorAfter, ancestorBefore) {
+		t.Fatalf("ancestor target changed: %q, %v", ancestorAfter, err)
+	}
+	workspaceData, err := os.ReadFile(filepath.Join(workspace, "AGENTS.md"))
+	if err != nil || !strings.Contains(string(workspaceData), canonicalBlock()) {
+		t.Fatalf("workspace target = %q, %v", workspaceData, err)
 	}
 }
 
@@ -972,8 +2035,13 @@ func TestApplyUpdatesSafeSymlinkedAgentInstruction(t *testing.T) {
 	if err := os.MkdirAll(project, 0o750); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(workspace, mcpConfig), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
-	result, err := Apply(Options{Dir: project, Agents: []string{"codex"}})
+	result, err := Apply(Options{
+		Dir: project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -990,8 +2058,77 @@ func TestApplyUpdatesSafeSymlinkedAgentInstruction(t *testing.T) {
 	}
 }
 
+func assertTruncationDiff(t *testing.T, result Result, path string) {
+	t.Helper()
+	diff := resultDiffForPath(t, result, path)
+	if strings.Contains(diff, "\n+++ /dev/null\n") {
+		t.Fatalf("result falsely reports symlink deletion: %s", diff)
+	}
+}
+
+func assertFileSymlink(t *testing.T, path string) {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("file symlink was replaced: mode = %s", info.Mode())
+	}
+}
+
+// TestApplyDisableKeepsSafeCodexConfigDirectorySymlink covers a JMW-only file
+// that lives below a directory symlink: the file goes, the operator's symlink
+// stays. preserveScopedFileSymlink only rescues the file itself, so a parent
+// directory symlink must not turn the deletion into a truncation.
+func TestApplyDisableKeepsSafeCodexConfigDirectorySymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	workspace := t.TempDir()
+	targetDirectory := filepath.Join(workspace, "shared", "codex")
+	if err := os.MkdirAll(targetDirectory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(targetDirectory, filepath.Base(codexConfig))
+	managed, err := mergeCodexConfig(nil, workspace, testRunnerModes(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(target, managed, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	link := filepath.Join(workspace, filepath.Dir(codexConfig))
+	if linkErr := os.Symlink(filepath.Join("shared", "codex"), link); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+	resolvedTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(Options{
+		Dir: workspace, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(result.Paths, resolvedTarget) {
+		t.Fatalf("updated paths = %#v, want removed %s", result.Paths, resolvedTarget)
+	}
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("Codex config directory symlink was replaced: mode = %s", info.Mode())
+	}
+	if _, statErr := os.Stat(target); !os.IsNotExist(statErr) {
+		t.Fatalf("JMW-only target below directory symlink still exists: %v", statErr)
+	}
+}
+
 func TestMCPConfigSnippetUsesAbsoluteExecutablePath(t *testing.T) {
-	snippet, err := MCPConfigSnippet()
+	snippet, err := MCPConfigSnippet(testRunnerModes(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1026,6 +2163,55 @@ func assertServerCommand(t *testing.T, servers map[string]any) {
 	}
 	if command != executable {
 		t.Fatalf("server command = %q, want %q", command, executable)
+	}
+}
+
+func readJSONServerArgs(t *testing.T, path string) []string {
+	t.Helper()
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		MCPServers map[string]serverEntry `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	return config.MCPServers[serverName].Args
+}
+
+func readCodexServerArgs(t *testing.T, path string) []string {
+	t.Helper()
+	// #nosec G304 -- path is created in this test's temporary directory.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config struct {
+		MCPServers map[string]struct {
+			Args []string
+		} `toml:"mcp_servers"`
+	}
+	if _, err := toml.Decode(string(data), &config); err != nil {
+		t.Fatal(err)
+	}
+	return config.MCPServers[serverName].Args
+}
+
+func assertRunnerModeArgs(
+	t *testing.T,
+	args []string,
+	selections []runner.Selection,
+) {
+	t.Helper()
+	want := make([]string, 0, len(selections)*2)
+	for _, selection := range selections {
+		want = append(want, "--runner-mode", selection.Name+"="+string(selection.Mode))
+	}
+	if len(args) < 3 || !slices.Equal(args[3:], want) {
+		t.Fatalf("server args = %#v, want runner args %#v", args, want)
 	}
 }
 
@@ -1088,12 +2274,27 @@ func containsPath(paths []string, want string) bool {
 	return slices.Contains(paths, want)
 }
 
+func resultDiffForPath(t *testing.T, result Result, path string) string {
+	t.Helper()
+	if len(result.Paths) != len(result.Diffs) {
+		t.Fatalf("result paths and diffs differ in length: %#v, %#v", result.Paths, result.Diffs)
+	}
+	for index, candidate := range result.Paths {
+		if candidate == path {
+			return result.Diffs[index]
+		}
+	}
+	t.Fatalf("result paths = %#v, want %s", result.Paths, path)
+	return ""
+}
+
 func TestApplyWritesClaudePermissionsWhenAccepted(t *testing.T) {
 	dir := t.TempDir()
 	path := claudeSettingsPath(t, dir)
 	options := Options{
 		Dir:               dir,
 		Agents:            []string{"claude"},
+		RunnerModes:       testRunnerModes(t),
 		ClaudePermissions: ClaudePermissionsYes,
 	}
 	result, err := Apply(options)
@@ -1139,6 +2340,7 @@ func TestApplyReplacesEveryManagedClaudeEntry(t *testing.T) {
 		Options{
 			Dir:               dir,
 			Agents:            []string{"claude"},
+			RunnerModes:       testRunnerModes(t),
 			ClaudePermissions: ClaudePermissionsYes,
 		},
 	)
@@ -1189,14 +2391,20 @@ func TestApplySkipsClaudePermissionsWithoutApproval(t *testing.T) {
 	}{
 		{name: "declined", options: Options{
 			ClaudePermissions: ClaudePermissionsAsk,
+			RunnerModes:       testRunnerModes(t),
 			Confirm:           func(string, string) (bool, error) { return false, nil },
 		}},
 		{name: "no confirmation available", options: Options{
 			ClaudePermissions: ClaudePermissionsAsk,
+			RunnerModes:       testRunnerModes(t),
 		}},
-		{name: "opted out", options: Options{ClaudePermissions: ClaudePermissionsNo}},
+		{name: "opted out", options: Options{
+			ClaudePermissions: ClaudePermissionsNo,
+			RunnerModes:       testRunnerModes(t),
+		}},
 		{name: "claude not selected", options: Options{
 			Agents:            []string{"codex"},
+			RunnerModes:       testRunnerModes(t),
 			ClaudePermissions: ClaudePermissionsYes,
 		}},
 	} {
@@ -1227,10 +2435,11 @@ func TestApplyReportsClaudePermissionsDiffWithoutAskingOnDryRun(t *testing.T) {
 	confirmed := false
 	result, err := Apply(
 		Options{
-			Dir:     dir,
-			Agents:  []string{"claude"},
-			DryRun:  true,
-			Confirm: func(string, string) (bool, error) { confirmed = true; return true, nil },
+			Dir:         dir,
+			Agents:      []string{"claude"},
+			DryRun:      true,
+			RunnerModes: testRunnerModes(t),
+			Confirm:     func(string, string) (bool, error) { confirmed = true; return true, nil },
 		},
 	)
 	if err != nil {
@@ -1291,6 +2500,7 @@ func TestApplyRejectsInvalidClaudePermissionLists(t *testing.T) {
 				Options{
 					Dir:               dir,
 					Agents:            []string{"claude"},
+					RunnerModes:       testRunnerModes(t),
 					ClaudePermissions: ClaudePermissionsYes,
 				},
 			)
@@ -1322,7 +2532,10 @@ func TestApplyWritesClaudePermissionsOverNullLists(t *testing.T) {
 	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	options := Options{Dir: dir, Agents: []string{"claude"}, ClaudePermissions: ClaudePermissionsYes}
+	options := Options{
+		Dir: dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
+		ClaudePermissions: ClaudePermissionsYes,
+	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
@@ -1370,7 +2583,10 @@ func TestApplyRejectsUnusableMCPConfig(t *testing.T) {
 			if err := os.WriteFile(path, []byte(testCase.config), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			_, err := Apply(Options{Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true})
+			_, err := Apply(Options{
+				Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true,
+				RunnerModes: testRunnerModes(t),
+			})
 			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
 				t.Fatalf("Apply error = %v, want %q", err, testCase.wantError)
 			}
@@ -1390,9 +2606,10 @@ func TestApplyReportsClaudePermissionConfirmationFailure(t *testing.T) {
 	dir := t.TempDir()
 	_, err := Apply(
 		Options{
-			Dir:     dir,
-			Agents:  []string{"claude"},
-			Confirm: func(string, string) (bool, error) { return false, os.ErrClosed },
+			Dir:         dir,
+			Agents:      []string{"claude"},
+			RunnerModes: testRunnerModes(t),
+			Confirm:     func(string, string) (bool, error) { return false, os.ErrClosed },
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "confirm") {

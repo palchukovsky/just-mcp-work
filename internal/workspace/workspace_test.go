@@ -25,7 +25,7 @@ func TestDiscoverProjectsAndSurfaceInvalidJustfile(t *testing.T) {
 	writeFile(t, filepath.Join(root, "invalid", ".justfile"), "invalid syntax")
 	writeFile(t, filepath.Join(root, ".git", "ignored", "justfile"), "ignored")
 
-	runners, err := runner.NewRegistry(fakeJustRunner{})
+	runners, err := runner.NewRegistry(testRegistration(fakeJustRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,10 @@ func TestDiscoverReportsMissingToolAsWarning(t *testing.T) {
 	writeFile(t, filepath.Join(root, "justfile"), "root")
 	writeFile(t, filepath.Join(root, "Makefile"), "root")
 
-	runners, err := runner.NewRegistry(fakeJustRunner{}, unavailableToolRunner{})
+	runners, err := runner.NewRegistry(
+		testRegistration(fakeJustRunner{}),
+		testRegistration(unavailableToolRunner{}),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +202,7 @@ func TestDiscoverKeepsProjectWithOnlyWarnings(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "Makefile"), "root")
 
-	runners, err := runner.NewRegistry(detectUnavailableToolRunner{})
+	runners, err := runner.NewRegistry(testRegistration(detectUnavailableToolRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +234,7 @@ func TestDiscoverKeepsPartiallyDiscoveredTasks(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "Makefile"), "root")
 
-	runners, err := runner.NewRegistry(partialFakeMakeRunner{})
+	runners, err := runner.NewRegistry(testRegistration(partialFakeMakeRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,9 +305,11 @@ func TestDiscoverSkipsJustfileIncludedByParentProject(t *testing.T) {
 	writeFile(t, filepath.Join(root, "justfile"), "root")
 	writeFile(t, filepath.Join(root, "nested", "justfile"), "nested")
 	writeFile(t, filepath.Join(root, "invalid", "justfile"), "invalid")
-	runners, err := runner.NewRegistry(includingFakeJustRunner{
-		included: filepath.Join(root, "nested"),
-	})
+	runners, err := runner.NewRegistry(
+		testRegistration(includingFakeJustRunner{
+			included: filepath.Join(root, "nested"),
+		}),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -349,8 +354,8 @@ func TestDiscoverSuppressesOnlyIncludedJustRunnerAfterFullScan(t *testing.T) {
 	writeFile(t, filepath.Join(shared, "Makefile"), "shared")
 	writeFile(t, filepath.Join(root, "z", "app", "justfile"), "app")
 	runners, err := runner.NewRegistry(
-		includingFakeJustRunner{included: shared},
-		fakeMakeRunner{},
+		testRegistration(includingFakeJustRunner{included: shared}),
+		testRegistration(fakeMakeRunner{}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -406,7 +411,9 @@ func TestDiscoverFilterPrunesBeforeInspection(t *testing.T) {
 		writeFile(t, filepath.Join(root, path), "fixture")
 	}
 	calls := 0
-	runners, err := runner.NewRegistry(countingFakeJustRunner{calls: &calls})
+	runners, err := runner.NewRegistry(
+		testRegistration(countingFakeJustRunner{calls: &calls}),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -491,7 +498,10 @@ func TestDiscoverFilterKeepsProjectDetailsAndValidatesInput(t *testing.T) {
 	writeFile(t, filepath.Join(root, "dual", "justfile"), "fixture")
 	writeFile(t, filepath.Join(root, "dual", "Makefile"), "fixture")
 	writeFile(t, filepath.Join(root, "just-only", "justfile"), "fixture")
-	runners, err := runner.NewRegistry(fakeJustRunner{}, fakeMakeRunner{})
+	runners, err := runner.NewRegistry(
+		testRegistration(fakeJustRunner{}),
+		testRegistration(fakeMakeRunner{}),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -561,7 +571,7 @@ func TestExcludedGlobUsesSlashSeparatorSemantics(t *testing.T) {
 
 func mustRunnerRegistry(t *testing.T) *runner.Registry {
 	t.Helper()
-	registry, err := runner.NewRegistry(fakeJustRunner{})
+	registry, err := runner.NewRegistry(testRegistration(fakeJustRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +585,7 @@ func TestDiscoverDoesNotDescendIntoDirectorySymlink(t *testing.T) {
 	if err := os.Symlink(external, filepath.Join(root, "linked")); err != nil {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
-	runners, err := runner.NewRegistry(fakeJustRunner{})
+	runners, err := runner.NewRegistry(testRegistration(fakeJustRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -598,6 +608,10 @@ func TestDiscoverDoesNotDescendIntoDirectorySymlink(t *testing.T) {
 type fakeJustRunner struct{}
 
 func (fakeJustRunner) Name() string { return "just" }
+
+func testRegistration(candidate runner.Runner) runner.Registration {
+	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions())
+}
 
 func (fakeJustRunner) Detect(projectDir string) (bool, error) {
 	for _, name := range []string{"justfile", "Justfile", ".justfile"} {

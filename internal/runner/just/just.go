@@ -35,6 +35,15 @@ func New(binary string) *Runner {
 	return &Runner{binary: binary}
 }
 
+// Registration explicitly keeps the unreviewed Just command policy enabled.
+func Registration(binary string) runner.Registration {
+	return runner.NewRegistration(
+		runnerName,
+		runner.UnreviewedPermissions(),
+		func(runner.Mode) (runner.Runner, error) { return New(binary), nil },
+	)
+}
+
 func (*Runner) Name() string { return runnerName }
 
 // RunnerVersion reports the installed just version for run metadata.

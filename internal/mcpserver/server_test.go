@@ -38,6 +38,16 @@ import (
 // pointing at the cheaper and the fuller option, so the agent can tell when this
 // escape hatch is not the right tool.
 func TestRunShellCommandDescriptionNamesItsAlternatives(t *testing.T) {
+	for name, description := range map[string]string{
+		"run_shell_command":   runShellCommandDescription(),
+		"start_shell_command": startShellCommandDescription(),
+	} {
+		for _, expected := range []string{"ad-hoc", "withheld", "runner mode", "another shell path"} {
+			if !strings.Contains(description, expected) {
+				t.Errorf("%s description does not mention %q", name, expected)
+			}
+		}
+	}
 	for _, expected := range []string{"run_task", "start_task", "normal shell", "promoted: true"} {
 		if !strings.Contains(runShellCommandDescription(), expected) {
 			t.Errorf("run_shell_command description does not mention %q", expected)
@@ -53,7 +63,7 @@ func TestListTasksExplainsAnEmptyRunner(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(unavailableToolRunner{})
+	runners, err := runner.NewRegistry(testRegistration(unavailableToolRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +111,7 @@ func TestDirectHandlerFlow(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(handlerRunner{})
+	runners, err := runner.NewRegistry(testRegistration(handlerRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +229,7 @@ func TestListProjectsFilterDefaultsDoNotLimitTaskLookup(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	runners, err := runner.NewRegistry(handlerRunner{})
+	runners, err := runner.NewRegistry(testRegistration(handlerRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,7 +683,7 @@ func TestUpdateNoticeKeepsPrimaryToolResultAndStatusIsFresh(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(handlerRunner{})
+	runners, err := runner.NewRegistry(testRegistration(handlerRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +745,7 @@ func TestGitHubFailureDoesNotBreakRegularTool(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(handlerRunner{})
+	runners, err := runner.NewRegistry(testRegistration(handlerRunner{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -845,6 +855,10 @@ func (handlerRunner) BuildCommand(
 	cmd.Dir = projectDir
 	cmd.Env = append(os.Environ(), "JMW_TEST_HELPER_PROCESS=1")
 	return cmd, nil
+}
+
+func testRegistration(candidate runner.Runner) runner.Registration {
+	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions())
 }
 
 // TestClaudePermissionsCoverEveryRegisteredTool guards the managed Claude

@@ -58,3 +58,30 @@ func trimLeadingLineBreak(text string) (string, bool) {
 		return text, false
 	}
 }
+
+// trimTrailingLineBreak removes one line break in either supported form.
+func trimTrailingLineBreak(text string) (string, bool) {
+	switch {
+	case strings.HasSuffix(text, "\r\n"):
+		return text[:len(text)-len("\r\n")], true
+	case strings.HasSuffix(text, "\n"):
+		return text[:len(text)-len("\n")], true
+	default:
+		return text, false
+	}
+}
+
+// trimManagedSeparator removes the extra line break that init writes between
+// newline-terminated foreign content and an appended managed block. It leaves
+// one line break behind because an earlier non-newline-terminated file is
+// indistinguishable after the append and still needs a valid text boundary.
+func trimManagedSeparator(text string) string {
+	trimmed, found := trimTrailingLineBreak(text)
+	if !found {
+		return text
+	}
+	if _, hasPrevious := trimTrailingLineBreak(trimmed); !hasPrevious {
+		return text
+	}
+	return trimmed
+}
