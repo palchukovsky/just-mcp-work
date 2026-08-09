@@ -28,6 +28,17 @@ instead of a wall of output.
 The agent gets the usage rules from the server itself, so there is nothing here
 you have to teach it.
 
+## Security
+
+Tasks and shell commands run with your privileges and without a sandbox: trust
+a selected task the way you trust the project's build scripts. The only
+server-side authorization mechanism is runner permission declarations and
+modes. Runner modes reduce the task surface but do not isolate it.
+`run_shell_command` and `start_shell_command` are unrestricted escape hatches
+that bypass that mechanism; a task withheld by a runner mode must not be
+recreated through them or another shell path. Need isolation? Run
+`just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
+
 ## Install
 
 Download an archive from the [latest GitHub Release][latest-release]:
@@ -130,16 +141,6 @@ MCP and Codex server arguments, and those arguments drive `serve`. Manual
 
 Run `init` again after an update. `init --help` and `serve --help` list the
 agent targets and the server options.
-
-## Security
-
-Tasks and shell commands run with your privileges and without a sandbox: trust
-a selected task the way you trust the project's build scripts. Runner modes
-reduce the task surface but do not isolate it. `run_shell_command` and
-`start_shell_command` remain explicit shell tools for genuinely ad-hoc work,
-but a task withheld by a runner mode must not be recreated through them or any
-other shell path. Need isolation? Run `just-mcp-work` in a container. See
-[SECURITY.md](SECURITY.md).
 
 ## Configuration
 

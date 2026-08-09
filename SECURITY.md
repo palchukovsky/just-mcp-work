@@ -76,6 +76,21 @@ daemon, which is a privileged service on most hosts. Compose services are
 started detached, so their containers outlive the run that started them until
 `docker:compose:down` stops them.
 
+Permission and approval rules configured in the calling client — agent
+allow-lists, approval modes, and per-tool confirmation prompts — are
+convenience and operator discipline, not a server-side security boundary. jmw
+executes what it is handed; it neither knows nor relies on what the calling
+agent chose to confirm or auto-approve.
+[Anthropic](https://www.anthropic.com/engineering/claude-code-auto-mode)
+reports that Claude Code users approve 93% of permission prompts and names the
+effect *approval fatigue*. A confirmation prompt that a human approves nine
+times out of ten is not a control you should rely on.
+
+Runner permission declarations and modes are jmw's server-side authorization
+mechanism. The explicit shell tools are an escape hatch: when enabled,
+`run_shell_command` and `start_shell_command` give the caller a general shell
+outside runner task filtering.
+
 ## Lifecycle controls
 
 Lifecycle controls are separate from runner authorization. They bound
