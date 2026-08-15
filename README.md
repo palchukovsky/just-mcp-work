@@ -28,6 +28,12 @@ instead of a wall of output.
 The agent gets the usage rules from the server itself, so there is nothing here
 you have to teach it.
 
+## Documentation
+
+[`docs/`](docs/README.md) is the documentation index. Start with the
+[agent guide](docs/agent-guide.md): the object model, discovery rules, task IDs
+per runner, the run lifecycle, and the MCP tool reference.
+
 ## Security
 
 Tasks and shell commands run with your privileges and without a sandbox: trust
