@@ -356,6 +356,57 @@ func TestParseServeOptionsResolvesDeadlinePrecedence(t *testing.T) {
 	}
 }
 
+func TestParseServeOptionsTracksExplicitRoot(t *testing.T) {
+	t.Setenv("JMW_ROOT", "")
+	options, err := parseServeOptions(nil)
+	if err != nil || options.RootExplicit {
+		t.Fatalf("default root options = %#v, %v", options, err)
+	}
+	options, err = parseServeOptions([]string{"--root", "."})
+	if err != nil || !options.RootExplicit {
+		t.Fatalf("flag root options = %#v, %v", options, err)
+	}
+	t.Setenv("JMW_ROOT", t.TempDir())
+	options, err = parseServeOptions(nil)
+	if err != nil || !options.RootExplicit {
+		t.Fatalf("environment root options = %#v, %v", options, err)
+	}
+}
+
+func TestResolveServeRootAnchorsOnlyImplicitLinkedWorktree(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainDir := filepath.Join(base, "main")
+	worktreeDir := filepath.Join(base, "linked")
+	nested := filepath.Join(worktreeDir, "nested")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "feature")
+	for path, contents := range map[string]string{
+		filepath.Join(entryDir, "gitdir"):  filepath.Join(worktreeDir, ".git") + "\n",
+		filepath.Join(worktreeDir, ".git"): "gitdir: " + entryDir + "\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := resolveServeRoot(serveOptions{Root: nested})
+	if err != nil || root != worktreeDir {
+		t.Fatalf("implicit root = %q, %v, want %q", root, err, worktreeDir)
+	}
+	root, err = resolveServeRoot(serveOptions{Root: nested, RootExplicit: true})
+	if err != nil || root != nested {
+		t.Fatalf("explicit root = %q, %v, want %q", root, err, nested)
+	}
+}
+
 func TestParseServeOptionsAllowsUnlimitedTimeout(t *testing.T) {
 	options, err := parseServeOptions([]string{"--timeout", "0"})
 	if err != nil || !options.TimeoutUnlimited || options.Timeout != 0 {

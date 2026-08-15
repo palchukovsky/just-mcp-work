@@ -46,6 +46,7 @@ var ErrFinalMetadataPersistence = errors.New("final run metadata persistence fai
 //nolint:govet // Field order follows the stable on-disk metadata schema.
 type Meta struct {
 	RunID           string    `json:"run_id"`
+	WorktreeRoot    string    `json:"worktree_root"`
 	ProjectPath     string    `json:"project_path,omitempty"`
 	Runner          string    `json:"runner,omitempty"`
 	TaskID          string    `json:"task_id,omitempty"`
@@ -117,6 +118,9 @@ func (s *Store) StateRoot() string { return s.stateRoot }
 
 // LogRoot returns the directory containing all run directories.
 func (s *Store) LogRoot() string { return s.logRoot }
+
+// Root returns the workspace root that owns this store.
+func (s *Store) Root() string { return s.root }
 
 // Handle is an active run with open log files.
 type Handle struct {

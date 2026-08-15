@@ -59,7 +59,7 @@ func TestInitRunnerModesRoundTripThroughManagedServeConfigs(t *testing.T) {
 	configs := []managedServeConfig{
 		{
 			name: "mcp json",
-			root: ".",
+			root: root,
 			args: readJSONManagedServeArgs(
 				t,
 				filepath.Join(root, ".mcp.json"),

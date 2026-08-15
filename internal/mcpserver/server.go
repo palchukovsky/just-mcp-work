@@ -101,6 +101,13 @@ func New(
 	if workspaceRegistry == nil || runners == nil || store == nil {
 		return nil, fmt.Errorf("workspace registry, runner registry, and run store are required")
 	}
+	if workspaceRegistry.Root() != store.Root() {
+		return nil, fmt.Errorf(
+			"workspace registry root %q does not match run store root %q",
+			workspaceRegistry.Root(),
+			store.Root(),
+		)
+	}
 	if err := validateTaskTimeout(config); err != nil {
 		return nil, err
 	}
@@ -850,6 +857,7 @@ type runTaskOutput struct {
 type runDetails struct {
 	Completed           *bool           `json:"completed,omitempty"`
 	Promoted            bool            `json:"promoted,omitempty"`
+	WorktreeRoot        string          `json:"worktree_root"`
 	ProjectPath         string          `json:"project_path,omitempty"`
 	Runner              string          `json:"runner,omitempty"`
 	TaskID              string          `json:"task_id,omitempty"`
@@ -923,7 +931,12 @@ func (s *Server) startTaskRun(
 		s.config.Logger.Warn("read task duration statistics failed", "task_id", input.TaskID, "error", statsErr)
 	}
 	handle, err := s.store.Begin(
-		runstore.Meta{ProjectPath: input.ProjectPath, TaskID: input.TaskID, Args: input.Arguments},
+		runstore.Meta{
+			WorktreeRoot: s.workspace.WorktreeRoot(),
+			ProjectPath:  input.ProjectPath,
+			TaskID:       input.TaskID,
+			Args:         input.Arguments,
+		},
 	)
 	if err != nil {
 		return nil, stats, runTaskOutput{Error: newToolError(err)}
@@ -1033,9 +1046,10 @@ func (s *Server) startShellRun(
 	}
 	handle, err := s.store.Begin(
 		runstore.Meta{
-			ProjectPath: workingDirectory,
-			TaskID:      "shell:command",
-			Args:        []string{input.Command},
+			WorktreeRoot: s.workspace.WorktreeRoot(),
+			ProjectPath:  workingDirectory,
+			TaskID:       "shell:command",
+			Args:         []string{input.Command},
 		},
 	)
 	if err != nil {
@@ -1568,6 +1582,7 @@ type listRunsInput struct {
 //nolint:govet // Field order follows the stable MCP JSON response shape.
 type runListEntry struct {
 	RunID           string          `json:"run_id"`
+	WorktreeRoot    string          `json:"worktree_root"`
 	Status          runstore.Status `json:"status"`
 	ProjectPath     string          `json:"project_path,omitempty"`
 	TaskID          string          `json:"task_id,omitempty"`
@@ -1644,13 +1659,14 @@ func (s *Server) listRuns(
 			continue
 		}
 		entry := runListEntry{
-			RunID:       meta.RunID,
-			Status:      meta.Status,
-			ProjectPath: meta.ProjectPath,
-			TaskID:      meta.TaskID,
-			Args:        meta.Args,
-			StartedAt:   meta.StartedAt,
-			DurationMS:  durationFor(meta),
+			RunID:        meta.RunID,
+			WorktreeRoot: meta.WorktreeRoot,
+			Status:       meta.Status,
+			ProjectPath:  meta.ProjectPath,
+			TaskID:       meta.TaskID,
+			Args:         meta.Args,
+			StartedAt:    meta.StartedAt,
+			DurationMS:   durationFor(meta),
 		}
 		if meta.Status == runstore.StatusRunning {
 			if logState, stateErr := s.store.LogState(meta.RunID); stateErr == nil {
@@ -1778,6 +1794,7 @@ func (s *Server) runDetails(meta runstore.Meta, predicted *runstats.Stats) (*run
 	startedAt := meta.StartedAt
 	details := &runDetails{
 		Completed:       boolPointer(completed),
+		WorktreeRoot:    meta.WorktreeRoot,
 		ProjectPath:     meta.ProjectPath,
 		Runner:          meta.Runner,
 		TaskID:          meta.TaskID,

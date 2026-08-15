@@ -63,9 +63,10 @@ type Pruned struct {
 
 // Registry scans a workspace on demand. It does not retain stale project data.
 type Registry struct {
-	root     string
-	runners  *runner.Registry
-	excludes []string
+	root         string
+	worktreeRoot string
+	runners      *runner.Registry
+	excludes     []string
 }
 
 // NewRegistry creates a workspace registry rooted at root.
@@ -77,15 +78,32 @@ func NewRegistry(root string, runners *runner.Registry, excludes []string) (*Reg
 	if err != nil {
 		return nil, fmt.Errorf("resolve workspace root: %w", err)
 	}
+	absRoot = filepath.Clean(absRoot)
+	worktreeRoot, linked, err := ActiveWorktreeRoot(absRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve active worktree: %w", err)
+	}
+	if !linked {
+		worktreeRoot, err = canonicalPathWithMissing(absRoot)
+		if err != nil {
+			return nil, fmt.Errorf("resolve canonical workspace root: %w", err)
+		}
+	}
 	return &Registry{
-		root:     filepath.Clean(absRoot),
-		runners:  runners,
-		excludes: append([]string(nil), excludes...),
+		root:         absRoot,
+		worktreeRoot: worktreeRoot,
+		runners:      runners,
+		excludes:     append([]string(nil), excludes...),
 	}, nil
 }
 
 // Root returns the resolved workspace root.
 func (r *Registry) Root() string { return r.root }
+
+// WorktreeRoot returns the canonical checkout identity used by this registry.
+// For a root inside a linked worktree, this is the worktree root rather than a
+// project subdirectory. Outside a linked worktree, it is the canonical root.
+func (r *Registry) WorktreeRoot() string { return r.worktreeRoot }
 
 // Discover scans a filtered workspace subtree and returns projects sorted by relative path.
 //

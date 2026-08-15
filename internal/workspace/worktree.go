@@ -210,9 +210,10 @@ func registeredWorktreeCandidate(entryDir string) (string, bool, error) {
 		return "", false, nil
 	}
 	gitFile, ok = markerLine(gitFile)
-	if !ok || !filepath.IsAbs(gitFile) {
+	if !ok {
 		return "", false, nil
 	}
+	gitFile = resolveMarkerPath(filepath.Join(entryDir, "gitdir"), gitFile)
 	if !pathNamesEqual(filepath.Base(gitFile), ".git") {
 		return "", false, nil
 	}
@@ -367,14 +368,197 @@ func linkedWorktreeGitDir(markerPath string) (string, bool, error) {
 		return "", false, nil
 	}
 	gitDir, ok := strings.CutPrefix(line, "gitdir: ")
-	if !ok || gitDir == "" || !filepath.IsAbs(gitDir) {
+	if !ok || gitDir == "" {
 		return "", false, nil
 	}
-	gitDir = filepath.Clean(gitDir)
+	gitDir = resolveMarkerPath(markerPath, gitDir)
 	if _, ok := mainCheckoutDir(gitDir); !ok {
 		return "", false, nil
 	}
 	return gitDir, true, nil
+}
+
+// ActiveWorktreeRoot returns the canonical linked-worktree root containing dir.
+// A structurally linked marker is authoritative: malformed metadata or a failed
+// registry round trip is an error instead of permission to use an ancestor scope.
+func ActiveWorktreeRoot(dir string) (string, bool, error) {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve active directory: %w", err)
+	}
+	canonicalDir, err := canonicalPathWithMissing(absDir)
+	if err != nil {
+		return "", false, err
+	}
+	for current := canonicalDir; ; current = filepath.Dir(current) {
+		markerPath := filepath.Join(current, ".git")
+		info, inspectErr := os.Lstat(markerPath)
+		if inspectErr == nil {
+			if info.IsDir() && info.Mode()&fs.ModeSymlink == 0 {
+				return "", false, nil
+			}
+			if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return "", false, fmt.Errorf(
+					"active git marker %q is not a regular file or directory",
+					markerPath,
+				)
+			}
+			gitDir, linked, markerErr := requiredLinkedWorktreeGitDir(markerPath)
+			if markerErr != nil {
+				return "", false, markerErr
+			}
+			if !linked {
+				return "", false, nil
+			}
+			if validateErr := validateActiveWorktree(current, markerPath, gitDir); validateErr != nil {
+				return "", false, validateErr
+			}
+			return current, true, nil
+		}
+		if !errors.Is(inspectErr, fs.ErrNotExist) {
+			return "", false, fmt.Errorf("inspect active git marker %q: %w", markerPath, inspectErr)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false, nil
+		}
+	}
+}
+
+func requiredLinkedWorktreeGitDir(markerPath string) (string, bool, error) {
+	marker, err := readRequiredMarker(markerPath)
+	if err != nil {
+		return "", false, err
+	}
+	line, ok := markerLine(marker)
+	if !ok {
+		return "", false, fmt.Errorf("active git marker %q must contain one line", markerPath)
+	}
+	gitDir, ok := strings.CutPrefix(line, "gitdir: ")
+	if !ok || gitDir == "" {
+		return "", false, fmt.Errorf("active git marker %q has invalid gitdir syntax", markerPath)
+	}
+	gitDir = resolveMarkerPath(markerPath, gitDir)
+	if _, linked := mainCheckoutDir(gitDir); !linked {
+		return "", false, nil
+	}
+	return gitDir, true, nil
+}
+
+func validateActiveWorktree(worktreeRoot, markerPath, gitDir string) error {
+	mainCheckout, valid := mainCheckoutDir(gitDir)
+	if !valid {
+		return fmt.Errorf("active git marker %q does not reference a worktree registry", markerPath)
+	}
+	canonicalMain, err := filepath.EvalSymlinks(mainCheckout)
+	if err != nil {
+		return fmt.Errorf("resolve active worktree main checkout %q: %w", mainCheckout, err)
+	}
+	if filepath.Clean(canonicalMain) != filepath.Clean(mainCheckout) {
+		return fmt.Errorf("active worktree main checkout %q is not canonical", mainCheckout)
+	}
+	resolver := newPathResolver(context.Background())
+	resolvedGitDir, state, err := resolver.resolveGitRegistryEntry(canonicalMain, gitDir)
+	if err != nil {
+		return fmt.Errorf("validate active worktree registry: %w", err)
+	}
+	if state != pathResolved {
+		return fmt.Errorf("active worktree registry entry %q is unsafe or missing", gitDir)
+	}
+	backMarkerPath := filepath.Join(resolvedGitDir, "gitdir")
+	backMarker, err := readRequiredMarker(backMarkerPath)
+	if err != nil {
+		return fmt.Errorf("validate active worktree back-reference: %w", err)
+	}
+	backReference, ok := markerLine(backMarker)
+	if !ok {
+		return fmt.Errorf("active worktree back-reference %q must contain one line", backMarkerPath)
+	}
+	backReference = resolveMarkerPath(backMarkerPath, backReference)
+	if !pathNamesEqual(filepath.Base(backReference), ".git") {
+		return fmt.Errorf("active worktree back-reference %q is not a .git marker", backMarkerPath)
+	}
+	resolvedMarker, state, err := resolver.resolveWithin(
+		worktreeRoot,
+		backReference,
+		resolvedRegularFile,
+	)
+	if err != nil {
+		return fmt.Errorf("validate active worktree back-reference: %w", err)
+	}
+	if state != pathResolved {
+		return fmt.Errorf(
+			"active worktree back-reference %q is unsafe or outside its root",
+			backMarkerPath,
+		)
+	}
+	canonical, err := resolver.isCanonicalGitMarker(resolvedMarker)
+	if err != nil {
+		return fmt.Errorf("validate active worktree marker: %w", err)
+	}
+	sameMarker, err := sameResolvedPath(resolvedMarker, markerPath)
+	if err != nil {
+		return fmt.Errorf("validate active worktree marker identity: %w", err)
+	}
+	if !canonical || !sameMarker {
+		return fmt.Errorf("active worktree registry does not point back to %q", markerPath)
+	}
+	return nil
+}
+
+func readRequiredMarker(path string) (string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("inspect marker %q: %w", path, err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return "", fmt.Errorf("marker %q is not a regular file", path)
+	}
+	if info.Size() > maxGitMarkerBytes {
+		return "", fmt.Errorf("marker %q exceeds %d bytes", path, maxGitMarkerBytes)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read marker %q: %w", path, err)
+	}
+	if len(content) > maxGitMarkerBytes {
+		return "", fmt.Errorf("marker %q exceeds %d bytes", path, maxGitMarkerBytes)
+	}
+	return string(content), nil
+}
+
+func resolveMarkerPath(markerPath, value string) string {
+	if !filepath.IsAbs(value) {
+		value = filepath.Join(filepath.Dir(markerPath), value)
+	}
+	return filepath.Clean(value)
+}
+
+func canonicalPathWithMissing(path string) (string, error) {
+	current := filepath.Clean(path)
+	missing := make([]string, 0)
+	for {
+		_, err := os.Lstat(current)
+		if err == nil {
+			resolved, resolveErr := filepath.EvalSymlinks(current)
+			if resolveErr != nil {
+				return "", fmt.Errorf("resolve active directory %q: %w", path, resolveErr)
+			}
+			for index := len(missing) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, missing[index])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("inspect active directory %q: %w", current, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("resolve active directory %q: %w", path, err)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
 }
 
 func mainCheckoutDir(worktreeGitDir string) (string, bool) {

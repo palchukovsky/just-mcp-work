@@ -65,6 +65,7 @@ func run(args []string) error {
 //nolint:govet // Field order follows the documented flag order.
 type serveOptions struct {
 	Root             string
+	RootExplicit     bool
 	Timeout          time.Duration
 	TimeoutUnlimited bool
 	SyncDeadline     time.Duration
@@ -98,6 +99,7 @@ func (f *runnerModeFlag) Set(value string) error {
 func parseServeOptions(args []string) (serveOptions, error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
+	rootFromEnvironment := os.Getenv("JMW_ROOT") != ""
 	root := flags.String("root", envOr("JMW_ROOT", "."), "workspace root")
 	timeout := flags.Duration(
 		"timeout",
@@ -150,8 +152,15 @@ func parseServeOptions(args []string) (serveOptions, error) {
 	if *timeout > 0 && *timeout < time.Millisecond {
 		return serveOptions{}, fmt.Errorf("timeout must be zero or at least 1ms")
 	}
+	rootExplicit := rootFromEnvironment
+	flags.Visit(func(current *flag.Flag) {
+		if current.Name == "root" {
+			rootExplicit = true
+		}
+	})
 	return serveOptions{
 		Root:             *root,
+		RootExplicit:     rootExplicit,
 		Timeout:          *timeout,
 		TimeoutUnlimited: *timeout == 0,
 		SyncDeadline:     *syncDeadline,
@@ -178,7 +187,11 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve runner modes: %w", err)
 	}
-	workspaceRegistry, err := workspace.NewRegistry(options.Root, registry, options.Exclude)
+	root, err := resolveServeRoot(options)
+	if err != nil {
+		return err
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, registry, options.Exclude)
 	if err != nil {
 		return fmt.Errorf("create workspace registry: %w", err)
 	}
@@ -205,6 +218,20 @@ func serve(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serverRunError(ctx, server.Run(ctx))
+}
+
+func resolveServeRoot(options serveOptions) (string, error) {
+	if options.RootExplicit {
+		return options.Root, nil
+	}
+	worktreeRoot, linked, err := workspace.ActiveWorktreeRoot(options.Root)
+	if err != nil {
+		return "", fmt.Errorf("resolve implicit workspace root: %w", err)
+	}
+	if linked {
+		return worktreeRoot, nil
+	}
+	return options.Root, nil
 }
 
 // runnerCatalog is the shared production registration boundary used by serve

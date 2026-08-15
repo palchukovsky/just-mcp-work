@@ -22,11 +22,12 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	handle, err := store.Begin(Meta{
-		ProjectPath: "project",
-		Runner:      "just",
-		TaskID:      "just:test",
-		Args:        []string{"one"},
-		CWD:         "/workspace",
+		WorktreeRoot: "/workspace",
+		ProjectPath:  "project",
+		Runner:       "just",
+		TaskID:       "just:test",
+		Args:         []string{"one"},
+		CWD:          "/workspace",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -66,6 +67,7 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if meta.Status != StatusNonzero ||
+		meta.WorktreeRoot != "/workspace" ||
 		meta.ExitCode != 7 ||
 		meta.StdoutBytes != 6 ||
 		meta.StderrBytes != 7 ||
@@ -74,6 +76,55 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	}
 	if meta.EndedAt.IsZero() || meta.EndedAt.Before(meta.StartedAt) {
 		t.Fatalf("invalid run timestamps: %#v", meta)
+	}
+}
+
+func TestNewKeepsMainAndWorktreeStateRootsSeparate(t *testing.T) {
+	base := t.TempDir()
+	mainRoot := filepath.Join(base, "main")
+	worktreeRoot := filepath.Join(mainRoot, ".wt", "feature")
+	if err := os.MkdirAll(worktreeRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	mainStore, err := New(mainRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeStore, err := New(worktreeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mainStore.StateRoot() == worktreeStore.StateRoot() ||
+		mainStore.LogRoot() == worktreeStore.LogRoot() {
+		t.Fatalf(
+			"state roots overlap: main=%q/%q worktree=%q/%q",
+			mainStore.StateRoot(),
+			mainStore.LogRoot(),
+			worktreeStore.StateRoot(),
+			worktreeStore.LogRoot(),
+		)
+	}
+	mainRun, err := mainStore.Begin(Meta{WorktreeRoot: mainRoot, TaskID: "just:test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worktreeRun, err := worktreeStore.Begin(
+		Meta{WorktreeRoot: worktreeRoot, TaskID: "just:test"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := worktreeStore.Get(mainRun.Meta.RunID); err == nil {
+		t.Fatal("worktree store read a main-checkout run")
+	}
+	if _, err := mainStore.Get(worktreeRun.Meta.RunID); err == nil {
+		t.Fatal("main-checkout store read a worktree run")
+	}
+	if err := mainRun.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := worktreeRun.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
 	}
 }
 

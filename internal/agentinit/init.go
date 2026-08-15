@@ -17,6 +17,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
+	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
 
 const (
@@ -320,7 +321,7 @@ func planMCPConfig(
 		return nil, err
 	}
 	if options.WriteMCPConfig {
-		after, mergeErr := mergeMCPConfig(before, options.RunnerModes)
+		after, mergeErr := mergeMCPConfig(before, scope, options.RunnerModes)
 		if mergeErr != nil {
 			return nil, mergeErr
 		}
@@ -515,17 +516,31 @@ func confirmClaudePermissions(path string, diff string, options Options) (bool, 
 // cleanup can preserve that boundary even when the config is otherwise JMW-only.
 // Without one, dir is a standalone project and owns all generated files.
 func findScopeRoot(dir string) (string, bool, error) {
-	for current := dir; ; current = filepath.Dir(current) {
+	worktreeRoot, linked, err := workspace.ActiveWorktreeRoot(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve agent configuration worktree: %w", err)
+	}
+	start := dir
+	if linked {
+		start, err = resolveWorkspaceScope(dir)
+		if err != nil {
+			return "", false, err
+		}
+	}
+	for current := start; ; current = filepath.Dir(current) {
 		path := filepath.Join(current, mcpConfig)
-		info, err := os.Lstat(path)
-		if err == nil {
+		info, inspectErr := os.Lstat(path)
+		if inspectErr == nil {
 			if !info.Mode().IsRegular() {
 				return "", false, fmt.Errorf("mcp config %s is not a regular file", path)
 			}
-			return current, current != dir, nil
+			return current, current != start, nil
 		}
-		if !os.IsNotExist(err) {
-			return "", false, fmt.Errorf("inspect %s: %w", path, err)
+		if !os.IsNotExist(inspectErr) {
+			return "", false, fmt.Errorf("inspect %s: %w", path, inspectErr)
+		}
+		if linked && current == worktreeRoot {
+			return worktreeRoot, false, nil
 		}
 		if filepath.Dir(current) == current {
 			return dir, false, nil
@@ -536,6 +551,13 @@ func findScopeRoot(dir string) (string, bool, error) {
 // hasHigherMCPConfig reports whether removing the config at scope would expose
 // another MCP config as the boundary of the next identical invocation.
 func hasHigherMCPConfig(scope string) (bool, error) {
+	_, linked, err := workspace.ActiveWorktreeRoot(scope)
+	if err != nil {
+		return false, fmt.Errorf("resolve agent configuration worktree: %w", err)
+	}
+	if linked {
+		return false, nil
+	}
 	current := filepath.Dir(scope)
 	if current == scope {
 		return false, nil
@@ -793,7 +815,7 @@ func resolvePath(path string) (string, error) {
 
 // MCPConfigSnippet is a ready-to-paste local MCP configuration.
 func MCPConfigSnippet(selections runner.ValidatedSelections) (string, error) {
-	data, err := mergeMCPConfig(nil, selections)
+	data, err := mergeMCPConfig(nil, ".", selections)
 	if err != nil {
 		return "", err
 	}
@@ -899,7 +921,10 @@ type serverEntry struct {
 	Args    []string `json:"args"`
 }
 
-func managedServerEntry(selections runner.ValidatedSelections) (serverEntry, error) {
+func managedServerEntry(
+	root string,
+	selections runner.ValidatedSelections,
+) (serverEntry, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("resolve executable: %w", err)
@@ -908,7 +933,11 @@ func managedServerEntry(selections runner.ValidatedSelections) (serverEntry, err
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("make executable path absolute: %w", err)
 	}
-	args, err := managedServerArgs(".", selections)
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return serverEntry{}, fmt.Errorf("resolve workspace root: %w", err)
+	}
+	args, err := managedServerArgs(root, selections)
 	if err != nil {
 		return serverEntry{}, err
 	}
@@ -918,8 +947,12 @@ func managedServerEntry(selections runner.ValidatedSelections) (serverEntry, err
 // mergeMCPConfig writes the managed server entry into the configuration text.
 // Only that entry is rewritten: unrelated servers, key order, and the file's
 // own formatting are left exactly as they were.
-func mergeMCPConfig(before []byte, selections runner.ValidatedSelections) ([]byte, error) {
-	entry, err := managedServerEntry(selections)
+func mergeMCPConfig(
+	before []byte,
+	scopeRoot string,
+	selections runner.ValidatedSelections,
+) ([]byte, error) {
+	entry, err := managedServerEntry(scopeRoot, selections)
 	if err != nil {
 		return nil, err
 	}

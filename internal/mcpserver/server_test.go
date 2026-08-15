@@ -422,6 +422,52 @@ func TestRunShellCommandDefaultsToWorkspaceRoot(t *testing.T) {
 	}
 }
 
+func TestRunPersistsCanonicalLinkedWorktreeIdentity(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainDir := filepath.Join(base, "main")
+	worktreeDir := filepath.Join(base, "linked")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "feature")
+	for path, contents := range map[string]string{
+		filepath.Join(entryDir, "gitdir"):  filepath.Join(worktreeDir, ".git") + "\n",
+		filepath.Join(worktreeDir, ".git"): "gitdir: " + entryDir + "\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newShellTestServer(t, worktreeDir)
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: shellOutputCommand()},
+	)
+	if err != nil || !receipt.OK {
+		t.Fatalf("worktree run receipt = %#v, %v", receipt, err)
+	}
+	meta, err := server.store.Get(receipt.RunID)
+	if err != nil || meta.WorktreeRoot != worktreeDir || meta.CWD != worktreeDir {
+		t.Fatalf("persisted worktree metadata = %#v, %v", meta, err)
+	}
+	_, fetched, err := server.getRun(
+		context.Background(),
+		nil,
+		getRunInput{RunID: receipt.RunID},
+	)
+	if err != nil || fetched.Run.WorktreeRoot != worktreeDir {
+		t.Fatalf("fetched worktree metadata = %#v, %v", fetched.Run, err)
+	}
+	_, listed, err := server.listRuns(context.Background(), nil, listRunsInput{})
+	if err != nil || len(listed.Runs) != 1 || listed.Runs[0].WorktreeRoot != worktreeDir {
+		t.Fatalf("listed worktree runs = %#v, %v", listed.Runs, err)
+	}
+}
+
 func TestRunShellCommandCanonicalizesWorkingDirectoryBeforeRecordingHistory(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, "nested"), 0o750); err != nil {
@@ -634,6 +680,27 @@ func newShellTestServer(t *testing.T, root string) *Server {
 		t.Fatal(err)
 	}
 	return server
+}
+
+func TestNewRejectsRunStoreFromAnotherRoot(t *testing.T) {
+	registryRoot := t.TempDir()
+	storeRoot := t.TempDir()
+	runners, err := runner.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(registryRoot, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.New(storeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(workspaceRegistry, runners, store, Config{}); err == nil ||
+		!strings.Contains(err.Error(), "does not match run store root") {
+		t.Fatalf("New error = %v, want root mismatch", err)
+	}
 }
 
 func shellOutputCommand() string {

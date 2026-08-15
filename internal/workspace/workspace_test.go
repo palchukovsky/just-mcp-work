@@ -648,6 +648,124 @@ func TestDiscoverAdmitsRegisteredWorktreeWithoutWideningScan(t *testing.T) {
 	}
 }
 
+func TestActiveWorktreeRootSupportsAbsoluteAndRelativeMarkers(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		relative bool
+	}{
+		{name: "absolute"},
+		{name: "relative", relative: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			base := canonicalTempDir(t)
+			mainDir := filepath.Join(base, "main")
+			worktreeDir := filepath.Join(base, "linked")
+			writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+			writeFile(t, filepath.Join(worktreeDir, "nested", "justfile"), "worktree")
+			if testCase.relative {
+				writeRelativeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+			} else {
+				writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+			}
+
+			root, linked, err := ActiveWorktreeRoot(filepath.Join(worktreeDir, "nested"))
+			if err != nil || !linked || root != worktreeDir {
+				t.Fatalf("ActiveWorktreeRoot = %q, %t, %v, want %q, true", root, linked, err, worktreeDir)
+			}
+			registry, err := NewRegistry(
+				filepath.Join(worktreeDir, "nested"),
+				mustRunnerRegistry(t),
+				nil,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if registry.Root() != filepath.Join(worktreeDir, "nested") ||
+				registry.WorktreeRoot() != worktreeDir {
+				t.Fatalf(
+					"registry roots = %q, %q, want explicit nested root and %q identity",
+					registry.Root(),
+					registry.WorktreeRoot(),
+					worktreeDir,
+				)
+			}
+		})
+	}
+}
+
+func TestDiscoverSupportsRelativeWorktreeMarkers(t *testing.T) {
+	root := canonicalTempDir(t)
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeRelativeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{
+		"project",
+		"project/.wt/feature",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestActiveWorktreeRootRejectsMalformedAndUnsafeMarkers(t *testing.T) {
+	t.Run("malformed active marker", func(t *testing.T) {
+		worktreeDir := filepath.Join(canonicalTempDir(t), "linked")
+		writeFile(t, filepath.Join(worktreeDir, ".git"), "gitdir: first\nsecond\n")
+		if _, _, err := ActiveWorktreeRoot(worktreeDir); err == nil ||
+			!strings.Contains(err.Error(), "must contain one line") {
+			t.Fatalf("ActiveWorktreeRoot error = %v, want malformed marker error", err)
+		}
+	})
+
+	t.Run("mismatched registry back-reference", func(t *testing.T) {
+		base := canonicalTempDir(t)
+		mainDir := filepath.Join(base, "main")
+		worktreeDir := filepath.Join(base, "linked")
+		writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+		writeFile(
+			t,
+			filepath.Join(mainDir, ".git", "worktrees", "feature", "gitdir"),
+			filepath.Join(base, "other", ".git")+"\n",
+		)
+		if _, _, err := ActiveWorktreeRoot(worktreeDir); err == nil ||
+			!strings.Contains(err.Error(), "back-reference") {
+			t.Fatalf("ActiveWorktreeRoot error = %v, want unsafe back-reference error", err)
+		}
+	})
+
+	t.Run("symlink active marker", func(t *testing.T) {
+		base := canonicalTempDir(t)
+		worktreeDir := filepath.Join(base, "linked")
+		writeFile(t, filepath.Join(base, "marker"), "gitdir: invalid\n")
+		if err := os.MkdirAll(worktreeDir, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(
+			filepath.Join(base, "marker"),
+			filepath.Join(worktreeDir, ".git"),
+		); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if _, _, err := ActiveWorktreeRoot(worktreeDir); err == nil ||
+			!strings.Contains(err.Error(), "not a regular file or directory") {
+			t.Fatalf("ActiveWorktreeRoot error = %v, want symlink rejection", err)
+		}
+	})
+}
+
 func TestDiscoverRejectsRegisteredWorktreeOutsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	mainDir := filepath.Join(root, "project")
@@ -1260,6 +1378,30 @@ func writeWorktreeMarkers(t *testing.T, mainDir, worktreeDir, name string) {
 	entryDir := filepath.Join(mainDir, ".git", "worktrees", name)
 	writeFile(t, filepath.Join(entryDir, "gitdir"), filepath.Join(worktreeDir, ".git")+"\n")
 	writeFile(t, filepath.Join(worktreeDir, ".git"), "gitdir: "+entryDir+"\n")
+}
+
+func writeRelativeWorktreeMarkers(t *testing.T, mainDir, worktreeDir, name string) {
+	t.Helper()
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", name)
+	backReference, err := filepath.Rel(entryDir, filepath.Join(worktreeDir, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitDir, err := filepath.Rel(worktreeDir, entryDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(entryDir, "gitdir"), backReference+"\n")
+	writeFile(t, filepath.Join(worktreeDir, ".git"), "gitdir: "+gitDir+"\n")
+}
+
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root
 }
 
 func testRegistration(candidate runner.Runner) runner.Registration {
