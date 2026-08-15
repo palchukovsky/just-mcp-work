@@ -316,6 +316,12 @@ type projectOutput struct {
 	Status   string            `json:"status"`
 	Errors   map[string]string `json:"errors,omitempty"`
 	Warnings map[string]string `json:"warnings,omitempty"`
+	Worktree *Worktree         `json:"worktree,omitempty" jsonschema:"linked git worktree metadata"`
+}
+
+// Worktree identifies a project as a linked Git worktree.
+type Worktree struct {
+	MainCheckout string `json:"main_checkout" jsonschema:"workspace-relative main checkout path, or <outside-workspace>"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -359,10 +365,18 @@ func (s *Server) listProjects(
 				Status:   project.Status,
 				Errors:   project.Errors,
 				Warnings: project.Warnings,
+				Worktree: worktreeOutput(project.Worktree),
 			},
 		)
 	}
 	return nil, output, nil
+}
+
+func worktreeOutput(worktree *workspace.Worktree) *Worktree {
+	if worktree == nil {
+		return nil
+	}
+	return &Worktree{MainCheckout: worktree.MainCheckout}
 }
 
 func projectFilter(input listProjectsInput) (workspace.Filter, appliedFilterOutput) {

@@ -857,6 +857,70 @@ func (handlerRunner) BuildCommand(
 	return cmd, nil
 }
 
+func TestListProjectsAnnotatesLinkedWorktreeOnly(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "feature")
+	for path, content := range map[string]string{
+		filepath.Join(mainDir, "justfile"):     "main",
+		filepath.Join(worktreeDir, "justfile"): "worktree",
+		filepath.Join(entryDir, "gitdir"):      filepath.Join(worktreeDir, ".git") + "\n",
+		filepath.Join(worktreeDir, ".git"):     "gitdir: " + entryDir + "\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runners, err := runner.NewRegistry(testRegistration(handlerRunner{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.New(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(workspaceRegistry, runners, store, Config{
+		Timeout:   5 * time.Second,
+		Retention: time.Hour,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, output, err := server.listProjects(context.Background(), nil, listProjectsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects := make(map[string]projectOutput, len(output.Projects))
+	for _, project := range output.Projects {
+		projects[project.RelPath] = project
+	}
+	plain := projects["project"]
+	if plain.Worktree != nil {
+		t.Fatalf("plain project worktree annotation = %#v", plain.Worktree)
+	}
+	encodedPlain, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encodedPlain), "worktree") {
+		t.Fatalf("plain project JSON gained a worktree field: %s", encodedPlain)
+	}
+	linked := projects["project/.wt/feature"]
+	if linked.Worktree == nil || linked.Worktree.MainCheckout != "project" {
+		t.Fatalf("linked worktree annotation = %#v", linked.Worktree)
+	}
+}
+
 func testRegistration(candidate runner.Runner) runner.Registration {
 	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions())
 }

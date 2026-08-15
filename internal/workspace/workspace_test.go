@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -608,6 +609,658 @@ func TestDiscoverDoesNotDescendIntoDirectorySymlink(t *testing.T) {
 type fakeJustRunner struct{}
 
 func (fakeJustRunner) Name() string { return "just" }
+
+func TestDiscoverAdmitsRegisteredWorktreeWithoutWideningScan(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeFile(t, filepath.Join(root, ".ordinary-hidden", "justfile"), "hidden")
+	writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, pruned, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{
+		"project",
+		"project/.wt/feature",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+	if pruned.Hidden != 2 || pruned.Depth != 0 {
+		t.Fatalf("pruned = %#v, want hidden 2 and depth 0", pruned)
+	}
+	if projectAt(t, projects, "project").Worktree != nil {
+		t.Fatal("plain main checkout was annotated as a worktree")
+	}
+	worktree := projectAt(t, projects, "project/.wt/feature").Worktree
+	if worktree == nil || worktree.MainCheckout != "project" {
+		t.Fatalf("worktree annotation = %#v, want main checkout project", worktree)
+	}
+}
+
+func TestDiscoverRejectsRegisteredWorktreeOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	externalWorktree := t.TempDir()
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(externalWorktree, "justfile"), "external")
+	writeWorktreeMarkers(t, mainDir, externalWorktree, "external")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{"project"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverRejectsWorktreeWithMismatchedBackReference(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "stale")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeWorktreeMarkers(t, mainDir, worktreeDir, "stale")
+	wrongEntry := filepath.Join(mainDir, ".git", "worktrees", "other")
+	writeFile(t, filepath.Join(worktreeDir, ".git"), "gitdir: "+wrongEntry+"\n")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{"project"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverRejectsWorktreeBackReferenceThroughSymlinkAlias(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+	mainAlias := filepath.Join(root, "project-alias")
+	if err := os.Symlink(mainDir, mainAlias); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+	writeFile(
+		t,
+		filepath.Join(worktreeDir, ".git"),
+		"gitdir: "+filepath.Join(mainAlias, ".git", "worktrees", "feature")+"\n",
+	)
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{"project"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverDeduplicatesWalkedAndAdmittedWorktree(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: MaxDepthUnlimited, IncludeHidden: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{
+		"project",
+		"project/.wt/feature",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverDoesNotAnnotateWalkedWorktreeWithMismatchedBackReference(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "stale")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeWorktreeMarkers(t, mainDir, worktreeDir, "stale")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "stale")
+	wrongGitFile := filepath.Join(mainDir, ".wt", "other", ".git")
+	writeFile(t, filepath.Join(entryDir, "gitdir"), wrongGitFile+"\n")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: MaxDepthUnlimited, IncludeHidden: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{
+		"project",
+		"project/.wt/stale",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+	if worktree := projectAt(t, projects, "project/.wt/stale").Worktree; worktree != nil {
+		t.Fatalf("stale worktree annotation = %#v, want nil", worktree)
+	}
+}
+
+func TestDiscoverDoesNotAnnotateCandidateThroughSymlinkAlias(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+	candidateAlias := filepath.Join(root, "candidate-alias")
+	if err := os.Symlink(worktreeDir, candidateAlias); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "feature")
+	writeFile(t, filepath.Join(entryDir, "gitdir"), filepath.Join(candidateAlias, ".git")+"\n")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: MaxDepthUnlimited, IncludeHidden: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{
+		"project",
+		"project/.wt/feature",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+	if worktree := projectAt(t, projects, "project/.wt/feature").Worktree; worktree != nil {
+		t.Fatalf("aliased worktree annotation = %#v, want nil", worktree)
+	}
+}
+
+func TestDiscoverReturnsWorktreeDirectoryInspectionError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are required for this error path")
+	}
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	gitDir := filepath.Join(mainDir, ".git")
+	worktreesDir := filepath.Join(gitDir, "worktrees")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreesDir, "placeholder"), "metadata")
+	if err := os.Chmod(gitDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(gitDir, 0o750); err != nil {
+			t.Errorf("restore git directory permissions: %v", err)
+		}
+	})
+	if _, err := os.Lstat(worktreesDir); err == nil {
+		t.Skip("filesystem permits traversal through a mode-zero directory")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("probe worktree registry: %v", err)
+	}
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = registry.Discover(context.Background(), Filter{Path: ".", MaxDepth: 1})
+	if err == nil {
+		t.Fatal("Discover succeeded with an unreadable worktree registry")
+	}
+	if !errors.Is(err, os.ErrPermission) ||
+		!strings.Contains(err.Error(), "git worktree registry") {
+		t.Fatalf("Discover error = %v, want contextual permission error", err)
+	}
+}
+
+func TestDiscoverReturnsWorktreeMarkerReadError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are required for this error path")
+	}
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "project")
+	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+	marker := filepath.Join(mainDir, ".git", "worktrees", "feature", "gitdir")
+	if err := os.Chmod(marker, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(marker, 0o600); err != nil {
+			t.Errorf("restore registry marker permissions: %v", err)
+		}
+	})
+	if _, err := os.ReadFile(marker); err == nil {
+		t.Skip("filesystem permits reading a mode-zero file")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("probe registry marker: %v", err)
+	}
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = registry.Discover(context.Background(), Filter{Path: ".", MaxDepth: 1})
+	if err == nil {
+		t.Fatal("Discover succeeded with an unreadable registry marker")
+	}
+	if !errors.Is(err, os.ErrPermission) ||
+		!strings.Contains(err.Error(), "git worktree entry") {
+		t.Fatalf("Discover error = %v, want contextual permission error", err)
+	}
+}
+
+func TestFindReturnsWorktreeMarkerReadError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix permission bits are required for this error path")
+	}
+	root := t.TempDir()
+	worktreeDir := filepath.Join(root, "linked")
+	externalMain := t.TempDir()
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeWorktreeMarkers(t, externalMain, worktreeDir, "linked")
+	marker := filepath.Join(worktreeDir, ".git")
+	if err := os.Chmod(marker, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(marker, 0o600); err != nil {
+			t.Errorf("restore worktree marker permissions: %v", err)
+		}
+	})
+	if _, err := os.ReadFile(marker); err == nil {
+		t.Skip("filesystem permits reading a mode-zero file")
+	} else if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("probe worktree marker: %v", err)
+	}
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = registry.Find(context.Background(), "linked")
+	if err == nil {
+		t.Fatal("Find succeeded with an unreadable worktree marker")
+	}
+	if !errors.Is(err, os.ErrPermission) ||
+		!strings.Contains(err.Error(), "inspect worktree metadata") {
+		t.Fatalf("Find error = %v, want contextual permission error", err)
+	}
+}
+
+func TestFindTreatsSymlinkedMainCheckoutAsOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	externalMain := t.TempDir()
+	mainLink := filepath.Join(root, "main-link")
+	if err := os.Symlink(externalMain, mainLink); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+	worktreeDir := filepath.Join(root, "linked")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeFile(
+		t,
+		filepath.Join(worktreeDir, ".git"),
+		"gitdir: "+filepath.Join(mainLink, ".git", "worktrees", "linked")+"\n",
+	)
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := registry.Find(context.Background(), "linked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Worktree == nil ||
+		project.Worktree.MainCheckout != outsideWorkspaceMainCheckout {
+		t.Fatalf("worktree annotation = %#v, want outside workspace", project.Worktree)
+	}
+}
+
+func TestFindRejectsInternalRegistryThroughSymlink(t *testing.T) {
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "main")
+	worktreeDir := filepath.Join(root, "linked")
+	externalGitDir := t.TempDir()
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	if err := os.Symlink(externalGitDir, filepath.Join(mainDir, ".git")); err != nil {
+		t.Skipf("cannot create directory symlink: %v", err)
+	}
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeFile(
+		t,
+		filepath.Join(externalGitDir, "worktrees", "linked", "gitdir"),
+		filepath.Join(worktreeDir, ".git")+"\n",
+	)
+	writeFile(
+		t,
+		filepath.Join(worktreeDir, ".git"),
+		"gitdir: "+filepath.Join(mainDir, ".git", "worktrees", "linked")+"\n",
+	)
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := registry.Find(context.Background(), "linked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Worktree != nil {
+		t.Fatalf("worktree annotation = %#v, want nil", project.Worktree)
+	}
+}
+
+func TestDiscoverUsesWindowsFilesystemIdentityForWorktreePaths(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows case-insensitive path identity is required")
+	}
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "ProjectCase")
+	worktreeDir := filepath.Join(mainDir, ".wt", "FeatureCase")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "FeatureCase")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeFile(
+		t,
+		filepath.Join(entryDir, "gitdir"),
+		strings.ToUpper(filepath.Join(worktreeDir, ".git"))+"\n",
+	)
+	writeFile(
+		t,
+		filepath.Join(worktreeDir, ".git"),
+		"gitdir: "+strings.ToUpper(entryDir)+"\n",
+	)
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: MaxDepthUnlimited, IncludeHidden: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{
+		"ProjectCase",
+		"ProjectCase/.wt/FeatureCase",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+	worktree := projectAt(t, projects, "ProjectCase/.wt/FeatureCase").Worktree
+	if worktree == nil || worktree.MainCheckout != "ProjectCase" {
+		t.Fatalf("worktree annotation = %#v, want main checkout ProjectCase", worktree)
+	}
+}
+
+func TestWindowsPathResolutionRejectsAmbiguousCaseFold(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows case-fold resolution is required")
+	}
+	root := t.TempDir()
+	parent := filepath.Join(root, "parent")
+	upperVariant := filepath.Join(parent, "Feature")
+	lowerVariant := filepath.Join(parent, "feature")
+	if err := os.MkdirAll(upperVariant, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(lowerVariant, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	upperInfo, err := os.Lstat(upperVariant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lowerInfo, err := os.Lstat(lowerVariant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(upperInfo, lowerInfo) {
+		t.Skip("temporary directory is not case-sensitive")
+	}
+
+	resolver := newPathResolver(context.Background())
+	resolved, state, err := resolver.resolveWithin(
+		parent,
+		upperVariant,
+		resolvedDirectory,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != pathResolved || resolved != upperVariant {
+		t.Fatalf("exact path resolution = (%q, %d), want %q", resolved, state, upperVariant)
+	}
+	ambiguous := filepath.Join(parent, "FEATURE")
+	resolved, state, err = resolver.resolveWithin(parent, ambiguous, resolvedDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state != pathAmbiguous || resolved != "" {
+		t.Fatalf("folded path resolution = (%q, %d), want ambiguous", resolved, state)
+	}
+}
+
+func TestFindRejectsAlternateCaseGitRegistryComponentsOnCaseSensitiveWindows(
+	t *testing.T,
+) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows case-sensitive path identity is required")
+	}
+	testCases := []struct {
+		canonicalParent func(string) string
+		alternateParent func(string) string
+		entryDir        func(string) string
+		name            string
+	}{
+		{
+			name: "git directory",
+			canonicalParent: func(mainDir string) string {
+				return filepath.Join(mainDir, ".git")
+			},
+			alternateParent: func(mainDir string) string {
+				return filepath.Join(mainDir, ".GIT")
+			},
+			entryDir: func(mainDir string) string {
+				return filepath.Join(mainDir, ".GIT", "worktrees", "linked")
+			},
+		},
+		{
+			name: "worktrees directory",
+			canonicalParent: func(mainDir string) string {
+				return filepath.Join(mainDir, ".git", "worktrees")
+			},
+			alternateParent: func(mainDir string) string {
+				return filepath.Join(mainDir, ".git", "WORKTREES")
+			},
+			entryDir: func(mainDir string) string {
+				return filepath.Join(mainDir, ".git", "WORKTREES", "linked")
+			},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			mainDir := filepath.Join(root, "main")
+			worktreeDir := filepath.Join(root, "linked")
+			canonicalParent := testCase.canonicalParent(mainDir)
+			alternateParent := testCase.alternateParent(mainDir)
+			canonicalRegistry := filepath.Join(mainDir, ".git", "worktrees")
+			if err := os.MkdirAll(canonicalRegistry, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(testCase.entryDir(mainDir), 0o750); err != nil {
+				t.Fatal(err)
+			}
+			canonicalInfo, err := os.Lstat(canonicalParent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			alternateInfo, err := os.Lstat(alternateParent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if os.SameFile(canonicalInfo, alternateInfo) {
+				t.Skip("temporary directory is not case-sensitive")
+			}
+			writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+			writeFile(
+				t,
+				filepath.Join(testCase.entryDir(mainDir), "gitdir"),
+				filepath.Join(worktreeDir, ".git")+"\n",
+			)
+			writeFile(
+				t,
+				filepath.Join(worktreeDir, ".git"),
+				"gitdir: "+testCase.entryDir(mainDir)+"\n",
+			)
+
+			registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, err := registry.Find(context.Background(), "linked")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if project.Worktree != nil {
+				t.Fatalf("worktree annotation = %#v, want nil", project.Worktree)
+			}
+		})
+	}
+}
+
+func TestDiscoverRejectsAlternateCaseWorktreeMarkerOnCaseSensitiveWindows(
+	t *testing.T,
+) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows case-sensitive path identity is required")
+	}
+	root := t.TempDir()
+	mainDir := filepath.Join(root, "main")
+	worktreeDir := filepath.Join(mainDir, ".wt", "linked")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "linked")
+	canonicalMarker := filepath.Join(worktreeDir, ".git")
+	alternateMarker := filepath.Join(worktreeDir, ".GIT")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, canonicalMarker, "gitdir: "+entryDir+"\n")
+	writeFile(t, alternateMarker, "gitdir: "+entryDir+"\n")
+	canonicalInfo, err := os.Lstat(canonicalMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alternateInfo, err := os.Lstat(alternateMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(canonicalInfo, alternateInfo) {
+		t.Skip("temporary directory is not case-sensitive")
+	}
+	writeFile(t, filepath.Join(entryDir, "gitdir"), alternateMarker+"\n")
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: "main", MaxDepth: 0},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{"main"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+}
+
+func TestFindAnnotatesWorktreeWhoseMainCheckoutIsOutsideWorkspace(t *testing.T) {
+	root := t.TempDir()
+	worktreeDir := filepath.Join(root, "linked")
+	externalMain := t.TempDir()
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeFile(
+		t,
+		filepath.Join(worktreeDir, ".git"),
+		"gitdir: "+filepath.Join(externalMain, ".git", "worktrees", "linked")+"\n",
+	)
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := registry.Find(context.Background(), "linked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Worktree == nil ||
+		project.Worktree.MainCheckout != outsideWorkspaceMainCheckout {
+		t.Fatalf("worktree annotation = %#v", project.Worktree)
+	}
+}
+
+func writeWorktreeMarkers(t *testing.T, mainDir, worktreeDir, name string) {
+	t.Helper()
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", name)
+	writeFile(t, filepath.Join(entryDir, "gitdir"), filepath.Join(worktreeDir, ".git")+"\n")
+	writeFile(t, filepath.Join(worktreeDir, ".git"), "gitdir: "+entryDir+"\n")
+}
 
 func testRegistration(candidate runner.Runner) runner.Registration {
 	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions())

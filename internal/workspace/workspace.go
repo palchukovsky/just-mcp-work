@@ -30,6 +30,7 @@ type Project struct {
 	// itself being broken, such as a build tool that is missing on this host.
 	// They keep the project status "ready".
 	Warnings map[string]string `json:"warnings,omitempty"`
+	Worktree *Worktree         `json:"worktree,omitempty"`
 	Tasks    map[string][]runner.Task
 	Dir      string
 }
@@ -112,6 +113,23 @@ func (r *Registry) Discover(ctx context.Context, filter Filter) ([]Project, Prun
 	}
 
 	projects := make([]Project, 0)
+	inspected := make(map[string]struct{})
+	resolver := newPathResolver(ctx)
+	inspectProject := func(dir string) error {
+		dir = filepath.Clean(dir)
+		if _, found := inspected[dir]; found {
+			return nil
+		}
+		inspected[dir] = struct{}{}
+		project, found, inspectErr := r.inspect(ctx, dir, resolver)
+		if inspectErr != nil {
+			return inspectErr
+		}
+		if found {
+			projects = append(projects, project)
+		}
+		return nil
+	}
 	pruned := Pruned{}
 	err = filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -143,12 +161,17 @@ func (r *Registry) Discover(ctx context.Context, filter Filter) ([]Project, Prun
 			return filepath.SkipDir
 		}
 
-		project, found, inspectErr := r.inspect(ctx, path)
-		if inspectErr != nil {
+		if inspectErr := inspectProject(path); inspectErr != nil {
 			return inspectErr
 		}
-		if found {
-			projects = append(projects, project)
+		worktreeDirs, worktreeErr := r.registeredWorktreeDirs(ctx, path, base, resolver)
+		if worktreeErr != nil {
+			return worktreeErr
+		}
+		for _, worktreeDir := range worktreeDirs {
+			if inspectErr := inspectProject(worktreeDir); inspectErr != nil {
+				return inspectErr
+			}
 		}
 		return nil
 	})
@@ -349,7 +372,11 @@ func (r *Registry) ResolveDir(relPath string) (string, error) {
 	return path, nil
 }
 
-func (r *Registry) inspect(ctx context.Context, dir string) (Project, bool, error) {
+func (r *Registry) inspect(
+	ctx context.Context,
+	dir string,
+	resolver *pathResolver,
+) (Project, bool, error) {
 	rel, err := filepath.Rel(r.root, dir)
 	if err != nil {
 		return Project{}, false, fmt.Errorf("resolve project path: %w", err)
@@ -363,9 +390,9 @@ func (r *Registry) inspect(ctx context.Context, dir string) (Project, bool, erro
 		Tasks:   make(map[string][]runner.Task),
 	}
 	for _, candidate := range r.runners.All() {
-		detected, err := candidate.Detect(dir)
-		if err != nil {
-			project.addIssue(candidate.Name(), err)
+		detected, detectErr := candidate.Detect(dir)
+		if detectErr != nil {
+			project.addIssue(candidate.Name(), detectErr)
 			continue
 		}
 		if !detected {
@@ -375,16 +402,27 @@ func (r *Registry) inspect(ctx context.Context, dir string) (Project, bool, erro
 		// A runner may report the tasks it did discover together with the
 		// failure of the rest, so the usable part of a project survives one
 		// unusable task file.
-		tasks, err := candidate.ListTasks(ctx, dir)
-		if err != nil {
-			project.addIssue(candidate.Name(), err)
+		tasks, listErr := candidate.ListTasks(ctx, dir)
+		if listErr != nil {
+			project.addIssue(candidate.Name(), listErr)
 		}
-		if err == nil || len(tasks) > 0 {
+		if listErr == nil || len(tasks) > 0 {
 			project.Tasks[candidate.Name()] = tasks
 		}
 	}
 	if project.empty() {
 		return Project{}, false, nil
+	}
+	worktree, linked, worktreeErr := r.linkedWorktree(dir, resolver)
+	if worktreeErr != nil {
+		return Project{}, false, fmt.Errorf(
+			"inspect worktree metadata for %q: %w",
+			dir,
+			worktreeErr,
+		)
+	}
+	if linked {
+		project.Worktree = &worktree
 	}
 	if len(project.Errors) > 0 {
 		project.Status = "error"
