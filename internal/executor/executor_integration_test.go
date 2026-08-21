@@ -29,7 +29,8 @@ func TestExecuteCapturesSuccessAndNonzero(t *testing.T) {
 		{name: "nonzero", mode: "nonzero", ok: false, code: 7},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			store, err := runstore.New(t.TempDir())
+			root := t.TempDir()
+			store, err := runstore.NewForWorktree(root, root)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -63,7 +64,8 @@ func TestExecuteCapturesSuccessAndNonzero(t *testing.T) {
 }
 
 func TestExecuteCancellation(t *testing.T) {
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +95,7 @@ func TestExecuteCancellation(t *testing.T) {
 
 func TestExecutePreCancelledDoesNotStartProcess(t *testing.T) {
 	root := t.TempDir()
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -114,9 +114,13 @@ func (c *Collector) recent() ([]runstore.Meta, error) {
 		generation := c.generation
 		c.mu.Unlock()
 
-		runs, err := c.store.ListRecent(maxScannedRuns)
+		page, err := c.store.ListRecent(maxScannedRuns)
 		if err != nil {
 			return nil, fmt.Errorf("list recent runs: %w", err)
+		}
+		runs := make([]runstore.Meta, len(page.Runs))
+		for index, recent := range page.Runs {
+			runs[index] = recent.Meta
 		}
 
 		c.mu.Lock()

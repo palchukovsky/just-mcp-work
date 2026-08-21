@@ -5,10 +5,13 @@
 package runstore
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,17 +20,25 @@ import (
 
 //nolint:gocyclo,govet // This end-to-end test keeps metadata and paging assertions together.
 func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
-	store, err := New(t.TempDir())
+	worktreeRoot := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(worktreeRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	worktreeRoot, err := filepath.EvalSymlinks(worktreeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewForWorktree(t.TempDir(), worktreeRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	handle, err := store.Begin(Meta{
-		WorktreeRoot: "/workspace",
+		WorktreeRoot: filepath.Join(t.TempDir(), "wrong-worktree"),
 		ProjectPath:  "project",
 		Runner:       "just",
 		TaskID:       "just:test",
 		Args:         []string{"one"},
-		CWD:          "/workspace",
+		CWD:          worktreeRoot,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -67,7 +78,7 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	if meta.Status != StatusNonzero ||
-		meta.WorktreeRoot != "/workspace" ||
+		meta.WorktreeRoot != worktreeRoot ||
 		meta.ExitCode != 7 ||
 		meta.StdoutBytes != 6 ||
 		meta.StderrBytes != 7 ||
@@ -79,6 +90,129 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The table checks direct and paged reads for each identity state.
+func TestStoreRequiresMatchingPersistedWorktreeIdentity(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		mutate    func(map[string]any, string)
+		wantError string
+	}{
+		{
+			name: "missing",
+			mutate: func(metadata map[string]any, _ string) {
+				delete(metadata, "worktree_root")
+			},
+			wantError: "missing required worktree_root",
+		},
+		{
+			name: "mismatched",
+			mutate: func(metadata map[string]any, root string) {
+				metadata["worktree_root"] = filepath.Join(root, "other-worktree")
+			},
+			wantError: "does not match store worktree root",
+		},
+		{
+			name:   "matching",
+			mutate: func(map[string]any, string) {},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := NewForWorktree(root, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := store.Begin(Meta{
+				WorktreeRoot: filepath.Join(root, "caller-supplied"),
+				TaskID:       "just:identity",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if handle.Meta.WorktreeRoot != store.WorktreeRoot() {
+				t.Fatalf(
+					"begin worktree root = %q, want store identity %q",
+					handle.Meta.WorktreeRoot,
+					store.WorktreeRoot(),
+				)
+			}
+			if _, writeErr := handle.Stdout().Write([]byte("identity-output")); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			if finishErr := handle.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+				t.Fatal(finishErr)
+			}
+			metaPath := filepath.Join(store.LogRoot(), handle.Meta.RunID, "meta.json")
+			data, err := os.ReadFile(metaPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var metadata map[string]any
+			if decodeErr := json.Unmarshal(data, &metadata); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			testCase.mutate(metadata, root)
+			data, err = json.Marshal(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if writeErr := os.WriteFile(metaPath, data, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+
+			_, _, existingErr := store.existingRun(handle.Meta.RunID)
+			meta, getErr := store.Get(handle.Meta.RunID)
+			page, listErr := store.ListRecent(10)
+			log, readErr := store.ReadLog(handle.Meta.RunID, "stdout", 0, 64)
+			tail, tailErr := store.ReadLogTail(handle.Meta.RunID, "stdout", 64)
+			state, stateErr := store.LogState(handle.Meta.RunID)
+			zeroTail, zeroTailErr := store.ReadLogTail(handle.Meta.RunID, "stdout", 0)
+			if zeroTailErr != nil || zeroTail != nil {
+				t.Fatalf("zero-byte tail = %q, %v", zeroTail, zeroTailErr)
+			}
+			if testCase.wantError == "" {
+				if existingErr != nil || getErr != nil || listErr != nil ||
+					readErr != nil || tailErr != nil || stateErr != nil ||
+					meta.WorktreeRoot != store.WorktreeRoot() || len(page.Runs) != 1 ||
+					page.Runs[0].Meta.WorktreeRoot != store.WorktreeRoot() ||
+					string(log) != "identity-output" || string(tail) != "identity-output" ||
+					state.StdoutBytes != int64(len("identity-output")) {
+					t.Fatalf(
+						"matching reads = %#v, %#v, %q, %q, %#v, %v, %v, %v, %v, %v, %v",
+						meta,
+						page,
+						log,
+						tail,
+						state,
+						existingErr,
+						getErr,
+						listErr,
+						readErr,
+						tailErr,
+						stateErr,
+					)
+				}
+				return
+			}
+			if listErr != nil || len(page.Runs) != 0 ||
+				page.Scanned != 1 || page.SkippedIdentity != 1 {
+				t.Fatalf("ListRecent = %#v, %v, want one identity skip", page, listErr)
+			}
+			for method, methodErr := range map[string]error{
+				"existingRun": existingErr,
+				"Get":         getErr,
+				"ReadLog":     readErr,
+				"ReadLogTail": tailErr,
+				"LogState":    stateErr,
+			} {
+				if methodErr == nil || !strings.Contains(methodErr.Error(), testCase.wantError) {
+					t.Errorf("%s error = %v, want %q", method, methodErr, testCase.wantError)
+				}
+			}
+		})
+	}
+}
+
 func TestNewKeepsMainAndWorktreeStateRootsSeparate(t *testing.T) {
 	base := t.TempDir()
 	mainRoot := filepath.Join(base, "main")
@@ -86,11 +220,11 @@ func TestNewKeepsMainAndWorktreeStateRootsSeparate(t *testing.T) {
 	if err := os.MkdirAll(worktreeRoot, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	mainStore, err := New(mainRoot)
+	mainStore, err := NewForWorktree(mainRoot, mainRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
-	worktreeStore, err := New(worktreeRoot)
+	worktreeStore, err := NewForWorktree(worktreeRoot, worktreeRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +264,7 @@ func TestNewKeepsMainAndWorktreeStateRootsSeparate(t *testing.T) {
 
 func TestCleanupSkipsRunningRunOwnedByAnotherLiveStore(t *testing.T) {
 	root := t.TempDir()
-	store, err := New(root)
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +277,7 @@ func TestCleanupSkipsRunningRunOwnedByAnotherLiveStore(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	otherStore, err := New(root)
+	otherStore, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +293,8 @@ func TestCleanupSkipsRunningRunOwnedByAnotherLiveStore(t *testing.T) {
 }
 
 func TestReadLogValidatesPagingAndPath(t *testing.T) {
-	store, err := New(t.TempDir())
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +313,8 @@ func TestReadLogValidatesPagingAndPath(t *testing.T) {
 }
 
 func TestReadLogTailAndLogState(t *testing.T) {
-	store, err := New(t.TempDir())
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +342,8 @@ func TestReadLogTailAndLogState(t *testing.T) {
 }
 
 func TestListRecentSkipsInvalidNewerEntries(t *testing.T) {
-	store, err := New(t.TempDir())
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,19 +363,22 @@ func TestListRecentSkipsInvalidNewerEntries(t *testing.T) {
 			t.Fatal(mkdirErr)
 		}
 	}
-	runs, err := store.ListRecent(1)
-	if err != nil || len(runs) != 1 || runs[0].RunID != valid.Meta.RunID {
-		t.Fatalf("ListRecent = %#v, %v, want the older valid run", runs, err)
+	page, err := store.ListRecent(1)
+	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.RunID != valid.Meta.RunID ||
+		page.Scanned != 3 || page.SkippedIdentity != 0 {
+		t.Fatalf("ListRecent = %#v, %v, want the older valid run", page, err)
 	}
 }
 
+//nolint:gocyclo // The two pages and identity skip form one pagination scenario.
 func TestListRecentPageUsesExclusiveCursor(t *testing.T) {
-	store, err := New(t.TempDir())
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var ids []string
-	for range 2 {
+	for range 3 {
 		handle, beginErr := store.Begin(Meta{TaskID: "just:page"})
 		if beginErr != nil {
 			t.Fatal(beginErr)
@@ -248,21 +388,71 @@ func TestListRecentPageUsesExclusiveCursor(t *testing.T) {
 		}
 		ids = append(ids, handle.Meta.RunID)
 	}
-	first, more, err := store.ListRecentPage(1, "")
-	if err != nil || !more || len(first) != 1 || first[0].RunID != ids[1] {
-		t.Fatalf("first page = %#v, more=%t, err=%v", first, more, err)
+	mutatePersistedMetadata(
+		t,
+		filepath.Join(store.LogRoot(), ids[1], "meta.json"),
+		func(metadata map[string]any) {
+			metadata["worktree_root"] = filepath.Join(root, "foreign-worktree")
+		},
+	)
+
+	first, err := store.ListRecentPage(1, "")
+	if err != nil || !first.More || len(first.Runs) != 1 ||
+		first.Runs[0].Meta.RunID != ids[2] || first.Scanned != 1 ||
+		first.SkippedIdentity != 0 {
+		t.Fatalf("first page = %#v, err=%v", first, err)
 	}
-	second, more, err := store.ListRecentPage(1, first[0].RunID)
-	if err != nil || more || len(second) != 1 || second[0].RunID != ids[0] {
-		t.Fatalf("second page = %#v, more=%t, err=%v", second, more, err)
+	second, err := store.ListRecentPage(1, first.Runs[0].Meta.RunID)
+	if err != nil || second.More || len(second.Runs) != 1 ||
+		second.Runs[0].Meta.RunID != ids[0] || second.Scanned != 2 ||
+		second.SkippedIdentity != 1 {
+		t.Fatalf("second page = %#v, err=%v", second, err)
 	}
-	if _, _, err := store.ListRecentPage(1, "not-a-run"); err == nil {
+	if _, err := store.ListRecentPage(1, "not-a-run"); err == nil {
 		t.Fatal("invalid cursor was accepted")
 	}
 }
 
+func TestListRecentPageIncludesTrailingIdentitySkipsWithoutMore(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		handle, beginErr := store.Begin(Meta{TaskID: "just:foreign"})
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if finishErr := handle.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+			t.Fatal(finishErr)
+		}
+		mutatePersistedMetadata(
+			t,
+			filepath.Join(store.LogRoot(), handle.Meta.RunID, "meta.json"),
+			func(metadata map[string]any) {
+				metadata["worktree_root"] = filepath.Join(root, "foreign-worktree")
+			},
+		)
+	}
+	valid, err := store.Begin(Meta{TaskID: "just:valid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishErr := valid.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+		t.Fatal(finishErr)
+	}
+
+	page, err := store.ListRecentPage(1, "")
+	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.RunID != valid.Meta.RunID ||
+		page.More || page.Scanned != 3 || page.SkippedIdentity != 2 {
+		t.Fatalf("ListRecentPage = %#v, %v, want one run and two trailing identity skips", page, err)
+	}
+}
+
 func TestCleanupSkipsActiveAndDeletesFinishedStaleRun(t *testing.T) {
-	store, err := New(t.TempDir())
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +489,7 @@ func TestCleanupSkipsActiveAndDeletesFinishedStaleRun(t *testing.T) {
 
 func TestCleanupDeletesStaleRunningRunAfterRestart(t *testing.T) {
 	root := t.TempDir()
-	store, err := New(root)
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +514,7 @@ func TestCleanupDeletesStaleRunningRunAfterRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	restarted, err := New(root)
+	restarted, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +528,8 @@ func TestCleanupDeletesStaleRunningRunAfterRestart(t *testing.T) {
 
 //nolint:govet // This test keeps cleanup setup and assertions together.
 func TestCleanupDoesNotFollowSymlinks(t *testing.T) {
-	store, err := New(t.TempDir())
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +569,8 @@ func TestCleanupDoesNotFollowSymlinks(t *testing.T) {
 }
 
 func TestReadLogRefusesSymlinkedRunDirectory(t *testing.T) {
-	store, err := New(t.TempDir())
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,5 +591,265 @@ func TestReadLogRefusesSymlinkedRunDirectory(t *testing.T) {
 	}
 	if _, err := store.Get(runID); err == nil {
 		t.Fatal("Get followed a symlinked run directory")
+	}
+}
+
+func TestCleanupAppliesRetentionToPersistedWorktreeIdentityMismatch(t *testing.T) {
+	for _, testCase := range []struct {
+		mutate  func(map[string]any, string)
+		name    string
+		expired bool
+	}{
+		{
+			name: "missing/expired",
+			mutate: func(metadata map[string]any, _ string) {
+				delete(metadata, "worktree_root")
+			},
+			expired: true,
+		},
+		{
+			name: "missing/unexpired",
+			mutate: func(metadata map[string]any, _ string) {
+				delete(metadata, "worktree_root")
+			},
+		},
+		{
+			name: "foreign/expired",
+			mutate: func(metadata map[string]any, root string) {
+				metadata["worktree_root"] = filepath.Join(root, "other-worktree")
+			},
+			expired: true,
+		},
+		{
+			name: "foreign/unexpired",
+			mutate: func(metadata map[string]any, root string) {
+				metadata["worktree_root"] = filepath.Join(root, "other-worktree")
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			store, err := NewForWorktree(root, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err := store.Begin(Meta{TaskID: "just:cleanup-identity"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if finishErr := handle.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+				t.Fatal(finishErr)
+			}
+			if testCase.expired {
+				handle.Meta.EndedAt = time.Now().UTC().Add(-2 * time.Hour)
+			} else {
+				handle.Meta.EndedAt = time.Now().UTC().Add(-30 * time.Minute)
+			}
+			if writeErr := store.writeMeta(handle.dir, handle.Meta); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			metaPath := filepath.Join(handle.dir, "meta.json")
+			mutatePersistedMetadata(t, metaPath, func(metadata map[string]any) {
+				testCase.mutate(metadata, root)
+			})
+
+			if cleanupErr := store.Cleanup(time.Hour); cleanupErr != nil {
+				t.Fatalf("Cleanup error = %v", cleanupErr)
+			}
+			_, statErr := os.Stat(handle.dir)
+			if testCase.expired {
+				if !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("expired identity-invalid run remains: %v", statErr)
+				}
+			} else if statErr != nil {
+				t.Fatalf("unexpired identity-invalid run was removed: %v", statErr)
+			}
+		})
+	}
+}
+
+//nolint:gocyclo // Each public handle write path must assert the same durable identity invariant.
+func TestHandleRejectsWorktreeIdentityMutation(t *testing.T) {
+	t.Run("running", func(t *testing.T) {
+		root := t.TempDir()
+		store, err := NewForWorktree(root, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := store.Begin(Meta{TaskID: "just:running-identity"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle.Meta.WorktreeRoot = filepath.Join(store.Root(), "spoofed")
+		persistErr := handle.PersistRunning()
+		if persistErr == nil || !strings.Contains(persistErr.Error(), "does not match") {
+			t.Fatalf("PersistRunning error = %v", persistErr)
+		}
+		persisted, err := readMeta(filepath.Join(handle.dir, "meta.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.WorktreeRoot != store.WorktreeRoot() {
+			t.Fatalf("persisted worktree root = %q", persisted.WorktreeRoot)
+		}
+		handle.Meta.WorktreeRoot = store.WorktreeRoot()
+		if finishErr := handle.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+			t.Fatal(finishErr)
+		}
+	})
+
+	t.Run("terminal-republish", func(t *testing.T) {
+		root := t.TempDir()
+		store, err := NewForWorktree(root, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := store.Begin(Meta{TaskID: "just:terminal-identity"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if finishErr := handle.Finish(StatusOK, 0, "", false, false); finishErr != nil {
+			t.Fatal(finishErr)
+		}
+		handle.Meta.WorktreeRoot = filepath.Join(store.Root(), "spoofed")
+		handle.Meta.Error = "must not persist"
+		persistErr := handle.PersistFinal()
+		if persistErr == nil || !strings.Contains(persistErr.Error(), "does not match") {
+			t.Fatalf("PersistFinal error = %v", persistErr)
+		}
+		persisted, err := readMeta(filepath.Join(handle.dir, "meta.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.WorktreeRoot != store.WorktreeRoot() || persisted.Error != "" {
+			t.Fatalf("persisted metadata = %#v", persisted)
+		}
+	})
+
+	t.Run("finish", func(t *testing.T) {
+		root := t.TempDir()
+		store, err := NewForWorktree(root, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := store.Begin(Meta{TaskID: "just:finish-identity"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle.Meta.WorktreeRoot = filepath.Join(store.Root(), "spoofed")
+		finishErr := handle.Finish(StatusOK, 0, "", false, false)
+		if finishErr == nil || !errors.Is(finishErr, ErrFinalMetadataPersistence) ||
+			!strings.Contains(finishErr.Error(), "does not match") {
+			t.Fatalf("Finish error = %v", finishErr)
+		}
+		persisted, err := readMeta(filepath.Join(handle.dir, "meta.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.WorktreeRoot != store.WorktreeRoot() || persisted.Status != StatusRunning {
+			t.Fatalf("persisted metadata = %#v", persisted)
+		}
+	})
+}
+
+func TestNewForWorktreeValidatesIdentityBeforeCreatingState(t *testing.T) {
+	identityRoot := t.TempDir()
+	fileIdentity := filepath.Join(identityRoot, "identity-file")
+	if err := os.WriteFile(fileIdentity, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlinkIdentity := filepath.Join(identityRoot, "identity-link")
+	if err := os.Symlink(identityRoot, symlinkIdentity); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	for _, testCase := range []struct {
+		name     string
+		identity string
+	}{
+		{name: "missing", identity: filepath.Join(identityRoot, "missing")},
+		{name: "regular-file", identity: fileIdentity},
+		{name: "symlink", identity: symlinkIdentity},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			stateOwner := t.TempDir()
+			if _, err := NewForWorktree(stateOwner, testCase.identity); err == nil {
+				t.Fatal("invalid worktree identity was accepted")
+			}
+			if _, err := os.Lstat(filepath.Join(stateOwner, stateDirName)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("state was created before identity validation: %v", err)
+			}
+		})
+	}
+
+	stateOwner := t.TempDir()
+	store, err := NewForWorktree(stateOwner, identityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalIdentity, err := filepath.EvalSymlinks(identityRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.WorktreeRoot() != canonicalIdentity {
+		t.Fatalf("worktree root = %q, want %q", store.WorktreeRoot(), canonicalIdentity)
+	}
+	if _, err := os.Stat(store.LogRoot()); err != nil {
+		t.Fatalf("valid identity did not create state: %v", err)
+	}
+}
+
+func TestReadMetaRejectsFileAboveSizeLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "meta.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Truncate(path, int64(maxMetadataBytes)+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readMeta(path); err == nil ||
+		!strings.Contains(err.Error(), strconv.Quote(path)) ||
+		!strings.Contains(err.Error(), "65536-byte limit") {
+		t.Fatalf("readMeta error = %v, want path and %d-byte limit", err, maxMetadataBytes)
+	}
+}
+
+func TestBeginRejectsMetadataAboveSizeLimitBeforePublishingRun(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{Args: []string{strings.Repeat("x", maxMetadataBytes)}})
+	if handle != nil || err == nil ||
+		!strings.Contains(err.Error(), "run metadata size ") ||
+		!strings.Contains(err.Error(), "exceeds 65536-byte limit") {
+		t.Fatalf("Begin = %#v, %v, want explicit metadata size error", handle, err)
+	}
+	entries, readErr := os.ReadDir(store.LogRoot())
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("oversized Begin published run entries: %#v", entries)
+	}
+}
+
+func mutatePersistedMetadata(t *testing.T, path string, mutate func(map[string]any)) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if decodeErr := json.Unmarshal(data, &metadata); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	mutate(metadata)
+	data, err = json.Marshal(metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

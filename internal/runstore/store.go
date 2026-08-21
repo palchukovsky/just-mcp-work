@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	stateDirName = ".just-mcp-work"
-	logDirName   = "log"
+	stateDirName     = ".just-mcp-work"
+	logDirName       = "log"
+	maxMetadataBytes = 64 * 1024
 )
 
 // Status describes the terminal state of a task process.
@@ -84,32 +85,83 @@ type LogState struct {
 //
 //nolint:govet // Field order keeps synchronization state next to the active-run map.
 type Store struct {
-	root      string
-	stateRoot string
-	logRoot   string
-	mu        sync.Mutex
-	active    map[string]struct{}
+	root         string
+	worktreeRoot string
+	stateRoot    string
+	logRoot      string
+	mu           sync.Mutex
+	active       map[string]struct{}
 }
 
-// New creates the state and log directories below root.
-func New(root string) (*Store, error) {
+// RecentRun is a valid ledger entry with cumulative scan accounting through it.
+// Callers issuing a cursor for Meta must report Scanned and SkippedIdentity from
+// this entry so scan work after the cursor remains attributable to a later page.
+type RecentRun struct {
+	Meta            Meta
+	Scanned         int
+	SkippedIdentity int
+}
+
+// RecentPage contains valid ledger entries and page-local scan accounting.
+// Callers that issue no continuation cursor must report the page-level Scanned
+// and SkippedIdentity totals, including trailing identity-invalid entries after
+// the last valid run; callers cursoring at a RecentRun use that entry's totals.
+type RecentPage struct {
+	Runs            []RecentRun
+	Scanned         int
+	SkippedIdentity int
+	More            bool
+}
+
+// NewForWorktree creates the state and log directories below root and binds their identity.
+// The worktree root must already exist as a non-symlink directory; a missing root is not created.
+func NewForWorktree(root, worktreeRoot string) (*Store, error) {
+	if worktreeRoot == "" {
+		return nil, fmt.Errorf("worktree root is required")
+	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run-store root: %w", err)
 	}
+	absWorktreeRoot, err := filepath.Abs(worktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve run-store worktree root: %w", err)
+	}
+	worktreeInfo, err := os.Lstat(absWorktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("inspect run-store worktree root: %w", err)
+	}
+	if worktreeInfo.Mode()&os.ModeSymlink != 0 || !worktreeInfo.IsDir() {
+		return nil, fmt.Errorf("run-store worktree root %q is not a non-symlink directory", absWorktreeRoot)
+	}
+	canonicalWorktreeRoot, err := filepath.EvalSymlinks(absWorktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve canonical run-store worktree root: %w", err)
+	}
+	canonicalInfo, err := os.Lstat(canonicalWorktreeRoot)
+	if err != nil {
+		return nil, fmt.Errorf("inspect canonical run-store worktree root: %w", err)
+	}
+	if canonicalInfo.Mode()&os.ModeSymlink != 0 || !canonicalInfo.IsDir() {
+		return nil, fmt.Errorf(
+			"canonical run-store worktree root %q is not a non-symlink directory",
+			canonicalWorktreeRoot,
+		)
+	}
 	stateRoot := filepath.Join(absRoot, stateDirName)
-	if err := makeSafeDir(stateRoot); err != nil {
-		return nil, fmt.Errorf("create state root: %w", err)
+	if makeErr := makeSafeDir(stateRoot); makeErr != nil {
+		return nil, fmt.Errorf("create state root: %w", makeErr)
 	}
 	logRoot := filepath.Join(stateRoot, logDirName)
-	if err := makeSafeDir(logRoot); err != nil {
-		return nil, fmt.Errorf("create log root: %w", err)
+	if makeErr := makeSafeDir(logRoot); makeErr != nil {
+		return nil, fmt.Errorf("create log root: %w", makeErr)
 	}
 	return &Store{
-		root:      filepath.Clean(absRoot),
-		stateRoot: stateRoot,
-		logRoot:   logRoot,
-		active:    make(map[string]struct{}),
+		root:         filepath.Clean(absRoot),
+		worktreeRoot: filepath.Clean(canonicalWorktreeRoot),
+		stateRoot:    stateRoot,
+		logRoot:      logRoot,
+		active:       make(map[string]struct{}),
 	}, nil
 }
 
@@ -122,13 +174,17 @@ func (s *Store) LogRoot() string { return s.logRoot }
 // Root returns the workspace root that owns this store.
 func (s *Store) Root() string { return s.root }
 
+// WorktreeRoot returns the canonical worktree identity bound to this store.
+func (s *Store) WorktreeRoot() string { return s.worktreeRoot }
+
 // Handle is an active run with open log files.
 type Handle struct {
-	store  *Store
-	dir    string
-	stdout *os.File
-	stderr *os.File
-	Meta   Meta
+	store        *Store
+	dir          string
+	stdout       *os.File
+	stderr       *os.File
+	worktreeRoot string
+	Meta         Meta
 }
 
 // Begin allocates a UUIDv7 run ID and makes a running ledger entry.
@@ -140,11 +196,15 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 		return nil, fmt.Errorf("generate run id: %w", err)
 	}
 	meta.RunID = id.String()
+	meta.WorktreeRoot = s.worktreeRoot
 	meta.Status = StatusRunning
 	meta.StartedAt = time.Now().UTC()
 	meta.OwnerPID = os.Getpid()
 	meta.OwnerIdentity = ProcessIdentity(meta.OwnerPID)
 	meta.Args = append([]string(nil), meta.Args...)
+	if _, err := s.encodeMeta(meta); err != nil {
+		return nil, fmt.Errorf("validate initial run metadata: %w", err)
+	}
 
 	dir, err := s.runDir(meta.RunID)
 	if err != nil {
@@ -173,7 +233,14 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 		_ = stdout.Close()
 		return nil, fmt.Errorf("create stderr log: %w", err)
 	}
-	handle := &Handle{store: s, dir: dir, stdout: stdout, stderr: stderr, Meta: meta}
+	handle := &Handle{
+		store:        s,
+		dir:          dir,
+		stdout:       stdout,
+		stderr:       stderr,
+		worktreeRoot: s.worktreeRoot,
+		Meta:         meta,
+	}
 	s.markActive(meta.RunID, true)
 	if err := s.writeMeta(dir, meta); err != nil {
 		s.markActive(meta.RunID, false)
@@ -191,6 +258,9 @@ func (h *Handle) Stdout() io.Writer { return h.stdout }
 
 // Stderr returns the append-only stderr destination.
 func (h *Handle) Stderr() io.Writer { return h.stderr }
+
+// WorktreeRoot returns the immutable worktree identity captured by Begin.
+func (h *Handle) WorktreeRoot() string { return h.worktreeRoot }
 
 // PersistRunning atomically publishes fields filled after Begin, such as the
 // selected runner, working directory, runner version, and child PID.
@@ -242,11 +312,8 @@ func (h *Handle) Finish(
 
 // Get reads immutable or in-progress metadata for a run ID.
 func (s *Store) Get(runID string) (Meta, error) {
-	dir, err := s.existingRunDir(runID)
-	if err != nil {
-		return Meta{}, err
-	}
-	return readMeta(filepath.Join(dir, "meta.json"))
+	_, meta, err := s.existingRun(runID)
+	return meta, err
 }
 
 // ReadLog reads a byte range without following log-file symlinks.
@@ -263,7 +330,7 @@ func (s *Store) ReadLog(runID, stream string, offset, limit int64) ([]byte, erro
 	if stream != "stdout" && stream != "stderr" {
 		return nil, fmt.Errorf("stream must be stdout or stderr")
 	}
-	dir, err := s.existingRunDir(runID)
+	dir, _, err := s.existingRun(runID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory: %w", err)
 	}
@@ -305,7 +372,7 @@ func (s *Store) ReadLogTail(runID, stream string, maxBytes int64) ([]byte, error
 	if stream != "stdout" && stream != "stderr" {
 		return nil, fmt.Errorf("stream must be stdout or stderr")
 	}
-	dir, err := s.existingRunDir(runID)
+	dir, _, err := s.existingRun(runID)
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory: %w", err)
 	}
@@ -341,7 +408,7 @@ func (s *Store) ReadLogTail(runID, stream string, maxBytes int64) ([]byte, error
 
 // LogState returns byte counts and the newest non-empty log-file modification time.
 func (s *Store) LogState(runID string) (LogState, error) {
-	dir, err := s.existingRunDir(runID)
+	dir, _, err := s.existingRun(runID)
 	if err != nil {
 		return LogState{}, fmt.Errorf("resolve run directory: %w", err)
 	}
@@ -365,30 +432,30 @@ func (s *Store) LogState(runID string) (LogState, error) {
 }
 
 // ListRecent returns up to limit persisted runs in reverse UUIDv7 order.
-func (s *Store) ListRecent(limit int) ([]Meta, error) {
-	runs, _, err := s.ListRecentPage(limit, "")
-	return runs, err
+func (s *Store) ListRecent(limit int) (RecentPage, error) {
+	return s.ListRecentPage(limit, "")
 }
 
 // ListRecentPage returns a page of persisted runs in reverse UUIDv7 order.
 //
-// Cursor is an exclusive UUIDv7 boundary returned by a previous page. hasMore
-// means a later page may contain additional valid ledger entries.
+// Cursor is an exclusive UUIDv7 boundary returned by a previous page. More
+// reports whether a later page may contain additional valid ledger entries.
 //
 //nolint:gocyclo // Each filesystem validation branch protects the ledger boundary.
-func (s *Store) ListRecentPage(limit int, cursor string) ([]Meta, bool, error) {
+func (s *Store) ListRecentPage(limit int, cursor string) (RecentPage, error) {
+	page := RecentPage{Runs: []RecentRun{}}
 	if limit <= 0 {
-		return []Meta{}, false, nil
+		return page, nil
 	}
 	if cursor != "" {
 		parsed, err := uuid.Parse(cursor)
 		if err != nil || parsed.Version() != 7 || parsed.String() != cursor {
-			return nil, false, fmt.Errorf("invalid run cursor %q", cursor)
+			return RecentPage{}, fmt.Errorf("invalid run cursor %q", cursor)
 		}
 	}
 	entries, err := os.ReadDir(s.logRoot)
 	if err != nil {
-		return nil, false, fmt.Errorf("list run logs: %w", err)
+		return RecentPage{}, fmt.Errorf("list run logs: %w", err)
 	}
 	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
@@ -402,10 +469,18 @@ func (s *Store) ListRecentPage(limit int, cursor string) ([]Meta, bool, error) {
 		names = append(names, entry.Name())
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
-	runs := make([]Meta, 0, min(limit, len(names)))
+	page.Runs = make([]RecentRun, 0, min(limit, len(names)))
+	trailingScanned := 0
+	trailingSkippedIdentity := 0
 	for _, name := range names {
 		if cursor != "" && name >= cursor {
 			continue
+		}
+		pageFull := len(page.Runs) == limit
+		if pageFull {
+			trailingScanned++
+		} else {
+			page.Scanned++
 		}
 		dir, dirErr := s.existingRunDir(name)
 		if dirErr != nil {
@@ -415,12 +490,45 @@ func (s *Store) ListRecentPage(limit int, cursor string) ([]Meta, bool, error) {
 		if metaErr != nil {
 			continue
 		}
-		if len(runs) == limit {
-			return runs, true, nil
+		if identityErr := s.validateWorktreeIdentity(meta); identityErr != nil {
+			if pageFull {
+				trailingSkippedIdentity++
+			} else {
+				page.SkippedIdentity++
+			}
+			continue
 		}
-		runs = append(runs, meta)
+		if pageFull {
+			page.More = true
+			return page, nil
+		}
+		page.Runs = append(
+			page.Runs,
+			RecentRun{
+				Meta:            meta,
+				Scanned:         page.Scanned,
+				SkippedIdentity: page.SkippedIdentity,
+			},
+		)
 	}
-	return runs, false, nil
+	// Look-ahead entries belong to this page only when no later valid page exists.
+	page.Scanned += trailingScanned
+	page.SkippedIdentity += trailingSkippedIdentity
+	return page, nil
+}
+
+func (s *Store) validateWorktreeIdentity(meta Meta) error {
+	if meta.WorktreeRoot == "" {
+		return fmt.Errorf("run metadata is missing required worktree_root")
+	}
+	if meta.WorktreeRoot != s.worktreeRoot {
+		return fmt.Errorf(
+			"run metadata worktree_root %q does not match store worktree root %q",
+			meta.WorktreeRoot,
+			s.worktreeRoot,
+		)
+	}
+	return nil
 }
 
 func safeRegularFile(path string) (os.FileInfo, error) {
@@ -511,10 +619,25 @@ func (s *Store) existingRunDir(runID string) (string, error) {
 	return dir, nil
 }
 
-func (s *Store) writeMeta(dir string, meta Meta) error {
-	data, err := json.MarshalIndent(meta, "", "  ")
+func (s *Store) existingRun(runID string) (string, Meta, error) {
+	dir, err := s.existingRunDir(runID)
 	if err != nil {
-		return fmt.Errorf("encode run metadata: %w", err)
+		return "", Meta{}, err
+	}
+	meta, err := readMeta(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		return "", Meta{}, err
+	}
+	if err := s.validateWorktreeIdentity(meta); err != nil {
+		return "", Meta{}, err
+	}
+	return dir, meta, nil
+}
+
+func (s *Store) writeMeta(dir string, meta Meta) error {
+	data, err := s.encodeMeta(meta)
+	if err != nil {
+		return err
 	}
 	temporary, err := os.CreateTemp(dir, ".meta-*.json")
 	if err != nil {
@@ -525,7 +648,7 @@ func (s *Store) writeMeta(dir string, meta Meta) error {
 		//nolint:errcheck // The temporary file is best-effort cleanup after a failed publish.
 		_ = os.Remove(temporaryName)
 	}()
-	if _, err := temporary.Write(append(data, '\n')); err != nil {
+	if _, err := temporary.Write(data); err != nil {
 		//nolint:errcheck // The write failure remains the actionable error.
 		_ = temporary.Close()
 		return fmt.Errorf("write temporary metadata: %w", err)
@@ -539,6 +662,25 @@ func (s *Store) writeMeta(dir string, meta Meta) error {
 	return nil
 }
 
+func (s *Store) encodeMeta(meta Meta) ([]byte, error) {
+	if err := s.validateWorktreeIdentity(meta); err != nil {
+		return nil, fmt.Errorf("validate run metadata identity: %w", err)
+	}
+	data, err := json.MarshalIndent(meta, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode run metadata: %w", err)
+	}
+	data = append(data, '\n')
+	if len(data) > maxMetadataBytes {
+		return nil, fmt.Errorf(
+			"run metadata size %d bytes exceeds %d-byte limit",
+			len(data),
+			maxMetadataBytes,
+		)
+	}
+	return data, nil
+}
+
 func readMeta(path string) (Meta, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -547,10 +689,32 @@ func readMeta(path string) (Meta, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return Meta{}, fmt.Errorf("refusing non-regular metadata file")
 	}
+	if info.Size() > maxMetadataBytes {
+		return Meta{}, fmt.Errorf(
+			"metadata file %q exceeds %d-byte limit",
+			path,
+			maxMetadataBytes,
+		)
+	}
 	// #nosec G304 -- path is a fixed metadata basename below a validated run directory.
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
 	if err != nil {
-		return Meta{}, fmt.Errorf("read metadata file: %w", err)
+		return Meta{}, fmt.Errorf("open metadata file: %w", err)
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, maxMetadataBytes+1))
+	closeErr := file.Close()
+	if readErr != nil {
+		return Meta{}, fmt.Errorf("read metadata file: %w", readErr)
+	}
+	if closeErr != nil {
+		return Meta{}, fmt.Errorf("close metadata file: %w", closeErr)
+	}
+	if len(data) > maxMetadataBytes {
+		return Meta{}, fmt.Errorf(
+			"metadata file %q exceeds %d-byte limit",
+			path,
+			maxMetadataBytes,
+		)
 	}
 	var meta Meta
 	if err := json.Unmarshal(data, &meta); err != nil {

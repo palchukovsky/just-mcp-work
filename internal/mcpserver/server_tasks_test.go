@@ -93,7 +93,7 @@ func newCatalogTestServer(t *testing.T) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

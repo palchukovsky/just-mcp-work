@@ -40,6 +40,8 @@ type Project struct {
 // that wants the whole workspace must set this explicitly.
 const MaxDepthUnlimited = -1
 
+const worktreeIssue = "worktree"
+
 // Filter limits a project scan without narrowing the runners reported by a project.
 //
 //nolint:govet // Field order follows the public filter request shape.
@@ -433,13 +435,8 @@ func (r *Registry) inspect(
 	}
 	worktree, linked, worktreeErr := r.linkedWorktree(dir, resolver)
 	if worktreeErr != nil {
-		return Project{}, false, fmt.Errorf(
-			"inspect worktree metadata for %q: %w",
-			dir,
-			worktreeErr,
-		)
-	}
-	if linked {
+		project.Errors = addError(project.Errors, worktreeIssue, worktreeErr)
+	} else if linked {
 		project.Worktree = &worktree
 	}
 	if len(project.Errors) > 0 {

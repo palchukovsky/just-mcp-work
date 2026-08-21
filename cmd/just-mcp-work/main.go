@@ -195,7 +195,10 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("create workspace registry: %w", err)
 	}
-	store, err := runstore.New(workspaceRegistry.Root())
+	store, err := runstore.NewForWorktree(
+		workspaceRegistry.Root(),
+		workspaceRegistry.WorktreeRoot(),
+	)
 	if err != nil {
 		return fmt.Errorf("create run store: %w", err)
 	}
@@ -375,7 +378,7 @@ func writeInitResult(
 			"Restart Codex or your MCP client to load updated server configuration.\n",
 		)
 	}
-	snippet, snippetErr := agentinit.MCPConfigSnippet(canonicalModes)
+	snippet, snippetErr := agentinit.MCPConfigSnippet(result.Scope, canonicalModes)
 	if snippetErr != nil {
 		return fmt.Errorf("build MCP config snippet: %w", snippetErr)
 	}

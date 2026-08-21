@@ -201,6 +201,7 @@ type Options struct {
 
 // Result lists changed or would-change files.
 type Result struct {
+	Scope string
 	Paths []string
 	Diffs []string
 }
@@ -264,6 +265,7 @@ func Apply(options Options) (Result, error) {
 		edits = appendEdit(edits, claudeEdit)
 	}
 	result := resultForEdits(edits)
+	result.Scope = scope
 	if options.DryRun {
 		return result, nil
 	}
@@ -551,15 +553,12 @@ func findScopeRoot(dir string) (string, bool, error) {
 // hasHigherMCPConfig reports whether removing the config at scope would expose
 // another MCP config as the boundary of the next identical invocation.
 func hasHigherMCPConfig(scope string) (bool, error) {
-	_, linked, err := workspace.ActiveWorktreeRoot(scope)
+	worktreeRoot, linked, err := workspace.ActiveWorktreeRoot(scope)
 	if err != nil {
 		return false, fmt.Errorf("resolve agent configuration worktree: %w", err)
 	}
-	if linked {
-		return false, nil
-	}
 	current := filepath.Dir(scope)
-	if current == scope {
+	if current == scope || linked && scope == worktreeRoot {
 		return false, nil
 	}
 	for {
@@ -573,6 +572,9 @@ func hasHigherMCPConfig(scope string) (bool, error) {
 		}
 		if !os.IsNotExist(err) {
 			return false, fmt.Errorf("inspect %s: %w", path, err)
+		}
+		if linked && current == worktreeRoot {
+			return false, nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
@@ -813,9 +815,15 @@ func resolvePath(path string) (string, error) {
 	return resolved, nil
 }
 
-// MCPConfigSnippet is a ready-to-paste local MCP configuration.
-func MCPConfigSnippet(selections runner.ValidatedSelections) (string, error) {
-	data, err := mergeMCPConfig(nil, ".", selections)
+// MCPConfigSnippet is a ready-to-paste local MCP configuration for scopeRoot.
+func MCPConfigSnippet(
+	scopeRoot string,
+	selections runner.ValidatedSelections,
+) (string, error) {
+	if scopeRoot == "" {
+		return "", fmt.Errorf("MCP config scope root is required")
+	}
+	data, err := mergeMCPConfig(nil, scopeRoot, selections)
 	if err != nil {
 		return "", err
 	}

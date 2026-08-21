@@ -27,6 +27,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
+	"github.com/palchukovsky/just-mcp-work/internal/executor"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 	"github.com/palchukovsky/just-mcp-work/internal/updatecheck"
@@ -71,7 +72,7 @@ func TestListTasksExplainsAnEmptyRunner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestDirectHandlerFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +238,7 @@ func TestListProjectsFilterDefaultsDoNotLimitTaskLookup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,6 +423,7 @@ func TestRunShellCommandDefaultsToWorkspaceRoot(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // This test keeps receipt, ledger, get, and list identity assertions together.
 func TestRunPersistsCanonicalLinkedWorktreeIdentity(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -434,11 +436,11 @@ func TestRunPersistsCanonicalLinkedWorktreeIdentity(t *testing.T) {
 		filepath.Join(entryDir, "gitdir"):  filepath.Join(worktreeDir, ".git") + "\n",
 		filepath.Join(worktreeDir, ".git"): "gitdir: " + entryDir + "\n",
 	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatal(err)
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
 		}
-		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(path, []byte(contents), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
 	server := newShellTestServer(t, worktreeDir)
@@ -449,6 +451,9 @@ func TestRunPersistsCanonicalLinkedWorktreeIdentity(t *testing.T) {
 	)
 	if err != nil || !receipt.OK {
 		t.Fatalf("worktree run receipt = %#v, %v", receipt, err)
+	}
+	if receipt.WorktreeRoot != worktreeDir {
+		t.Fatalf("completed receipt worktree root = %q, want %q", receipt.WorktreeRoot, worktreeDir)
 	}
 	meta, err := server.store.Get(receipt.RunID)
 	if err != nil || meta.WorktreeRoot != worktreeDir || meta.CWD != worktreeDir {
@@ -465,6 +470,289 @@ func TestRunPersistsCanonicalLinkedWorktreeIdentity(t *testing.T) {
 	_, listed, err := server.listRuns(context.Background(), nil, listRunsInput{})
 	if err != nil || len(listed.Runs) != 1 || listed.Runs[0].WorktreeRoot != worktreeDir {
 		t.Fatalf("listed worktree runs = %#v, %v", listed.Runs, err)
+	}
+}
+
+//nolint:gocyclo // The table checks three public read surfaces for each identity state.
+func TestPersistedRunAPIsRequireMatchingWorktreeIdentity(t *testing.T) {
+	for _, testCase := range []struct {
+		mutate    func(map[string]any, string)
+		name      string
+		wantError bool
+	}{
+		{
+			name: "missing",
+			mutate: func(metadata map[string]any, _ string) {
+				delete(metadata, "worktree_root")
+			},
+			wantError: true,
+		},
+		{
+			name: "mismatched",
+			mutate: func(metadata map[string]any, root string) {
+				metadata["worktree_root"] = filepath.Join(root, "other-worktree")
+			},
+			wantError: true,
+		},
+		{
+			name:   "matching",
+			mutate: func(map[string]any, string) {},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			server := newShellTestServer(t, root)
+			handle, err := server.store.Begin(runstore.Meta{TaskID: "just:identity"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, writeErr := handle.Stdout().Write([]byte("identity-log")); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			if finishErr := handle.Finish(
+				runstore.StatusOK,
+				0,
+				"",
+				false,
+				false,
+			); finishErr != nil {
+				t.Fatal(finishErr)
+			}
+			metaPath := filepath.Join(server.store.LogRoot(), handle.Meta.RunID, "meta.json")
+			data, err := os.ReadFile(metaPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var metadata map[string]any
+			if decodeErr := json.Unmarshal(data, &metadata); decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			testCase.mutate(metadata, root)
+			data, err = json.Marshal(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if writeErr := os.WriteFile(metaPath, data, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+
+			getResult, getOutput, err := server.getRun(
+				context.Background(),
+				nil,
+				getRunInput{RunID: handle.Meta.RunID},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			listResult, listOutput, err := server.listRuns(
+				context.Background(),
+				nil,
+				listRunsInput{},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			statusResult, statusOutput, err := server.getRunStatus(
+				context.Background(),
+				nil,
+				getRunStatusInput{RunID: handle.Meta.RunID},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			logsResult, logsOutput, err := server.getRunLogs(
+				context.Background(),
+				nil,
+				getRunLogsInput{
+					RunID:  handle.Meta.RunID,
+					Stream: "stdout",
+					Limit:  64,
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if testCase.wantError {
+				for name, result := range map[string]*mcp.CallToolResult{
+					"get_run":        getResult,
+					"get_run_logs":   logsResult,
+					"get_run_status": statusResult,
+				} {
+					if result == nil || !result.IsError {
+						t.Errorf("%s result = %#v, want MCP error", name, result)
+					}
+				}
+				if getOutput.Error == nil || logsOutput.Error == nil ||
+					statusOutput.Error == nil {
+					t.Fatalf(
+						"identity errors = %#v, %#v, %#v",
+						getOutput.Error,
+						logsOutput.Error,
+						statusOutput.Error,
+					)
+				}
+				if listResult != nil || listOutput.Error != nil ||
+					len(listOutput.Runs) != 0 || listOutput.Scanned != 1 ||
+					listOutput.SkippedIdentity != 1 {
+					t.Fatalf("identity list output = %#v, %#v", listResult, listOutput)
+				}
+				return
+			}
+			if getResult != nil || logsResult != nil || listResult != nil || statusResult != nil ||
+				getOutput.Run.WorktreeRoot != server.workspace.WorktreeRoot() ||
+				logsOutput.Data != "identity-log" ||
+				len(listOutput.Runs) != 1 ||
+				listOutput.Runs[0].WorktreeRoot != server.workspace.WorktreeRoot() ||
+				statusOutput.WorktreeRoot != server.workspace.WorktreeRoot() {
+				t.Fatalf(
+					"matching outputs = %#v, %#v, %#v, %#v",
+					getOutput,
+					logsOutput,
+					listOutput,
+					statusOutput,
+				)
+			}
+		})
+	}
+}
+
+//nolint:gocyclo // The mixed ledger setup and output assertions form one scenario.
+func TestListRunsSkipsMissingAndForeignWorktreeIdentities(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	valid, err := server.store.Begin(runstore.Meta{TaskID: "just:valid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishErr := valid.Finish(runstore.StatusOK, 0, "", false, false); finishErr != nil {
+		t.Fatal(finishErr)
+	}
+	for _, testCase := range []struct {
+		mutate func(map[string]any)
+		name   string
+	}{
+		{
+			name: "missing",
+			mutate: func(metadata map[string]any) {
+				delete(metadata, "worktree_root")
+			},
+		},
+		{
+			name: "foreign",
+			mutate: func(metadata map[string]any) {
+				metadata["worktree_root"] = filepath.Join(root, "foreign-worktree")
+			},
+		},
+	} {
+		handle, beginErr := server.store.Begin(runstore.Meta{TaskID: "just:" + testCase.name})
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		if finishErr := handle.Finish(
+			runstore.StatusOK,
+			0,
+			"",
+			false,
+			false,
+		); finishErr != nil {
+			t.Fatal(finishErr)
+		}
+		metaPath := filepath.Join(server.store.LogRoot(), handle.Meta.RunID, "meta.json")
+		data, readErr := os.ReadFile(metaPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var metadata map[string]any
+		if decodeErr := json.Unmarshal(data, &metadata); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		testCase.mutate(metadata)
+		data, marshalErr := json.Marshal(metadata)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := os.WriteFile(metaPath, data, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+
+	result, output, err := server.listRuns(context.Background(), nil, listRunsInput{})
+	if err != nil || result != nil || output.Error != nil ||
+		len(output.Runs) != 1 || output.Runs[0].RunID != valid.Meta.RunID ||
+		output.Scanned != 3 || output.SkippedIdentity != 2 {
+		t.Fatalf("list_runs = %#v, %#v, %v", result, output, err)
+	}
+}
+
+//nolint:gocyclo // The mixed ledger setup and output assertions form one scenario.
+func TestListRunsReportsTrailingIdentitySkipsWhenLimitIsFilled(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	for range 2 {
+		handle, err := server.store.Begin(runstore.Meta{TaskID: "just:foreign"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if finishErr := handle.Finish(runstore.StatusOK, 0, "", false, false); finishErr != nil {
+			t.Fatal(finishErr)
+		}
+		metaPath := filepath.Join(server.store.LogRoot(), handle.Meta.RunID, "meta.json")
+		data, readErr := os.ReadFile(metaPath)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var metadata map[string]any
+		if decodeErr := json.Unmarshal(data, &metadata); decodeErr != nil {
+			t.Fatal(decodeErr)
+		}
+		metadata["worktree_root"] = filepath.Join(root, "foreign-worktree")
+		data, marshalErr := json.Marshal(metadata)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if writeErr := os.WriteFile(metaPath, data, 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	valid, err := server.store.Begin(runstore.Meta{TaskID: "just:valid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishErr := valid.Finish(runstore.StatusOK, 0, "", false, false); finishErr != nil {
+		t.Fatal(finishErr)
+	}
+
+	limit := 1
+	result, output, err := server.listRuns(
+		context.Background(),
+		nil,
+		listRunsInput{Limit: &limit},
+	)
+	if err != nil || result != nil || output.Error != nil || len(output.Runs) != 1 ||
+		output.Runs[0].RunID != valid.Meta.RunID || output.Scanned != 3 ||
+		output.SkippedIdentity != 2 || output.Truncated || output.NextCursor != "" {
+		t.Fatalf("list_runs = %#v, %#v, %v", result, output, err)
+	}
+}
+
+func TestReceiptForHandleUsesImmutableWorktreeIdentity(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	handle, err := server.store.Begin(runstore.Meta{TaskID: "just:receipt-identity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot := handle.WorktreeRoot()
+	handle.Meta.WorktreeRoot = filepath.Join(server.workspace.Root(), "spoofed")
+	receipt := receiptForHandle(handle, executor.Result{RunID: handle.Meta.RunID})
+	if receipt.WorktreeRoot != wantRoot {
+		t.Fatalf("receipt worktree root = %q, want %q", receipt.WorktreeRoot, wantRoot)
+	}
+	if persistErr := handle.PersistRunning(); persistErr == nil {
+		t.Fatal("mutated handle identity was persisted")
+	}
+	handle.Meta.WorktreeRoot = wantRoot
+	if finishErr := handle.Finish(runstore.StatusOK, 0, "", false, false); finishErr != nil {
+		t.Fatal(finishErr)
 	}
 }
 
@@ -632,8 +920,38 @@ func TestRunShellCommandPreCancelledDoesNotStartProcess(t *testing.T) {
 	if err != nil || receipt.Status != runstore.StatusCancelled {
 		t.Fatalf("pre-cancelled shell command = %#v, %v", receipt, err)
 	}
+	if receipt.WorktreeRoot != server.workspace.WorktreeRoot() {
+		t.Fatalf(
+			"cancelled receipt worktree root = %q, want %q",
+			receipt.WorktreeRoot,
+			server.workspace.WorktreeRoot(),
+		)
+	}
 	if _, statErr := os.Stat(filepath.Join(root, "marker")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("marker stat error = %v, want not exist", statErr)
+	}
+}
+
+func TestRunShellCommandRejectionReportsWorktreeRoot(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{
+			Command:          shellOutputCommand(),
+			WorkingDirectory: "../outside",
+		},
+	)
+	if err != nil || receipt.Status != runstore.StatusSpawnError {
+		t.Fatalf("rejected shell command = %#v, %v", receipt, err)
+	}
+	if receipt.WorktreeRoot != server.workspace.WorktreeRoot() {
+		t.Fatalf(
+			"rejected receipt worktree root = %q, want %q",
+			receipt.WorktreeRoot,
+			server.workspace.WorktreeRoot(),
+		)
 	}
 }
 
@@ -647,7 +965,7 @@ func TestNewRejectsSubMillisecondTaskTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -666,7 +984,7 @@ func newShellTestServer(t *testing.T, root string) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -693,13 +1011,33 @@ func TestNewRejectsRunStoreFromAnotherRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(storeRoot)
+	store, err := runstore.NewForWorktree(storeRoot, storeRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := New(workspaceRegistry, runners, store, Config{}); err == nil ||
 		!strings.Contains(err.Error(), "does not match run store root") {
 		t.Fatalf("New error = %v, want root mismatch", err)
+	}
+}
+
+func TestNewRejectsRunStoreFromAnotherWorktree(t *testing.T) {
+	root := t.TempDir()
+	runners, err := runner.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.NewForWorktree(root, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(workspaceRegistry, runners, store, Config{}); err == nil ||
+		!strings.Contains(err.Error(), "does not match run store worktree root") {
+		t.Fatalf("New error = %v, want worktree-root mismatch", err)
 	}
 }
 
@@ -758,7 +1096,7 @@ func TestUpdateNoticeKeepsPrimaryToolResultAndStatusIsFresh(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -820,7 +1158,7 @@ func TestGitHubFailureDoesNotBreakRegularTool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -887,9 +1225,95 @@ func (errorHTTPClient) Do(*http.Request) (*http.Response, error) {
 	return nil, errors.New("offline")
 }
 
+func TestListTasksRunnerFilterKeepsNonRunnerIssues(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainDir := filepath.Join(root, "main")
+	worktreeDir := filepath.Join(root, "linked")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "feature")
+	for path, content := range map[string]string{
+		filepath.Join(mainDir, ".git", "config"): "[core]\n\tbare = invalid\n",
+		filepath.Join(worktreeDir, "justfile"):   "linked",
+		filepath.Join(entryDir, "gitdir"):        filepath.Join(worktreeDir, ".git") + "\n",
+		filepath.Join(worktreeDir, ".git"):       "gitdir: " + entryDir + "\n",
+	} {
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if writeErr := os.WriteFile(path, []byte(content), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	runners, err := runner.NewRegistry(
+		testRegistration(issueRunner{name: "alpha"}),
+		testRegistration(issueRunner{name: "beta"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(workspaceRegistry, runners, store, Config{
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, testCase := range []struct {
+		selected string
+		excluded string
+	}{
+		{selected: "alpha", excluded: "beta"},
+		{selected: "beta", excluded: "alpha"},
+	} {
+		t.Run(testCase.selected, func(t *testing.T) {
+			_, output, listErr := server.listTasks(
+				context.Background(),
+				nil,
+				listTasksInput{ProjectPath: "linked", Runner: testCase.selected},
+			)
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			if issue := output.Errors["worktree"]; !strings.Contains(issue, "unsupported boolean value") {
+				t.Fatalf("worktree issue = %q, want classification error", issue)
+			}
+			if issue := output.Errors[testCase.selected]; issue != testCase.selected+" runner failed" {
+				t.Fatalf("selected runner issue = %q", issue)
+			}
+			if _, found := output.Errors[testCase.excluded]; found {
+				t.Fatalf("excluded runner issue survived: %#v", output.Errors)
+			}
+			if len(output.Errors) != 2 {
+				t.Fatalf("filtered issues = %#v, want selected runner and worktree", output.Errors)
+			}
+		})
+	}
+}
+
 // unavailableToolRunner stands for a runner whose build tool is missing on this
 // host, so it contributes a warning instead of tasks.
 type unavailableToolRunner struct{ handlerRunner }
+
+type issueRunner struct {
+	handlerRunner
+	name string
+}
+
+func (candidate issueRunner) Name() string { return candidate.name }
+
+func (candidate issueRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
+	return nil, fmt.Errorf("%s runner failed", candidate.name)
+}
 
 func (unavailableToolRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
 	return nil, fmt.Errorf("find the fake binary: %w", runner.ErrToolUnavailable)
@@ -924,22 +1348,33 @@ func (handlerRunner) BuildCommand(
 	return cmd, nil
 }
 
+//nolint:gocyclo // The three project kinds share one discovery setup.
 func TestListProjectsAnnotatesLinkedWorktreeOnly(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	mainDir := filepath.Join(root, "project")
 	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
 	entryDir := filepath.Join(mainDir, ".git", "worktrees", "feature")
+	bareWorktreeDir := filepath.Join(root, "bare-feature")
+	bareEntryDir := filepath.Join(root, "repository.git", "worktrees", "feature")
 	for path, content := range map[string]string{
-		filepath.Join(mainDir, "justfile"):     "main",
-		filepath.Join(worktreeDir, "justfile"): "worktree",
-		filepath.Join(entryDir, "gitdir"):      filepath.Join(worktreeDir, ".git") + "\n",
-		filepath.Join(worktreeDir, ".git"):     "gitdir: " + entryDir + "\n",
+		filepath.Join(mainDir, "justfile"):              "main",
+		filepath.Join(mainDir, ".git", "config"):        "[core]\n\tbare = false\n",
+		filepath.Join(worktreeDir, "justfile"):          "worktree",
+		filepath.Join(entryDir, "gitdir"):               filepath.Join(worktreeDir, ".git") + "\n",
+		filepath.Join(worktreeDir, ".git"):              "gitdir: " + entryDir + "\n",
+		filepath.Join(bareWorktreeDir, "justfile"):      "bare worktree",
+		filepath.Join(root, "repository.git", "config"): "[core]\n\tbare = true\n",
+		filepath.Join(bareEntryDir, "gitdir"):           filepath.Join(bareWorktreeDir, ".git") + "\n",
+		filepath.Join(bareWorktreeDir, ".git"):          "gitdir: " + bareEntryDir + "\n",
 	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatal(err)
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
 		}
-		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(path, []byte(content), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
 	runners, err := runner.NewRegistry(testRegistration(handlerRunner{}))
@@ -950,7 +1385,7 @@ func TestListProjectsAnnotatesLinkedWorktreeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,6 +1420,10 @@ func TestListProjectsAnnotatesLinkedWorktreeOnly(t *testing.T) {
 	linked := projects["project/.wt/feature"]
 	if linked.Worktree == nil || linked.Worktree.MainCheckout != "project" {
 		t.Fatalf("linked worktree annotation = %#v", linked.Worktree)
+	}
+	bare := projects["bare-feature"]
+	if bare.Worktree == nil || bare.Worktree.MainCheckout != "<bare-repository>" {
+		t.Fatalf("bare worktree annotation = %#v", bare.Worktree)
 	}
 }
 

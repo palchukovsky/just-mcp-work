@@ -132,20 +132,28 @@ directories, so one recipe is never offered twice under two project paths.
 
 A linked Git worktree is discovered even when it sits outside the normal scan,
 and carries a `worktree.main_checkout` field with the workspace-relative path
-of its main checkout, or `<outside-workspace>`.
+of its main checkout, `<outside-workspace>` when the repository lives outside
+the workspace, or `<bare-repository>` when it is a worktree of a bare
+repository. The two bracketed values are sentinels, not paths - do not try to
+resolve them.
 
 ### Status, errors, warnings
 
-Every project carries a `status` plus two optional per-runner maps.
+Every project carries a `status` plus two optional maps. Their keys are runner
+names, plus a small set of reserved keys that describe the project itself.
 
-- `errors` - the runner failed here, typically an unparsable task file. The
-  project status becomes `error`; the other runners keep working.
+- `errors` - keyed by runner name, the runner failed here, typically an
+  unparsable task file; the other runners keep working. The reserved key
+  `worktree` means the project's Git worktree metadata could not be classified:
+  every runner and every task is unaffected, only the `worktree.main_checkout`
+  annotation is missing. Either way the project status becomes `error`.
 - `warnings` - the runner cannot contribute tasks, but the checkout is fine.
   The usual cause is a build tool that is not installed on this host. The
   status stays `ready`.
 
-`list_tasks` repeats both maps, narrowed to the requested runner, so a listing
-that returns nothing explains itself without a second call.
+`list_tasks` repeats both maps. With a `runner` filter it drops only the issues
+owned by other runners and keeps the reserved keys, so a listing that returns
+nothing explains itself without a second call.
 
 ## Task identity per runner
 
@@ -361,6 +369,12 @@ entries and returns `truncated` with `next_cursor` when more remain. Use it to
 recover a `run_id` you lost, or to check whether a gate is already running
 before starting a second copy of it.
 
+`skipped_identity` counts ledger entries excluded from the listing because
+their `worktree_root` is missing or belongs to another worktree. Such entries
+are not returned by any read path, and they age out under ordinary retention -
+a non-zero count on a workspace whose ledger predates the field is expected and
+is not data loss.
+
 ## Choosing the right call
 
 **Run a check gate.**
@@ -403,8 +417,10 @@ delegated build that pours a full log into its own context defeats the purpose.
   sent. Use the `task_id` field, not `name`.
 - An empty task list with a project warning - the build tool is missing on this
   host. Nothing in the checkout is broken.
-- `status: error` on a project - a task file could not be parsed. Read
-  `errors[<runner>]`; the other runners still work.
+- `status: error` on a project - read `errors`. Under a runner name a task file
+  could not be parsed and the other runners still work; under `worktree` the
+  Git worktree metadata could not be classified and every runner is fine, only
+  the `worktree.main_checkout` annotation is missing.
 - `names and query must not be combined` - two exclusive task selectors in one
   call. Send one per call.
 - `log range is not complete valid UTF-8` - a multi-byte sequence is split

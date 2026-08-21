@@ -787,6 +787,27 @@ func TestApplyPreflightsEverySurfaceBeforeWriting(t *testing.T) {
 	}
 }
 
+func writeAgentInitWorktreeMarkers(
+	t *testing.T,
+	mainDir string,
+	worktreeDir string,
+	name string,
+) {
+	t.Helper()
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", name)
+	for path, contents := range map[string]string{
+		filepath.Join(entryDir, "gitdir"):  filepath.Join(worktreeDir, ".git") + "\n",
+		filepath.Join(worktreeDir, ".git"): "gitdir: " + entryDir + "\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func resolvedTestPath(t *testing.T, path string) string {
 	t.Helper()
 	resolvedDirectory, err := filepath.EvalSymlinks(filepath.Dir(path))
@@ -1001,7 +1022,7 @@ func TestApplyPersistsRunnerModesInEveryServerConfigAndIsIdempotent(t *testing.T
 	assertRunnerModeArgs(t, readJSONServerArgs(t, filepath.Join(dir, mcpConfig)), selections)
 	assertRunnerModeArgs(t, readCodexServerArgs(t, filepath.Join(dir, codexConfig)), selections)
 
-	snippet, err := MCPConfigSnippet(validated)
+	snippet, err := MCPConfigSnippet(dir, validated)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1023,7 +1044,7 @@ func TestApplyPersistsRunnerModesInEveryServerConfigAndIsIdempotent(t *testing.T
 }
 
 func TestApplyRejectsUnvalidatedRunnerModesBeforeWriting(t *testing.T) {
-	if _, err := MCPConfigSnippet(runner.ValidatedSelections{}); err == nil {
+	if _, err := MCPConfigSnippet(".", runner.ValidatedSelections{}); err == nil {
 		t.Fatal("MCPConfigSnippet accepted unvalidated runner modes")
 	}
 	dir := t.TempDir()
@@ -1386,6 +1407,7 @@ func TestApplyMergesNearestMCPConfig(t *testing.T) {
 	assertServerCommand(t, servers)
 }
 
+//nolint:gocyclo // The end-to-end assertions cover one worktree configuration transaction.
 func TestApplyKeepsManagedConfigurationInsideActiveWorktree(t *testing.T) {
 	base, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -1407,20 +1429,20 @@ func TestApplyKeepsManagedConfigurationInsideActiveWorktree(t *testing.T) {
 		filepath.Join(entryDir, "gitdir"):  backReference + "\n",
 		filepath.Join(worktreeDir, ".git"): "gitdir: " + gitDir + "\n",
 	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatal(err)
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
 		}
-		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(path, []byte(contents), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
-	if err := os.MkdirAll(nested, 0o750); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.MkdirAll(nested, 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
 	mainConfigPath := filepath.Join(mainDir, mcpConfig)
 	mainConfig := []byte(`{"mcpServers":{"main":{"command":"main"}}}` + "\n")
-	if err := os.WriteFile(mainConfigPath, mainConfig, 0o600); err != nil {
-		t.Fatal(err)
+	if writeErr := os.WriteFile(mainConfigPath, mainConfig, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
 	}
 
 	result, err := Apply(Options{
@@ -1446,13 +1468,121 @@ func TestApplyKeepsManagedConfigurationInsideActiveWorktree(t *testing.T) {
 		t.Fatalf("main checkout config changed: %q, %v", mainAfter, err)
 	}
 	wantArgs := []string{"serve", "--root", worktreeDir}
-	if args := readJSONServerArgs(t, filepath.Join(worktreeDir, mcpConfig));
-		!slices.Equal(args, wantArgs) {
+	if args := readJSONServerArgs(t, filepath.Join(worktreeDir, mcpConfig)); !slices.Equal(args, wantArgs) {
 		t.Fatalf("worktree MCP args = %#v, want %#v", args, wantArgs)
 	}
 	assertCodexMCPConfig(t, filepath.Join(worktreeDir, codexConfig), worktreeDir)
-	if _, err := os.Stat(filepath.Join(nested, mcpConfig)); !os.IsNotExist(err) {
-		t.Fatalf("nested config unexpectedly exists: %v", err)
+	if _, statErr := os.Stat(filepath.Join(nested, mcpConfig)); !os.IsNotExist(statErr) {
+		t.Fatalf("nested config unexpectedly exists: %v", statErr)
+	}
+}
+
+func TestApplyDirectLinkedWorktreeCleanupPreservesHigherLocalAnchor(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainDir := filepath.Join(base, "main")
+	worktreeDir := filepath.Join(base, "linked")
+	scope := filepath.Join(worktreeDir, "nested")
+	writeAgentInitWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+	if mkdirErr := os.MkdirAll(scope, 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	higherPath := filepath.Join(worktreeDir, mcpConfig)
+	higherBefore := []byte(`{"mcpServers":{"outer":{"command":"outer"}}}` + "\n")
+	if writeErr := os.WriteFile(higherPath, higherBefore, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	localPath := filepath.Join(scope, mcpConfig)
+	managed, err := mergeMCPConfig(nil, scope, testRunnerModes(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(localPath, managed, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	options := Options{
+		Dir: scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	}
+	first, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Scope != scope || !containsPath(first.Paths, localPath) {
+		t.Fatalf("first result = %#v, want direct scope %q and local anchor", first, scope)
+	}
+	localAfter, err := os.ReadFile(localPath)
+	if err != nil || string(localAfter) != "{}\n" {
+		t.Fatalf("local anchor = %q, %v, want empty object", localAfter, err)
+	}
+	higherAfter, err := os.ReadFile(higherPath)
+	if err != nil || !slices.Equal(higherAfter, higherBefore) {
+		t.Fatalf("higher worktree config changed: %q, %v", higherAfter, err)
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Paths) != 0 {
+		t.Fatalf("second cleanup changed paths: %#v", second.Paths)
+	}
+}
+
+func TestApplyNestedRepositoryMarkersStopAtRepositoryBoundary(t *testing.T) {
+	for _, markerKind := range []string{"directory", "file"} {
+		t.Run(markerKind, func(t *testing.T) {
+			base, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			mainDir := filepath.Join(base, "main")
+			worktreeDir := filepath.Join(base, "linked")
+			nestedRepo := filepath.Join(worktreeDir, "nested-repository")
+			selectedDir := filepath.Join(nestedRepo, "service")
+			writeAgentInitWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+			if mkdirErr := os.MkdirAll(selectedDir, 0o750); mkdirErr != nil {
+				t.Fatal(mkdirErr)
+			}
+			switch markerKind {
+			case "directory":
+				if mkdirErr := os.Mkdir(filepath.Join(nestedRepo, ".git"), 0o750); mkdirErr != nil {
+					t.Fatal(mkdirErr)
+				}
+			case "file":
+				submoduleGitDir := filepath.Join(mainDir, ".git", "modules", "nested-repository")
+				if writeErr := os.WriteFile(
+					filepath.Join(nestedRepo, ".git"),
+					[]byte("gitdir: "+submoduleGitDir+"\n"),
+					0o600,
+				); writeErr != nil {
+					t.Fatal(writeErr)
+				}
+			}
+			mainConfigPath := filepath.Join(mainDir, mcpConfig)
+			mainBefore := []byte(`{"mcpServers":{"main":{"command":"main"}}}` + "\n")
+			if writeErr := os.WriteFile(mainConfigPath, mainBefore, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+
+			result, err := Apply(Options{
+				Dir:            selectedDir,
+				Agents:         []string{"codex"},
+				WriteMCPConfig: true,
+				RunnerModes:    testRunnerModes(t),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Scope != selectedDir ||
+				!containsPath(result.Paths, filepath.Join(selectedDir, mcpConfig)) {
+				t.Fatalf("result = %#v, want selected repository scope %q", result, selectedDir)
+			}
+			mainAfter, err := os.ReadFile(mainConfigPath)
+			if err != nil || !slices.Equal(mainAfter, mainBefore) {
+				t.Fatalf("main checkout config changed: %q, %v", mainAfter, err)
+			}
+		})
 	}
 }
 
@@ -2198,7 +2328,11 @@ func TestApplyDisableKeepsSafeCodexConfigDirectorySymlink(t *testing.T) {
 }
 
 func TestMCPConfigSnippetUsesAbsoluteExecutablePath(t *testing.T) {
-	snippet, err := MCPConfigSnippet(testRunnerModes(t))
+	if _, err := MCPConfigSnippet("", testRunnerModes(t)); err == nil ||
+		!strings.Contains(err.Error(), "scope root is required") {
+		t.Fatalf("empty MCP scope error = %v", err)
+	}
+	snippet, err := MCPConfigSnippet(t.TempDir(), testRunnerModes(t))
 	if err != nil {
 		t.Fatal(err)
 	}

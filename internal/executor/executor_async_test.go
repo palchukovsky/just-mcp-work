@@ -19,7 +19,8 @@ import (
 
 //nolint:gocyclo // One asynchronous lifecycle is clearer asserted as a single sequence.
 func TestStartObservesAndStopsWithoutARequestContext(t *testing.T) {
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +96,7 @@ func TestStartKeepsProcessAfterMetadataPublishFailure(t *testing.T) {
 		t.Skip("root ignores directory write permissions")
 	}
 	root := t.TempDir()
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +144,8 @@ func TestStartKeepsProcessAfterMetadataPublishFailure(t *testing.T) {
 }
 
 func TestStartUnlimitedTimeoutDoesNotCreateDeadline(t *testing.T) {
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +176,8 @@ func TestStartUnlimitedTimeoutDoesNotCreateDeadline(t *testing.T) {
 }
 
 func TestTimeoutDiagnosticPreservesAppliedLimit(t *testing.T) {
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -39,7 +39,8 @@ func TestExecuteCancellationKillsProcessGroup(t *testing.T) {
 
 func executeTree(ctx context.Context, t *testing.T, timeout time.Duration) Result {
 	t.Helper()
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

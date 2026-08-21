@@ -108,6 +108,13 @@ func New(
 			store.Root(),
 		)
 	}
+	if workspaceRegistry.WorktreeRoot() != store.WorktreeRoot() {
+		return nil, fmt.Errorf(
+			"workspace registry worktree root %q does not match run store worktree root %q",
+			workspaceRegistry.WorktreeRoot(),
+			store.WorktreeRoot(),
+		)
+	}
 	if err := validateTaskTimeout(config); err != nil {
 		return nil, err
 	}
@@ -328,7 +335,7 @@ type projectOutput struct {
 
 // Worktree identifies a project as a linked Git worktree.
 type Worktree struct {
-	MainCheckout string `json:"main_checkout" jsonschema:"workspace-relative main checkout path, or <outside-workspace>"`
+	MainCheckout string `json:"main_checkout" jsonschema:"workspace-relative main checkout path, <outside-workspace>, or <bare-repository>"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -531,22 +538,33 @@ func (s *Server) listTasks(
 	}
 	result := listTasksOutput{Errors: project.Errors, Warnings: project.Warnings}
 	if input.Runner != "" {
-		result.Errors = selectIssues(project.Errors, input.Runner)
-		result.Warnings = selectIssues(project.Warnings, input.Runner)
+		result.Errors = selectIssues(project.Errors, input.Runner, s.runners)
+		result.Warnings = selectIssues(project.Warnings, input.Runner, s.runners)
 	}
 	result.Tasks = s.selectTasks(project, input.Runner, filter, &applied)
 	result.AppliedFilter = applied
 	return nil, result, nil
 }
 
-// selectIssues narrows a per-runner issue map to the requested runner, so a
-// filtered listing does not report a runner the caller excluded.
-func selectIssues(issues map[string]string, name string) map[string]string {
-	issue, found := issues[name]
-	if !found {
+// selectIssues keeps issues for selectedRunner and all issues whose keys are
+// not registered runner names. It excludes only issues owned by other runners.
+func selectIssues(
+	issues map[string]string,
+	selectedRunner string,
+	runners *runner.Registry,
+) map[string]string {
+	selected := make(map[string]string)
+	for name, issue := range issues {
+		_, isRunner := runners.Get(name)
+		if isRunner && name != selectedRunner {
+			continue
+		}
+		selected[name] = issue
+	}
+	if len(selected) == 0 {
 		return nil
 	}
-	return map[string]string{name: issue}
+	return selected
 }
 
 // selectTasks applies the runner filter, the task selectors, and the detail
@@ -932,10 +950,9 @@ func (s *Server) startTaskRun(
 	}
 	handle, err := s.store.Begin(
 		runstore.Meta{
-			WorktreeRoot: s.workspace.WorktreeRoot(),
-			ProjectPath:  input.ProjectPath,
-			TaskID:       input.TaskID,
-			Args:         input.Arguments,
+			ProjectPath: input.ProjectPath,
+			TaskID:      input.TaskID,
+			Args:        input.Arguments,
 		},
 	)
 	if err != nil {
@@ -944,17 +961,21 @@ func (s *Server) startTaskRun(
 	s.configureTaskTimeout(&handle.Meta)
 	project, err := s.workspace.Find(ctx, input.ProjectPath)
 	if err != nil {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, err)}
+		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
 	runnerName, _, found := strings.Cut(input.TaskID, ":")
 	if !found {
 		return nil, stats, runTaskOutput{
-			Result: s.reject(handle, fmt.Errorf("task_id must be namespaced as <runner>:<task>")),
+			Result:     s.reject(handle, fmt.Errorf("task_id must be namespaced as <runner>:<task>")),
+			runDetails: receiptDetails(handle.WorktreeRoot(), nil),
 		}
 	}
 	candidate, ok := s.runners.Get(runnerName)
 	if !ok {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, fmt.Errorf("unknown runner %q", runnerName))}
+		return nil, stats, receiptForHandle(
+			handle,
+			s.reject(handle, fmt.Errorf("unknown runner %q", runnerName)),
+		)
 	}
 	task, ok := taskByID(project.Tasks[runnerName], input.TaskID)
 	if !ok {
@@ -963,13 +984,14 @@ func (s *Server) startTaskRun(
 				handle,
 				fmt.Errorf("unknown task_id %q for project %q", input.TaskID, input.ProjectPath),
 			),
+			runDetails: receiptDetails(handle.WorktreeRoot(), nil),
 		}
 	}
 	handle.Meta.Runner = runnerName
 	handle.Meta.CWD = project.Dir
 	if validator, supportsValidation := candidate.(runner.TaskInputValidator); supportsValidation {
 		if validationErr := validator.ValidateTaskInput(task, input.Arguments); validationErr != nil {
-			return nil, stats, runTaskOutput{Result: s.reject(handle, validationErr)}
+			return nil, stats, receiptForHandle(handle, s.reject(handle, validationErr))
 		}
 	}
 	if versionProvider, ok := candidate.(runner.VersionProvider); ok {
@@ -978,14 +1000,14 @@ func (s *Server) startTaskRun(
 		}
 	}
 	if persistErr := handle.PersistRunning(); persistErr != nil {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, persistErr)}
+		return nil, stats, receiptForHandle(handle, s.reject(handle, persistErr))
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, stats, runTaskOutput{Result: s.cancel(handle, ctxErr)}
+		return nil, stats, receiptForHandle(handle, s.cancel(handle, ctxErr))
 	}
 	cmd, err := candidate.BuildCommand(context.Background(), project.Dir, task, input.Arguments)
 	if err != nil {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, err)}
+		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
 	return s.startRun(handle, cmd, stats)
 }
@@ -1046,10 +1068,9 @@ func (s *Server) startShellRun(
 	}
 	handle, err := s.store.Begin(
 		runstore.Meta{
-			WorktreeRoot: s.workspace.WorktreeRoot(),
-			ProjectPath:  workingDirectory,
-			TaskID:       "shell:command",
-			Args:         []string{input.Command},
+			ProjectPath: workingDirectory,
+			TaskID:      "shell:command",
+			Args:        []string{input.Command},
 		},
 	)
 	if err != nil {
@@ -1058,19 +1079,19 @@ func (s *Server) startShellRun(
 	s.configureTaskTimeout(&handle.Meta)
 	dir, err := s.workspace.ResolveDir(workingDirectory)
 	if err != nil {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, err)}
+		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
 	handle.Meta.Runner = "shell"
 	handle.Meta.CWD = dir
 	if persistErr := handle.PersistRunning(); persistErr != nil {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, persistErr)}
+		return nil, stats, receiptForHandle(handle, s.reject(handle, persistErr))
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, stats, runTaskOutput{Result: s.cancel(handle, ctxErr)}
+		return nil, stats, receiptForHandle(handle, s.cancel(handle, ctxErr))
 	}
 	cmd, err := shellCommand(dir, input.Command)
 	if err != nil {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, err)}
+		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
 	return s.startRun(handle, cmd, stats)
 }
@@ -1089,7 +1110,7 @@ func (s *Server) startRun(
 	stats *runstats.Stats,
 ) (*executor.Run, *runstats.Stats, runTaskOutput) {
 	if err := s.manager.Reserve(handle.Meta.RunID); err != nil {
-		return nil, stats, runTaskOutput{Result: s.reject(handle, err)}
+		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
 	reserved := true
 	defer func() {
@@ -1107,7 +1128,10 @@ func (s *Server) startRun(
 		},
 	)
 	if run == nil {
-		return nil, stats, runTaskOutput{Error: newToolError(startErr)}
+		return nil, stats, runTaskOutput{
+			runDetails: receiptDetails(handle.WorktreeRoot(), nil),
+			Error:      newToolError(startErr),
+		}
 	}
 	if startErr != nil {
 		if manageErr := s.manager.Start(run); manageErr != nil {
@@ -1121,7 +1145,7 @@ func (s *Server) startRun(
 			"error",
 			startErr,
 		)
-		return nil, stats, runTaskOutput{Result: run.Snapshot()}
+		return nil, stats, receiptForHandle(handle, run.Snapshot())
 	}
 	if err := s.manager.Start(run); err != nil {
 		if stopErr := run.StopWithReason(err.Error()); stopErr != nil {
@@ -1129,7 +1153,7 @@ func (s *Server) startRun(
 		}
 		result := run.Snapshot()
 		result.Message = err.Error()
-		return nil, stats, runTaskOutput{Result: result}
+		return nil, stats, receiptForHandle(handle, result)
 	}
 	reserved = false
 	return run, stats, runTaskOutput{}
@@ -1182,26 +1206,39 @@ func (s *Server) waitForSyncReceipt(
 			s.config.Logger.Error("task ledger finalization failed", "run_id", run.Snapshot().RunID, "error", err)
 		}
 		s.stats.Invalidate()
-		return finishedReceipt(run.Snapshot(), stats)
+		return finishedReceipt(run.Snapshot(), s.store.WorktreeRoot(), stats)
 	case <-ctx.Done():
 		if err := run.Stop(); err != nil {
 			s.config.Logger.Error("cancel task run failed", "run_id", run.Snapshot().RunID, "error", err)
 		}
 		s.stats.Invalidate()
-		return finishedReceipt(run.Snapshot(), stats)
+		return finishedReceipt(run.Snapshot(), s.store.WorktreeRoot(), stats)
 	case <-timeout:
 		return s.runningReceipt(run, stats, true)
 	}
 }
 
-// finishedReceipt keeps the completed synchronous receipt shape stable and only
-// adds the pre-run duration statistics, so a caller can compare this run with
-// its own history without paging any other tool.
-func finishedReceipt(result executor.Result, stats *runstats.Stats) runTaskOutput {
-	if stats == nil {
-		return runTaskOutput{Result: result}
+// finishedReceipt keeps the completed synchronous receipt bound to its ledger identity.
+func finishedReceipt(
+	result executor.Result,
+	worktreeRoot string,
+	stats *runstats.Stats,
+) runTaskOutput {
+	return runTaskOutput{
+		Result:     result,
+		runDetails: receiptDetails(worktreeRoot, stats),
 	}
-	return runTaskOutput{Result: result, runDetails: &runDetails{Stats: stats}}
+}
+
+func receiptForHandle(handle *runstore.Handle, result executor.Result) runTaskOutput {
+	return runTaskOutput{
+		Result:     result,
+		runDetails: receiptDetails(handle.WorktreeRoot(), nil),
+	}
+}
+
+func receiptDetails(worktreeRoot string, stats *runstats.Stats) *runDetails {
+	return &runDetails{WorktreeRoot: worktreeRoot, Stats: stats}
 }
 
 func (s *Server) runningReceipt(
@@ -1213,7 +1250,10 @@ func (s *Server) runningReceipt(
 	details, err := s.detailsFor(result.RunID, stats)
 	if err != nil {
 		s.config.Logger.Warn("read running task status failed", "run_id", result.RunID, "error", err)
-		return runTaskOutput{Result: result}
+		return runTaskOutput{
+			Result:     result,
+			runDetails: receiptDetails(s.store.WorktreeRoot(), nil),
+		}
 	}
 	if result.Status == runstore.StatusRunning {
 		details.Promoted = promoted
@@ -1594,11 +1634,12 @@ type runListEntry struct {
 
 //nolint:govet // Field order follows the stable MCP response shape.
 type listRunsOutput struct {
-	Runs       []runListEntry `json:"runs"`
-	Scanned    int            `json:"scanned"`
-	Truncated  bool           `json:"truncated,omitempty"`
-	NextCursor string         `json:"next_cursor,omitempty"`
-	Error      *toolError     `json:"error,omitempty"`
+	Runs            []runListEntry `json:"runs"`
+	Scanned         int            `json:"scanned"`
+	SkippedIdentity int            `json:"skipped_identity,omitempty"`
+	Truncated       bool           `json:"truncated,omitempty"`
+	NextCursor      string         `json:"next_cursor,omitempty"`
+	Error           *toolError     `json:"error,omitempty"`
 }
 
 // listRunsScanLimit bounds how many ledger entries one listing reads before
@@ -1627,15 +1668,17 @@ func (s *Server) listRuns(
 		}
 		statuses[status] = struct{}{}
 	}
-	runs, more, err := s.store.ListRecentPage(listRunsScanLimit, input.Cursor)
+	page, err := s.store.ListRecentPage(listRunsScanLimit, input.Cursor)
 	if err != nil {
 		return toolErrorResult(err), listRunsOutput{Error: newToolError(err)}, nil
 	}
 	output := listRunsOutput{
-		Runs: make([]runListEntry, 0, min(limit, len(runs))),
+		Runs: make([]runListEntry, 0, min(limit, len(page.Runs))),
 	}
-	for index, meta := range runs {
-		output.Scanned = index + 1
+	for index, recent := range page.Runs {
+		output.Scanned = recent.Scanned
+		output.SkippedIdentity = recent.SkippedIdentity
+		meta := recent.Meta
 		if current, _, metaErr := s.metaFor(meta.RunID); metaErr == nil {
 			meta = current
 		} else {
@@ -1680,16 +1723,21 @@ func (s *Server) listRuns(
 		}
 		output.Runs = append(output.Runs, entry)
 		if len(output.Runs) == limit {
-			if index+1 < len(runs) || more {
+			if index+1 < len(page.Runs) || page.More {
 				output.Truncated = true
 				output.NextCursor = meta.RunID
+			} else {
+				output.Scanned = page.Scanned
+				output.SkippedIdentity = page.SkippedIdentity
 			}
 			return nil, output, nil
 		}
 	}
-	if more && len(runs) > 0 {
+	output.Scanned = page.Scanned
+	output.SkippedIdentity = page.SkippedIdentity
+	if page.More && len(page.Runs) > 0 {
 		output.Truncated = true
-		output.NextCursor = runs[len(runs)-1].RunID
+		output.NextCursor = page.Runs[len(page.Runs)-1].Meta.RunID
 	}
 	return nil, output, nil
 }

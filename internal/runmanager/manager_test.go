@@ -163,7 +163,8 @@ func TestManagerShutdownReturnsWhenContextExpires(t *testing.T) {
 
 func newStore(t *testing.T) *runstore.Store {
 	t.Helper()
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

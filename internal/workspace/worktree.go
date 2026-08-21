@@ -8,23 +8,52 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode"
 )
 
 const (
 	maxGitMarkerBytes            = 4096
+	maxGitConfigBytes            = 1 << 20
 	outsideWorkspaceMainCheckout = "<outside-workspace>"
+	bareRepositoryMainCheckout   = "<bare-repository>"
 )
 
 // Worktree identifies a project as a linked Git worktree.
 type Worktree struct {
 	// MainCheckout is the workspace-relative path of the main checkout.
 	MainCheckout string `json:"main_checkout"`
+}
+
+type commonGitRepository struct {
+	commonDir    string
+	worktree     string
+	bare         bool
+	conventional bool
+}
+
+type redactedResolverError struct {
+	cause   error
+	message string
+}
+
+func (e redactedResolverError) Error() string { return e.message }
+
+func (e redactedResolverError) Unwrap() error { return e.cause }
+
+type gitCoreConfig struct {
+	worktree          string
+	bare              bool
+	worktreeConfig    bool
+	hasWorktree       bool
+	hasBare           bool
+	hasWorktreeConfig bool
 }
 
 type resolvedPathKind uint8
@@ -252,6 +281,11 @@ func (r *Registry) worktreePathAllowed(
 	return candidate, resolvedGitFile, true, nil
 }
 
+// linkedWorktree determines whether dir is a registered linked worktree and
+// which main checkout should be reported. It validates the marker and registry
+// binding, then reads core.worktree and core.bare to classify the main checkout.
+//
+//nolint:gocyclo // Each branch rejects an ambiguous or unsafe repository identity.
 func (r *Registry) linkedWorktree(
 	dir string,
 	resolver *pathResolver,
@@ -270,65 +304,126 @@ func (r *Registry) linkedWorktree(
 	if state != pathResolved {
 		return Worktree{}, false, nil
 	}
-	mainCheckout, state, err := r.linkedMainCheckout(gitDir, resolver)
+	commonDir, valid := commonGitDir(gitDir)
+	if !valid {
+		return Worktree{}, false, nil
+	}
+	resolvedGitDir, registered, err := r.registeredCommonWorktree(
+		resolvedDir,
+		commonDir,
+		gitDir,
+		resolver,
+	)
 	if err != nil {
-		return Worktree{}, false, err
+		return Worktree{}, false, fmt.Errorf("validate common git worktree registry: %w", err)
+	}
+	if !registered {
+		return Worktree{}, false, nil
+	}
+	resolvedCommonDir, valid := commonGitDir(resolvedGitDir)
+	if !valid {
+		return Worktree{}, false, nil
+	}
+	containedCommonDir, commonState, err := resolver.resolveWithin(
+		r.root,
+		resolvedCommonDir,
+		resolvedDirectory,
+	)
+	if err != nil {
+		return Worktree{}, false, fmt.Errorf("contain registered common git directory: %w", err)
+	}
+	if commonState == pathOutside {
+		return Worktree{MainCheckout: outsideWorkspaceMainCheckout}, true, nil
+	}
+	if commonState != pathResolved {
+		return Worktree{}, false, fmt.Errorf("registered common git directory is unsafe or missing")
+	}
+	repository, err := inspectCommonGitRepository(containedCommonDir)
+	if err != nil {
+		return Worktree{}, false, fmt.Errorf(
+			"classify common git directory %q: %w",
+			containedCommonDir,
+			err,
+		)
+	}
+	if repository.bare {
+		return Worktree{MainCheckout: bareRepositoryMainCheckout}, true, nil
+	}
+	mainCheckout, state, err := resolver.resolveWithin(
+		r.root,
+		repository.worktree,
+		resolvedDirectory,
+	)
+	if err != nil {
+		return Worktree{}, false, redactedResolverError{
+			message: "validate configured main checkout",
+			cause:   err,
+		}
 	}
 	if state == pathOutside || state == pathSymlink {
 		return Worktree{MainCheckout: outsideWorkspaceMainCheckout}, true, nil
 	}
 	if state != pathResolved {
-		return Worktree{}, false, nil
+		return Worktree{}, false, fmt.Errorf("configured main checkout is unsafe or missing")
 	}
-	return r.registeredLinkedWorktree(resolvedDir, mainCheckout, gitDir, resolver)
-}
-
-func (r *Registry) linkedMainCheckout(
-	gitDir string,
-	resolver *pathResolver,
-) (string, pathState, error) {
-	requestedMainCheckout, valid := mainCheckoutDir(gitDir)
-	if !valid {
-		return "", pathInvalid, nil
+	if repository.conventional {
+		resolvedCommon, commonState, resolveErr := resolver.resolveExactChild(
+			mainCheckout,
+			".git",
+			resolvedDirectory,
+		)
+		if resolveErr != nil {
+			return Worktree{}, false, fmt.Errorf("validate conventional git directory: %w", resolveErr)
+		}
+		if commonState != pathResolved || resolvedCommon != repository.commonDir {
+			return Worktree{}, false, fmt.Errorf(
+				"conventional common git directory %q does not match main checkout %q",
+				repository.commonDir,
+				mainCheckout,
+			)
+		}
 	}
-	mainCheckout, state, err := resolver.resolveWithin(
-		r.root,
-		requestedMainCheckout,
-		resolvedDirectory,
-	)
+	rel, err := filepath.Rel(r.root, mainCheckout)
 	if err != nil {
-		return "", pathInvalid, fmt.Errorf("validate main checkout: %w", err)
+		return Worktree{}, false, redactedResolverError{
+			message: "resolve configured main checkout relative to workspace",
+			cause:   err,
+		}
 	}
-	if state != pathResolved {
-		return "", state, nil
-	}
-	return mainCheckout, pathResolved, nil
+	return Worktree{MainCheckout: filepath.ToSlash(rel)}, true, nil
 }
 
-func (r *Registry) registeredLinkedWorktree(
+func (r *Registry) registeredCommonWorktree(
 	dir string,
-	mainCheckout string,
+	commonDir string,
 	gitDir string,
 	resolver *pathResolver,
-) (Worktree, bool, error) {
-	resolvedGitDir, state, err := resolver.resolveGitRegistryEntry(mainCheckout, gitDir)
+) (string, bool, error) {
+	resolvedGitDir, state, err := resolver.resolveCommonGitRegistryEntry(commonDir, gitDir)
 	if err != nil {
-		return Worktree{}, false, fmt.Errorf("validate git worktree registry: %w", err)
+		return "", false, err
 	}
 	if state != pathResolved {
-		return Worktree{}, false, nil
+		return "", false, nil
 	}
-	gitDir = resolvedGitDir
-	resolvedMainCheckout, valid := mainCheckoutDir(gitDir)
-	if !valid || resolvedMainCheckout != mainCheckout {
-		return Worktree{}, false, nil
+	registered, err := r.registeredResolvedWorktree(dir, resolvedGitDir, resolver)
+	if err != nil || !registered {
+		return "", registered, err
 	}
+	return resolvedGitDir, true, nil
+}
+
+func (r *Registry) registeredResolvedWorktree(
+	dir string,
+	gitDir string,
+	resolver *pathResolver,
+) (bool, error) {
 	candidateGitFile, registered, err := registeredWorktreeCandidate(gitDir)
 	if err != nil {
-		return Worktree{}, false, fmt.Errorf("inspect git worktree entry %q: %w", gitDir, err)
+		return false, fmt.Errorf("inspect git worktree entry %q: %w", gitDir, err)
 	}
 	if !registered {
-		return Worktree{}, false, nil
+		return false, nil
 	}
 	resolvedGitFile, state, err := resolver.resolveWithin(
 		r.root,
@@ -336,23 +431,19 @@ func (r *Registry) registeredLinkedWorktree(
 		resolvedRegularFile,
 	)
 	if err != nil {
-		return Worktree{}, false, fmt.Errorf("validate git worktree path %q: %w", dir, err)
+		return false, fmt.Errorf("validate git worktree path %q: %w", dir, err)
 	}
 	if state != pathResolved {
-		return Worktree{}, false, nil
+		return false, nil
 	}
 	canonical, err := resolver.isCanonicalGitMarker(resolvedGitFile)
 	if err != nil {
-		return Worktree{}, false, fmt.Errorf("validate git worktree path %q: %w", dir, err)
+		return false, fmt.Errorf("validate git worktree path %q: %w", dir, err)
 	}
 	if !canonical || filepath.Dir(resolvedGitFile) != dir {
-		return Worktree{}, false, nil
+		return false, nil
 	}
-	rel, err := filepath.Rel(r.root, mainCheckout)
-	if err != nil {
-		return Worktree{}, false, fmt.Errorf("resolve main checkout %q: %w", mainCheckout, err)
-	}
-	return Worktree{MainCheckout: filepath.ToSlash(rel)}, true, nil
+	return true, nil
 }
 
 func linkedWorktreeGitDir(markerPath string) (string, bool, error) {
@@ -372,15 +463,16 @@ func linkedWorktreeGitDir(markerPath string) (string, bool, error) {
 		return "", false, nil
 	}
 	gitDir = resolveMarkerPath(markerPath, gitDir)
-	if _, ok := mainCheckoutDir(gitDir); !ok {
+	if _, ok := commonGitDir(gitDir); !ok {
 		return "", false, nil
 	}
 	return gitDir, true, nil
 }
 
 // ActiveWorktreeRoot returns the canonical linked-worktree root containing dir.
-// A structurally linked marker is authoritative: malformed metadata or a failed
-// registry round trip is an error instead of permission to use an ancestor scope.
+// The upward walk stops at the first repository boundary. A structurally linked
+// marker is authoritative: malformed metadata or a failed registry round trip is
+// an error instead of permission to use an ancestor scope.
 func ActiveWorktreeRoot(dir string) (string, bool, error) {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
@@ -390,7 +482,12 @@ func ActiveWorktreeRoot(dir string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	for current := canonicalDir; ; current = filepath.Dir(current) {
+	// The terminal condition must stay in the advance path below. Hoisting it
+	// to the top of the body would return before the marker of a volume or UNC
+	// root is ever inspected, silently reporting a linked worktree there as
+	// unlinked. No unprivileged test can write to such a root, so this comment
+	// is the only guard the invariant has.
+	for current := canonicalDir; ; {
 		markerPath := filepath.Join(current, ".git")
 		info, inspectErr := os.Lstat(markerPath)
 		if inspectErr == nil {
@@ -422,6 +519,7 @@ func ActiveWorktreeRoot(dir string) (string, bool, error) {
 		if parent == current {
 			return "", false, nil
 		}
+		current = parent
 	}
 }
 
@@ -439,26 +537,409 @@ func requiredLinkedWorktreeGitDir(markerPath string) (string, bool, error) {
 		return "", false, fmt.Errorf("active git marker %q has invalid gitdir syntax", markerPath)
 	}
 	gitDir = resolveMarkerPath(markerPath, gitDir)
-	if _, linked := mainCheckoutDir(gitDir); !linked {
+	if _, linked := commonGitDir(gitDir); !linked {
 		return "", false, nil
 	}
 	return gitDir, true, nil
 }
 
+//nolint:gocyclo // Repository and config filesystem states require explicit classification.
+func inspectCommonGitRepository(
+	commonDir string,
+) (commonGitRepository, error) {
+	cleanCommonDir := filepath.Clean(commonDir)
+	canonicalCommonDir, err := filepath.EvalSymlinks(cleanCommonDir)
+	if err != nil {
+		return commonGitRepository{}, fmt.Errorf("resolve common git directory: %w", err)
+	}
+	if canonicalCommonDir != cleanCommonDir {
+		return commonGitRepository{}, fmt.Errorf(
+			"common git directory %q contains a symlink",
+			cleanCommonDir,
+		)
+	}
+	info, err := os.Lstat(canonicalCommonDir)
+	if err != nil {
+		return commonGitRepository{}, fmt.Errorf("inspect common git directory: %w", err)
+	}
+	if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
+		return commonGitRepository{}, fmt.Errorf(
+			"common git directory %q is not a non-symlink directory",
+			canonicalCommonDir,
+		)
+	}
+	config, err := readGitCoreConfig(filepath.Join(canonicalCommonDir, "config"))
+	if err != nil {
+		return commonGitRepository{}, err
+	}
+	if config.worktreeConfig {
+		configWorktreePath := filepath.Join(canonicalCommonDir, "config.worktree")
+		configWorktreeInfo, configWorktreeErr := os.Lstat(configWorktreePath)
+		switch {
+		case errors.Is(configWorktreeErr, fs.ErrNotExist):
+		case configWorktreeErr != nil:
+			return commonGitRepository{}, fmt.Errorf(
+				"inspect per-worktree git config %q: %w",
+				configWorktreePath,
+				configWorktreeErr,
+			)
+		case configWorktreeInfo.Mode()&fs.ModeSymlink != 0 ||
+			!configWorktreeInfo.Mode().IsRegular():
+			return commonGitRepository{}, fmt.Errorf(
+				"per-worktree git config %q is unsafe",
+				configWorktreePath,
+			)
+		default:
+			return commonGitRepository{}, fmt.Errorf(
+				"per-worktree configuration %q is present and unsupported",
+				configWorktreePath,
+			)
+		}
+	}
+	if !config.hasBare {
+		return commonGitRepository{}, fmt.Errorf("git config is missing required core.bare")
+	}
+	if config.bare {
+		if config.hasWorktree {
+			return commonGitRepository{}, fmt.Errorf(
+				"git config has conflicting core.bare=true and core.worktree",
+			)
+		}
+		return commonGitRepository{commonDir: canonicalCommonDir, bare: true}, nil
+	}
+	if config.hasWorktree {
+		worktree := config.worktree
+		if !filepath.IsAbs(worktree) {
+			worktree = filepath.Join(canonicalCommonDir, worktree)
+		}
+		return commonGitRepository{
+			commonDir: canonicalCommonDir,
+			worktree:  filepath.Clean(worktree),
+		}, nil
+	}
+	if !pathNamesEqual(filepath.Base(canonicalCommonDir), ".git") {
+		return commonGitRepository{}, fmt.Errorf(
+			"non-bare custom git directory %q is missing required core.worktree",
+			canonicalCommonDir,
+		)
+	}
+	return commonGitRepository{
+		commonDir:    canonicalCommonDir,
+		worktree:     filepath.Dir(canonicalCommonDir),
+		conventional: true,
+	}, nil
+}
+
+func readGitCoreConfig(path string) (config gitCoreConfig, err error) {
+	lstatInfo, err := os.Lstat(path)
+	if err != nil {
+		return gitCoreConfig{}, fmt.Errorf("inspect git config %q: %w", path, err)
+	}
+	if lstatInfo.Mode()&fs.ModeSymlink != 0 || !lstatInfo.Mode().IsRegular() {
+		return gitCoreConfig{}, fmt.Errorf("git config %q is not a regular non-symlink file", path)
+	}
+	// #nosec G304 -- path is the fixed config basename under a validated common Git directory.
+	file, err := os.Open(path)
+	if err != nil {
+		return gitCoreConfig{}, fmt.Errorf("open git config %q: %w", path, err)
+	}
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil && err == nil {
+			err = fmt.Errorf("close git config %q: %w", path, closeErr)
+		}
+	}()
+	// os.Open may follow a swapped final component; descriptor identity detects it before reads.
+	// Blocking replacements such as FIFOs and the parent-directory race are tracked separately.
+	statInfo, err := file.Stat()
+	if err != nil {
+		return gitCoreConfig{}, fmt.Errorf("inspect opened git config %q: %w", path, err)
+	}
+	if !os.SameFile(lstatInfo, statInfo) {
+		return gitCoreConfig{}, fmt.Errorf("git config %q changed during open", path)
+	}
+	if statInfo.Size() > maxGitConfigBytes {
+		return gitCoreConfig{}, fmt.Errorf("git config %q exceeds %d bytes", path, maxGitConfigBytes)
+	}
+	content, err := io.ReadAll(io.LimitReader(file, maxGitConfigBytes+1))
+	if err != nil {
+		return gitCoreConfig{}, fmt.Errorf("read git config %q: %w", path, err)
+	}
+	if len(content) > maxGitConfigBytes {
+		return gitCoreConfig{}, fmt.Errorf("git config %q exceeds %d bytes", path, maxGitConfigBytes)
+	}
+	config, err = parseGitCoreConfig(string(content))
+	if err != nil {
+		return gitCoreConfig{}, fmt.Errorf("parse git config %q: %w", path, err)
+	}
+	return config, nil
+}
+
+//nolint:gocyclo // Every rejected syntax branch prevents ambiguous repository classification.
+func parseGitCoreConfig(content string) (gitCoreConfig, error) {
+	var config gitCoreConfig
+	section := ""
+	for lineNumber, rawLine := range strings.Split(content, "\n") {
+		line, err := gitConfigLine(rawLine)
+		if err != nil {
+			return gitCoreConfig{}, fmt.Errorf("line %d: %w", lineNumber+1, err)
+		}
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			sectionName, sectionErr := gitConfigSection(line)
+			if sectionErr != nil {
+				return gitCoreConfig{}, fmt.Errorf("line %d: %w", lineNumber+1, sectionErr)
+			}
+			if sectionName == "include" || sectionName == "includeif" {
+				return gitCoreConfig{}, fmt.Errorf("line %d: include-driven config is unsupported", lineNumber+1)
+			}
+			section = sectionName
+			continue
+		}
+		if section == "" {
+			return gitCoreConfig{}, fmt.Errorf(
+				"line %d: assignment outside a section is unsupported",
+				lineNumber+1,
+			)
+		}
+		key, value, hasValue, err := gitConfigAssignment(line)
+		if err != nil {
+			return gitCoreConfig{}, fmt.Errorf("line %d: %w", lineNumber+1, err)
+		}
+		switch section {
+		case "core":
+			switch strings.ToLower(key) {
+			case "bare":
+				if config.hasBare {
+					return gitCoreConfig{}, fmt.Errorf(
+						"line %d: duplicate core.bare",
+						lineNumber+1,
+					)
+				}
+				bare, booleanErr := gitConfigBoolean(value, hasValue)
+				if booleanErr != nil {
+					return gitCoreConfig{}, fmt.Errorf(
+						"line %d: invalid core.bare: %w",
+						lineNumber+1,
+						booleanErr,
+					)
+				}
+				config.bare = bare
+				config.hasBare = true
+			case "worktree":
+				if config.hasWorktree {
+					return gitCoreConfig{}, fmt.Errorf(
+						"line %d: duplicate core.worktree",
+						lineNumber+1,
+					)
+				}
+				if !hasValue || value == "" {
+					return gitCoreConfig{}, fmt.Errorf(
+						"line %d: core.worktree requires a value",
+						lineNumber+1,
+					)
+				}
+				config.worktree = value
+				config.hasWorktree = true
+			}
+		case "extensions":
+			if !strings.EqualFold(key, "worktreeconfig") {
+				continue
+			}
+			if config.hasWorktreeConfig {
+				return gitCoreConfig{}, fmt.Errorf(
+					"line %d: duplicate extensions.worktreeConfig",
+					lineNumber+1,
+				)
+			}
+			worktreeConfig, booleanErr := gitConfigBoolean(value, hasValue)
+			if booleanErr != nil {
+				return gitCoreConfig{}, fmt.Errorf(
+					"line %d: invalid extensions.worktreeConfig: %w",
+					lineNumber+1,
+					booleanErr,
+				)
+			}
+			config.worktreeConfig = worktreeConfig
+			config.hasWorktreeConfig = true
+		}
+	}
+	if config.hasBare && config.bare && config.hasWorktree {
+		return gitCoreConfig{}, fmt.Errorf("conflicting core.bare=true and core.worktree")
+	}
+	return config, nil
+}
+
+func gitConfigLine(line string) (string, error) {
+	line = strings.TrimSuffix(line, "\r")
+	inQuote := false
+	escaped := false
+	for index := range len(line) {
+		char := line[index]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' {
+			escaped = true
+			continue
+		}
+		if char == '"' {
+			inQuote = !inQuote
+			continue
+		}
+		if !inQuote && (char == '#' || char == ';') {
+			return strings.TrimSpace(line[:index]), nil
+		}
+	}
+	if escaped {
+		return "", fmt.Errorf("line continuation is unsupported")
+	}
+	if inQuote {
+		return "", fmt.Errorf("unterminated quote")
+	}
+	return strings.TrimSpace(line), nil
+}
+
+func gitConfigSection(line string) (string, error) {
+	if !strings.HasSuffix(line, "]") {
+		return "", fmt.Errorf("invalid section header")
+	}
+	header := strings.TrimSpace(line[1 : len(line)-1])
+	if header == "" {
+		return "", fmt.Errorf("empty section header")
+	}
+	end := strings.IndexAny(header, " \t\"")
+	if end < 0 {
+		end = len(header)
+	}
+	name := header[:end]
+	if !validGitConfigName(name) {
+		return "", fmt.Errorf("invalid section name")
+	}
+	lowerName := strings.ToLower(name)
+	remainder := strings.TrimSpace(header[end:])
+	if remainder != "" &&
+		(len(remainder) < 2 || remainder[0] != '"' || remainder[len(remainder)-1] != '"') {
+		return "", fmt.Errorf("invalid section subsection")
+	}
+	if remainder != "" {
+		if lowerName == "include" || lowerName == "includeif" {
+			return lowerName, nil
+		}
+		return lowerName + ".subsection", nil
+	}
+	return lowerName, nil
+}
+
+func gitConfigAssignment(line string) (string, string, bool, error) {
+	key, rawValue, hasValue := strings.Cut(line, "=")
+	if hasValue {
+		key = strings.TrimSpace(key)
+		rawValue = strings.TrimSpace(rawValue)
+	}
+	key = strings.TrimSpace(key)
+	if !validGitConfigName(key) {
+		return "", "", false, fmt.Errorf("invalid variable name")
+	}
+	if !hasValue {
+		return key, "", false, nil
+	}
+	value, err := gitConfigValue(rawValue)
+	if err != nil {
+		return "", "", false, err
+	}
+	return key, value, true, nil
+}
+
+func validGitConfigName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index, char := range []byte(name) {
+		if char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' ||
+			index > 0 && (char >= '0' && char <= '9' || char == '-') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func gitConfigValue(value string) (string, error) {
+	quoted := strings.HasPrefix(value, "\"")
+	if quoted {
+		if len(value) < 2 || !strings.HasSuffix(value, "\"") {
+			return "", fmt.Errorf("unterminated quoted value")
+		}
+		value = value[1 : len(value)-1]
+	} else if strings.Contains(value, "\"") {
+		return "", fmt.Errorf("unsupported quote placement")
+	}
+	var result strings.Builder
+	for index := 0; index < len(value); index++ {
+		char := value[index]
+		if char != '\\' {
+			result.WriteByte(char)
+			continue
+		}
+		index++
+		if index == len(value) {
+			return "", fmt.Errorf("line continuation is unsupported")
+		}
+		switch value[index] {
+		case 'n':
+			result.WriteByte('\n')
+		case 't':
+			result.WriteByte('\t')
+		case 'b':
+			result.WriteByte('\b')
+		case '\\', '"':
+			result.WriteByte(value[index])
+		default:
+			return "", fmt.Errorf("unsupported escape sequence")
+		}
+	}
+	return result.String(), nil
+}
+
+func gitConfigBoolean(value string, hasValue bool) (bool, error) {
+	if !hasValue {
+		return true, nil
+	}
+	switch strings.ToLower(value) {
+	case "true", "yes", "on", "1":
+		return true, nil
+	case "false", "no", "off", "0":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unsupported boolean value")
+	}
+}
+
+// validateActiveWorktree validates that worktreeRoot is the linked worktree
+// containing JMW. It checks the .git marker and the registry round trip, which
+// already bind that root. Reading core.worktree or core.bare here would add no
+// further binding, because this path anchors to the worktree root itself and
+// never uses what the config says; it would only turn one repository's
+// unreadable config into a server startup failure. So this path deliberately
+// skips the config. linkedWorktree must read it, because it answers a different
+// question - where the main checkout is, for worktree.main_checkout.
 func validateActiveWorktree(worktreeRoot, markerPath, gitDir string) error {
-	mainCheckout, valid := mainCheckoutDir(gitDir)
+	commonDir, valid := commonGitDir(gitDir)
 	if !valid {
 		return fmt.Errorf("active git marker %q does not reference a worktree registry", markerPath)
 	}
-	canonicalMain, err := filepath.EvalSymlinks(mainCheckout)
+	canonicalCommon, err := filepath.EvalSymlinks(commonDir)
 	if err != nil {
-		return fmt.Errorf("resolve active worktree main checkout %q: %w", mainCheckout, err)
+		return fmt.Errorf("resolve active worktree common git directory %q: %w", commonDir, err)
 	}
-	if filepath.Clean(canonicalMain) != filepath.Clean(mainCheckout) {
-		return fmt.Errorf("active worktree main checkout %q is not canonical", mainCheckout)
+	if filepath.Clean(canonicalCommon) != filepath.Clean(commonDir) {
+		return fmt.Errorf("active worktree common git directory %q is not canonical", commonDir)
 	}
 	resolver := newPathResolver(context.Background())
-	resolvedGitDir, state, err := resolver.resolveGitRegistryEntry(canonicalMain, gitDir)
+	resolvedGitDir, state, err := resolver.resolveCommonGitRegistryEntry(canonicalCommon, gitDir)
 	if err != nil {
 		return fmt.Errorf("validate active worktree registry: %w", err)
 	}
@@ -544,8 +1025,8 @@ func canonicalPathWithMissing(path string) (string, error) {
 			if resolveErr != nil {
 				return "", fmt.Errorf("resolve active directory %q: %w", path, resolveErr)
 			}
-			for index := len(missing) - 1; index >= 0; index-- {
-				resolved = filepath.Join(resolved, missing[index])
+			for _, component := range slices.Backward(missing) {
+				resolved = filepath.Join(resolved, component)
 			}
 			return filepath.Clean(resolved), nil
 		}
@@ -561,15 +1042,17 @@ func canonicalPathWithMissing(path string) (string, error) {
 	}
 }
 
-func mainCheckoutDir(worktreeGitDir string) (string, bool) {
+func commonGitDir(worktreeGitDir string) (string, bool) {
 	entryDir := filepath.Clean(worktreeGitDir)
 	worktreesDir := filepath.Dir(entryDir)
-	gitDir := filepath.Dir(worktreesDir)
-	if !pathNamesEqual(filepath.Base(worktreesDir), "worktrees") ||
-		!pathNamesEqual(filepath.Base(gitDir), ".git") {
+	if !pathNamesEqual(filepath.Base(worktreesDir), "worktrees") {
 		return "", false
 	}
-	return filepath.Dir(gitDir), true
+	commonDir := filepath.Dir(worktreesDir)
+	if commonDir == filepath.Dir(commonDir) {
+		return "", false
+	}
+	return commonDir, true
 }
 
 func readMarker(path string) (string, bool, error) {
@@ -796,19 +1279,19 @@ func (r *pathResolver) isCanonicalGitMarker(path string) (bool, error) {
 	return sameResolvedPath(canonical, path)
 }
 
-func (r *pathResolver) resolveGitRegistryEntry(
-	mainCheckout string,
+func (r *pathResolver) resolveCommonGitRegistryEntry(
+	commonGitDir string,
 	requested string,
 ) (string, pathState, error) {
-	resolved, state, err := r.resolveWithin(mainCheckout, requested, resolvedDirectory)
+	resolved, state, err := r.resolveWithin(commonGitDir, requested, resolvedDirectory)
 	if err != nil || state != pathResolved {
 		return "", state, err
 	}
-	gitDir, state, err := r.resolveExactChild(mainCheckout, ".git", resolvedDirectory)
-	if err != nil || state != pathResolved {
-		return "", state, err
-	}
-	worktreesDir, state, err := r.resolveExactChild(gitDir, "worktrees", resolvedDirectory)
+	worktreesDir, state, err := r.resolveExactChild(
+		commonGitDir,
+		"worktrees",
+		resolvedDirectory,
+	)
 	if err != nil || state != pathResolved {
 		return "", state, err
 	}

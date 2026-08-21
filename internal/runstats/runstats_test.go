@@ -13,7 +13,8 @@ import (
 
 //nolint:gocyclo // This test pins the aggregate rules in one readable scenario.
 func TestCollectorExcludesAbortedDurationsAndOmitsShellTaskAggregate(t *testing.T) {
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,7 +83,8 @@ func TestAggregateOmitsDurationsWhenOnlyAbortedRunsMatch(t *testing.T) {
 }
 
 func TestCollectorTreatsOmittedAndEmptyArgumentsAsOneKey(t *testing.T) {
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

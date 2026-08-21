@@ -611,7 +611,7 @@ type fakeJustRunner struct{}
 func (fakeJustRunner) Name() string { return "just" }
 
 func TestDiscoverAdmitsRegisteredWorktreeWithoutWideningScan(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	mainDir := filepath.Join(root, "project")
 	worktreeDir := filepath.Join(mainDir, ".wt", "feature")
 	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
@@ -690,6 +690,521 @@ func TestActiveWorktreeRootSupportsAbsoluteAndRelativeMarkers(t *testing.T) {
 				)
 			}
 		})
+	}
+}
+
+func TestActiveWorktreeRootSupportsBareCommonGitDirectory(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		relative bool
+	}{
+		{name: "absolute"},
+		{name: "relative", relative: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			base := canonicalTempDir(t)
+			bareDir := filepath.Join(base, "repository.git")
+			worktreeDir := filepath.Join(base, "linked")
+			nested := filepath.Join(worktreeDir, "nested")
+			writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree root")
+			writeFile(t, filepath.Join(nested, "justfile"), "worktree")
+			writeBareWorktreeMarkers(
+				t,
+				bareDir,
+				worktreeDir,
+				"feature",
+				testCase.relative,
+			)
+
+			root, linked, err := ActiveWorktreeRoot(nested)
+			if err != nil || !linked || root != worktreeDir {
+				t.Fatalf(
+					"ActiveWorktreeRoot = %q, %t, %v, want %q, true",
+					root,
+					linked,
+					err,
+					worktreeDir,
+				)
+			}
+			registry, err := NewRegistry(nested, mustRunnerRegistry(t), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if registry.WorktreeRoot() != worktreeDir {
+				t.Fatalf("registry worktree root = %q, want %q", registry.WorktreeRoot(), worktreeDir)
+			}
+			discoveryRegistry, err := NewRegistry(base, mustRunnerRegistry(t), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			projects, _, err := discoveryRegistry.Discover(
+				context.Background(),
+				Filter{Path: ".", MaxDepth: 1},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var linkedProject *Project
+			for index := range projects {
+				if projects[index].RelPath == "linked" {
+					linkedProject = &projects[index]
+					break
+				}
+			}
+			if linkedProject == nil || linkedProject.Worktree == nil ||
+				linkedProject.Worktree.MainCheckout != "<bare-repository>" {
+				t.Fatalf("bare linked project = %#v", linkedProject)
+			}
+		})
+	}
+}
+
+//nolint:gocyclo // Table setup explicitly distinguishes case-sensitive filesystems.
+func TestFindClassifiesCommonGitDirectoryFromConfig(t *testing.T) {
+	const configWorktreeSentinel = "config-worktree-contents-must-not-be-disclosed"
+
+	for _, testCase := range []struct {
+		name                 string
+		commonDir            func(string) string
+		config               func(string, string) string
+		wantMain             string
+		wantError            string
+		commonConfigWorktree string
+		relative             bool
+		linkedConfigWorktree bool
+	}{
+		{
+			name: "ordinary-dot-git-non-bare",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "main", ".git")
+			},
+			config:   func(string, string) string { return "[core]\n\tbare = false\n" },
+			wantMain: "main",
+		},
+		{
+			name: "bare-custom-name",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "repository.git")
+			},
+			config:   func(string, string) string { return "[core]\n\tbare = true\n" },
+			wantMain: bareRepositoryMainCheckout,
+		},
+		{
+			name: "bare-named-dot-git",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "bare-container", ".git")
+			},
+			config:   func(string, string) string { return "[core]\n\tbare = true\n" },
+			wantMain: bareRepositoryMainCheckout,
+		},
+		{
+			name: "separate-git-dir-relative-worktree",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "metadata.git")
+			},
+			config: func(commonDir, mainDir string) string {
+				relative, err := filepath.Rel(commonDir, mainDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return "[core]\n\tbare = false\n\tworktree = " + relative + "\n"
+			},
+			wantMain: "main",
+			relative: true,
+		},
+		{
+			name: "separate-git-dir-absolute-worktree",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "absolute-metadata.git")
+			},
+			config: func(_ string, mainDir string) string {
+				return "[core]\n\tbare = false\n\tworktree = " + mainDir + "\n"
+			},
+			wantMain: "main",
+		},
+		{
+			name: "worktree-config-extension-without-main-config-worktree",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "main", ".git")
+			},
+			config: func(string, string) string {
+				return "[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n"
+			},
+			wantMain: "main",
+		},
+		{
+			name: "worktree-config-extension-with-main-config-worktree",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "main", ".git")
+			},
+			config: func(string, string) string {
+				return "[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n"
+			},
+			wantError:            "per-worktree configuration",
+			commonConfigWorktree: "config.worktree",
+		},
+		{
+			name: "worktree-config-extension-with-alternate-case-main-config-worktree",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "main", ".git")
+			},
+			config: func(string, string) string {
+				return "[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n"
+			},
+			wantError:            "per-worktree configuration",
+			commonConfigWorktree: "Config.worktree",
+		},
+		{
+			name: "worktree-config-extension-with-linked-config-worktree",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "main", ".git")
+			},
+			config: func(string, string) string {
+				return "[core]\n\tbare = false\n[extensions]\n\tworktreeConfig = true\n"
+			},
+			wantMain:             "main",
+			linkedConfigWorktree: true,
+		},
+		{
+			name: "missing-core-bare",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "missing-bare.git")
+			},
+			config: func(commonDir, mainDir string) string {
+				relative, err := filepath.Rel(commonDir, mainDir)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return "[core]\n\tworktree = " + relative + "\n"
+			},
+			wantError: "missing required core.bare",
+		},
+		{
+			name: "invalid-core-bare",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "invalid-bare.git")
+			},
+			config:    func(string, string) string { return "[core]\n\tbare = maybe\n" },
+			wantError: "unsupported boolean value",
+		},
+		{
+			name: "custom-non-bare-missing-worktree",
+			commonDir: func(base string) string {
+				return filepath.Join(base, "missing-worktree.git")
+			},
+			config:    func(string, string) string { return "[core]\n\tbare = false\n" },
+			wantError: "missing required core.worktree",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			base := canonicalTempDir(t)
+			mainDir := filepath.Join(base, "main")
+			worktreeDir := filepath.Join(base, "linked")
+			commonDir := testCase.commonDir(base)
+			writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+			writeFile(t, filepath.Join(worktreeDir, "justfile"), "linked")
+			writeConfiguredCommonWorktreeMarkers(
+				t,
+				commonDir,
+				worktreeDir,
+				"feature",
+				testCase.config(commonDir, mainDir),
+				testCase.relative,
+			)
+			if testCase.commonConfigWorktree != "" {
+				writeFile(
+					t,
+					filepath.Join(commonDir, testCase.commonConfigWorktree),
+					configWorktreeSentinel,
+				)
+				if testCase.commonConfigWorktree != "config.worktree" {
+					_, statErr := os.Lstat(filepath.Join(commonDir, "config.worktree"))
+					if errors.Is(statErr, os.ErrNotExist) {
+						t.Skip("filesystem is case-sensitive; alternate-case config.worktree is not applicable")
+					}
+					if statErr != nil {
+						t.Fatalf("inspect alternate-case config.worktree: %v", statErr)
+					}
+				}
+			}
+			if testCase.linkedConfigWorktree {
+				writeFile(
+					t,
+					filepath.Join(commonDir, "worktrees", "feature", "config.worktree"),
+					configWorktreeSentinel,
+				)
+			}
+
+			registry, err := NewRegistry(base, mustRunnerRegistry(t), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			project, findErr := registry.Find(context.Background(), "linked")
+			if findErr != nil {
+				t.Fatal(findErr)
+			}
+			if testCase.wantError != "" {
+				issue := project.Errors[worktreeIssue]
+				if !strings.Contains(issue, testCase.wantError) {
+					t.Fatalf("worktree issue = %q, want %q", issue, testCase.wantError)
+				}
+				if strings.Contains(issue, configWorktreeSentinel) {
+					t.Fatalf("worktree issue disclosed config.worktree contents: %q", issue)
+				}
+				return
+			}
+			if project.Worktree == nil || project.Worktree.MainCheckout != testCase.wantMain {
+				t.Fatalf("worktree annotation = %#v, want %q", project.Worktree, testCase.wantMain)
+			}
+		})
+	}
+}
+
+func TestFindRejectsSymlinkedCustomCommonGitDirectory(t *testing.T) {
+	base := canonicalTempDir(t)
+	worktreeDir := filepath.Join(base, "linked")
+	realCommonDir := filepath.Join(base, "real.git")
+	aliasCommonDir := filepath.Join(base, "alias.git")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "linked")
+	writeConfiguredCommonWorktreeMarkers(
+		t,
+		realCommonDir,
+		worktreeDir,
+		"feature",
+		"[core]\n\tbare = true\n",
+		false,
+	)
+	if err := os.Symlink(realCommonDir, aliasCommonDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	writeFile(
+		t,
+		filepath.Join(worktreeDir, ".git"),
+		"gitdir: "+filepath.Join(aliasCommonDir, "worktrees", "feature")+"\n",
+	)
+	registry, err := NewRegistry(base, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := registry.Find(context.Background(), "linked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if issue := project.Errors[worktreeIssue]; !strings.Contains(issue, "unsafe or missing") {
+		t.Fatalf("worktree issue = %q, want symlink rejection", issue)
+	}
+}
+
+func TestReadGitCoreConfigRejectsOversizedFile(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config")
+	writeFile(t, configPath, strings.Repeat("#", maxGitConfigBytes+1))
+
+	_, err := readGitCoreConfig(configPath)
+	wantError := fmt.Sprintf(
+		"git config %q exceeds %d bytes",
+		configPath,
+		maxGitConfigBytes,
+	)
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("readGitCoreConfig error = %v, want %q", err, wantError)
+	}
+}
+
+func TestReadGitCoreConfigRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	targetPath := filepath.Join(root, "valid-config")
+	writeFile(t, targetPath, "[core]\n\tbare = false\n")
+	configPath := filepath.Join(root, "config")
+	if err := os.Symlink(targetPath, configPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	_, err := readGitCoreConfig(configPath)
+	wantError := fmt.Sprintf(
+		"git config %q is not a regular non-symlink file",
+		configPath,
+	)
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("readGitCoreConfig error = %v, want %q", err, wantError)
+	}
+}
+
+func TestParseGitCoreConfigRejectsAmbiguousClassification(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		config     string
+		wantError  string
+		wantAbsent string
+	}{
+		{
+			name:      "duplicate-bare",
+			config:    "[core]\n\tbare = true\n\tBARE = true\n",
+			wantError: "duplicate core.bare",
+		},
+		{
+			name:      "duplicate-worktree",
+			config:    "[core]\n\tbare = false\n\tworktree = one\n\tWORKTREE = two\n",
+			wantError: "duplicate core.worktree",
+		},
+		{
+			name:      "conflicting-bare-and-worktree",
+			config:    "[core]\n\tbare = true\n\tworktree = ..\n",
+			wantError: "conflicting core.bare=true and core.worktree",
+		},
+		{
+			name:      "include",
+			config:    "[core]\n\tbare = false\n[include]\n\tpath = other\n",
+			wantError: "include-driven config is unsupported",
+		},
+		{
+			name:      "conditional-include",
+			config:    "[includeIf \"gitdir:~/work/\"]\n\tpath = other\n[core]\n\tbare = false\n",
+			wantError: "include-driven config is unsupported",
+		},
+		{
+			name:      "ambiguous-section",
+			config:    "[core\n\tbare = false\n",
+			wantError: "invalid section header",
+		},
+		{
+			name:       "invalid-section-name-redacted",
+			config:     "[section-name-must-not-leak!]\n",
+			wantError:  "invalid section name",
+			wantAbsent: "section-name-must-not-leak",
+		},
+		{
+			name:       "invalid-variable-name-redacted",
+			config:     "[core]\n\tvariable-name-must-not-leak! = true\n",
+			wantError:  "invalid variable name",
+			wantAbsent: "variable-name-must-not-leak",
+		},
+		{
+			name:       "unsupported-boolean-redacted",
+			config:     "[core]\n\tbare = boolean-value-must-not-leak\n",
+			wantError:  "unsupported boolean value",
+			wantAbsent: "boolean-value-must-not-leak",
+		},
+		{
+			name:      "assignment-before-section",
+			config:    "bare = false\n[core]\n\tbare = false\n",
+			wantError: "line 1: assignment outside a section is unsupported",
+		},
+		{
+			name:      "unsupported-escape",
+			config:    "[core]\n\tbare = false\n\tworktree = \"bad\\q\"\n",
+			wantError: "unsupported escape sequence",
+		},
+		{
+			name:      "unsupported-continuation",
+			config:    "[core]\n\tbare = false\\\n",
+			wantError: "line continuation is unsupported",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, err := parseGitCoreConfig(testCase.config)
+			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
+				t.Fatalf("parseGitCoreConfig error = %v, want %q", err, testCase.wantError)
+			}
+			if testCase.wantAbsent != "" && strings.Contains(err.Error(), testCase.wantAbsent) {
+				t.Fatalf("parseGitCoreConfig error disclosed config contents: %v", err)
+			}
+		})
+	}
+}
+
+func TestFindRedactsConfiguredMainCheckoutResolverError(t *testing.T) {
+	const sentinel = "configured-main-checkout-must-not-leak"
+
+	base := canonicalTempDir(t)
+	worktreeDir := filepath.Join(base, "linked")
+	commonDir := filepath.Join(base, "metadata.git")
+	unreadableDir := filepath.Join(base, sentinel)
+	mainDir := filepath.Join(unreadableDir, "main")
+	if err := os.MkdirAll(mainDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unreadableDir, 0); err != nil {
+		t.Skipf("cannot make configured main checkout unusable: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(unreadableDir, 0o750); err != nil {
+			t.Errorf("restore configured main checkout permissions: %v", err)
+		}
+	})
+	if _, err := os.ReadDir(unreadableDir); err == nil {
+		t.Skip("directory permissions do not make configured main checkout unusable")
+	}
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "linked")
+	writeConfiguredCommonWorktreeMarkers(
+		t,
+		commonDir,
+		worktreeDir,
+		"feature",
+		"[core]\n\tbare = false\n\tworktree = "+mainDir+"\n",
+		false,
+	)
+
+	registry, err := NewRegistry(base, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, findErr := registry.Find(context.Background(), "linked")
+	if findErr != nil {
+		t.Fatal(findErr)
+	}
+	issue := project.Errors[worktreeIssue]
+	if strings.Contains(issue, sentinel) {
+		t.Fatalf("worktree issue disclosed configured main checkout: %q", issue)
+	}
+	if !strings.Contains(issue, "validate configured main checkout") {
+		t.Fatalf("worktree issue = %q, want configured checkout validation error", issue)
+	}
+}
+
+func TestActiveWorktreeRootStopsAtNestedRepositoryBoundary(t *testing.T) {
+	for _, markerKind := range []string{"directory", "file"} {
+		t.Run(markerKind, func(t *testing.T) {
+			base := canonicalTempDir(t)
+			mainDir := filepath.Join(base, "main")
+			worktreeDir := filepath.Join(base, "linked")
+			nestedRepo := filepath.Join(worktreeDir, "nested-repository")
+			selectedDir := filepath.Join(nestedRepo, "service")
+			writeFile(t, filepath.Join(selectedDir, "justfile"), "nested")
+			writeWorktreeMarkers(t, mainDir, worktreeDir, "feature")
+			switch markerKind {
+			case "directory":
+				if err := os.Mkdir(filepath.Join(nestedRepo, ".git"), 0o750); err != nil {
+					t.Fatal(err)
+				}
+			case "file":
+				submoduleGitDir := filepath.Join(mainDir, ".git", "modules", "nested-repository")
+				writeFile(
+					t,
+					filepath.Join(nestedRepo, ".git"),
+					"gitdir: "+submoduleGitDir+"\n",
+				)
+			}
+
+			root, linked, err := ActiveWorktreeRoot(selectedDir)
+			if err != nil || linked || root != "" {
+				t.Fatalf(
+					"ActiveWorktreeRoot = %q, %t, %v, want empty, false",
+					root,
+					linked,
+					err,
+				)
+			}
+		})
+	}
+}
+
+func TestActiveWorktreeRootKeepsStandaloneCheckoutNonLinked(t *testing.T) {
+	root := canonicalTempDir(t)
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if got, linked, err := ActiveWorktreeRoot(root); err != nil || linked || got != "" {
+		t.Fatalf("ActiveWorktreeRoot = %q, %t, %v, want empty, false", got, linked, err)
 	}
 }
 
@@ -945,6 +1460,55 @@ func TestDiscoverDoesNotAnnotateCandidateThroughSymlinkAlias(t *testing.T) {
 	}
 }
 
+func TestDiscoverReportsWorktreeClassificationFailureOnProject(t *testing.T) {
+	const configSentinel = "git-config-content-must-not-be-disclosed"
+
+	root := canonicalTempDir(t)
+	mainDir := filepath.Join(root, "main")
+	worktreeDir := filepath.Join(root, "linked")
+	healthyDir := filepath.Join(root, "healthy")
+	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(worktreeDir, "justfile"), "linked")
+	writeFile(t, filepath.Join(healthyDir, "justfile"), "healthy")
+	writeConfiguredCommonWorktreeMarkers(
+		t,
+		filepath.Join(mainDir, ".git"),
+		worktreeDir,
+		"feature",
+		"[core]\n\tbare = "+configSentinel+"\n",
+		false,
+	)
+
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projects, _, err := registry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := projectPaths(projects)
+	want := []string{"healthy", "linked", "main"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths = %#v, want %#v", got, want)
+	}
+	linked := projectAt(t, projects, "linked")
+	issue := linked.Errors[worktreeIssue]
+	if linked.Status != "error" || !strings.Contains(issue, "unsupported boolean value") {
+		t.Fatalf("linked project = %#v, want worktree classification error", linked)
+	}
+	if strings.Contains(issue, configSentinel) {
+		t.Fatalf("worktree issue disclosed git config contents: %q", issue)
+	}
+	healthy := projectAt(t, projects, "healthy")
+	if healthy.Status != "ready" || len(healthy.Errors) != 0 {
+		t.Fatalf("healthy project = %#v, want ready without errors", healthy)
+	}
+}
+
 func TestDiscoverReturnsWorktreeDirectoryInspectionError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission bits are required for this error path")
@@ -1022,7 +1586,7 @@ func TestDiscoverReturnsWorktreeMarkerReadError(t *testing.T) {
 	}
 }
 
-func TestFindReturnsWorktreeMarkerReadError(t *testing.T) {
+func TestFindReportsWorktreeMarkerReadError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission bits are required for this error path")
 	}
@@ -1050,17 +1614,16 @@ func TestFindReturnsWorktreeMarkerReadError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = registry.Find(context.Background(), "linked")
-	if err == nil {
-		t.Fatal("Find succeeded with an unreadable worktree marker")
+	project, err := registry.Find(context.Background(), "linked")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !errors.Is(err, os.ErrPermission) ||
-		!strings.Contains(err.Error(), "inspect worktree metadata") {
-		t.Fatalf("Find error = %v, want contextual permission error", err)
+	if issue := project.Errors[worktreeIssue]; !strings.Contains(issue, "read marker") {
+		t.Fatalf("worktree issue = %q, want contextual permission error", issue)
 	}
 }
 
-func TestFindTreatsSymlinkedMainCheckoutAsOutsideWorkspace(t *testing.T) {
+func TestFindRejectsSymlinkedCommonGitDirectory(t *testing.T) {
 	root := t.TempDir()
 	externalMain := t.TempDir()
 	mainLink := filepath.Join(root, "main-link")
@@ -1069,6 +1632,12 @@ func TestFindTreatsSymlinkedMainCheckoutAsOutsideWorkspace(t *testing.T) {
 	}
 	worktreeDir := filepath.Join(root, "linked")
 	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
+	writeFile(t, filepath.Join(externalMain, ".git", "config"), "[core]\n\tbare = false\n")
+	writeFile(
+		t,
+		filepath.Join(externalMain, ".git", "worktrees", "linked", "gitdir"),
+		filepath.Join(worktreeDir, ".git")+"\n",
+	)
 	writeFile(
 		t,
 		filepath.Join(worktreeDir, ".git"),
@@ -1083,9 +1652,8 @@ func TestFindTreatsSymlinkedMainCheckoutAsOutsideWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if project.Worktree == nil ||
-		project.Worktree.MainCheckout != outsideWorkspaceMainCheckout {
-		t.Fatalf("worktree annotation = %#v, want outside workspace", project.Worktree)
+	if issue := project.Errors[worktreeIssue]; !strings.Contains(issue, "unsafe or missing") {
+		t.Fatalf("worktree issue = %q, want symlink rejection", issue)
 	}
 }
 
@@ -1095,6 +1663,7 @@ func TestFindRejectsInternalRegistryThroughSymlink(t *testing.T) {
 	worktreeDir := filepath.Join(root, "linked")
 	externalGitDir := t.TempDir()
 	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(externalGitDir, "config"), "[core]\n\tbare = false\n")
 	if err := os.Symlink(externalGitDir, filepath.Join(mainDir, ".git")); err != nil {
 		t.Skipf("cannot create directory symlink: %v", err)
 	}
@@ -1118,8 +1687,8 @@ func TestFindRejectsInternalRegistryThroughSymlink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if project.Worktree != nil {
-		t.Fatalf("worktree annotation = %#v, want nil", project.Worktree)
+	if issue := project.Errors[worktreeIssue]; !strings.Contains(issue, "unsafe or missing") {
+		t.Fatalf("worktree issue = %q, want symlink rejection", issue)
 	}
 }
 
@@ -1132,6 +1701,7 @@ func TestDiscoverUsesWindowsFilesystemIdentityForWorktreePaths(t *testing.T) {
 	worktreeDir := filepath.Join(mainDir, ".wt", "FeatureCase")
 	entryDir := filepath.Join(mainDir, ".git", "worktrees", "FeatureCase")
 	writeFile(t, filepath.Join(mainDir, "justfile"), "main")
+	writeFile(t, filepath.Join(mainDir, ".git", "config"), "[core]\n\tbare = false\n")
 	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
 	writeFile(
 		t,
@@ -1349,15 +1919,12 @@ func TestDiscoverRejectsAlternateCaseWorktreeMarkerOnCaseSensitiveWindows(
 }
 
 func TestFindAnnotatesWorktreeWhoseMainCheckoutIsOutsideWorkspace(t *testing.T) {
-	root := t.TempDir()
+	root := canonicalTempDir(t)
 	worktreeDir := filepath.Join(root, "linked")
-	externalMain := t.TempDir()
+	externalMain := canonicalTempDir(t)
 	writeFile(t, filepath.Join(worktreeDir, "justfile"), "worktree")
-	writeFile(
-		t,
-		filepath.Join(worktreeDir, ".git"),
-		"gitdir: "+filepath.Join(externalMain, ".git", "worktrees", "linked")+"\n",
-	)
+	writeWorktreeMarkers(t, externalMain, worktreeDir, "linked")
+	writeFile(t, filepath.Join(externalMain, ".git", "config"), "[invalid-section\n")
 
 	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
 	if err != nil {
@@ -1375,14 +1942,20 @@ func TestFindAnnotatesWorktreeWhoseMainCheckoutIsOutsideWorkspace(t *testing.T) 
 
 func writeWorktreeMarkers(t *testing.T, mainDir, worktreeDir, name string) {
 	t.Helper()
+	mainDir = canonicalTestPath(t, mainDir)
+	worktreeDir = canonicalTestPath(t, worktreeDir)
 	entryDir := filepath.Join(mainDir, ".git", "worktrees", name)
+	writeFile(t, filepath.Join(mainDir, ".git", "config"), "[core]\n\tbare = false\n")
 	writeFile(t, filepath.Join(entryDir, "gitdir"), filepath.Join(worktreeDir, ".git")+"\n")
 	writeFile(t, filepath.Join(worktreeDir, ".git"), "gitdir: "+entryDir+"\n")
 }
 
 func writeRelativeWorktreeMarkers(t *testing.T, mainDir, worktreeDir, name string) {
 	t.Helper()
+	mainDir = canonicalTestPath(t, mainDir)
+	worktreeDir = canonicalTestPath(t, worktreeDir)
 	entryDir := filepath.Join(mainDir, ".git", "worktrees", name)
+	writeFile(t, filepath.Join(mainDir, ".git", "config"), "[core]\n\tbare = false\n")
 	backReference, err := filepath.Rel(entryDir, filepath.Join(worktreeDir, ".git"))
 	if err != nil {
 		t.Fatal(err)
@@ -1395,6 +1968,55 @@ func writeRelativeWorktreeMarkers(t *testing.T, mainDir, worktreeDir, name strin
 	writeFile(t, filepath.Join(worktreeDir, ".git"), "gitdir: "+gitDir+"\n")
 }
 
+func writeBareWorktreeMarkers(
+	t *testing.T,
+	bareDir string,
+	worktreeDir string,
+	name string,
+	relative bool,
+) {
+	t.Helper()
+	writeConfiguredCommonWorktreeMarkers(
+		t,
+		bareDir,
+		worktreeDir,
+		name,
+		"[core]\n\tbare = true\n",
+		relative,
+	)
+}
+
+func writeConfiguredCommonWorktreeMarkers(
+	t *testing.T,
+	commonDir string,
+	worktreeDir string,
+	name string,
+	config string,
+	relative bool,
+) {
+	t.Helper()
+	commonDir = canonicalTestPath(t, commonDir)
+	worktreeDir = canonicalTestPath(t, worktreeDir)
+	entryDir := filepath.Join(commonDir, "worktrees", name)
+	writeFile(t, filepath.Join(commonDir, "config"), config)
+	markerPath := filepath.Join(worktreeDir, ".git")
+	gitDirValue := entryDir
+	backReference := markerPath
+	if relative {
+		var err error
+		gitDirValue, err = filepath.Rel(worktreeDir, entryDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		backReference, err = filepath.Rel(entryDir, markerPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(entryDir, "gitdir"), backReference+"\n")
+	writeFile(t, markerPath, "gitdir: "+gitDirValue+"\n")
+}
+
 func canonicalTempDir(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -1402,6 +2024,15 @@ func canonicalTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return root
+}
+
+func canonicalTestPath(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := canonicalPathWithMissing(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 func testRegistration(candidate runner.Runner) runner.Registration {

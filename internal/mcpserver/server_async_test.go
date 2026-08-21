@@ -476,7 +476,7 @@ func newForeignRun(t *testing.T) (*Server, string) {
 	t.Helper()
 	root := t.TempDir()
 	server := newShellTestServer(t, root)
-	store, err := runstore.New(root)
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,8 @@ func TestPrepareStartsWindowsProcessSuspended(t *testing.T) {
 }
 
 func TestExecuteCancellationKillsWindowsJob(t *testing.T) {
-	store, err := runstore.New(t.TempDir())
+	root := t.TempDir()
+	store, err := runstore.NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -71,6 +72,66 @@ func TestInitWritesMCPConfigByDefault(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"just-mcp-work"`) {
 		t.Fatalf("MCP config does not contain the server entry:\n%s", data)
+	}
+}
+
+func TestInitSnippetPinsSelectedLinkedWorktreeWhenCWDIsDifferent(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	callerDir := filepath.Join(base, "caller")
+	mainDir := filepath.Join(base, "main")
+	worktreeDir := filepath.Join(base, "linked")
+	selectedDir := filepath.Join(worktreeDir, "nested")
+	entryDir := filepath.Join(mainDir, ".git", "worktrees", "feature")
+	for path, contents := range map[string]string{
+		filepath.Join(entryDir, "gitdir"):  filepath.Join(worktreeDir, ".git") + "\n",
+		filepath.Join(worktreeDir, ".git"): "gitdir: " + entryDir + "\n",
+	} {
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if writeErr := os.WriteFile(path, []byte(contents), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	for _, path := range []string{callerDir, selectedDir} {
+		if mkdirErr := os.MkdirAll(path, 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+	}
+	t.Chdir(callerDir)
+
+	var output bytes.Buffer
+	if initErr := initCommandWithIO(
+		[]string{
+			"--dir", selectedDir,
+			"--agents", "codex",
+			"--write-mcp-config=false",
+		},
+		strings.NewReader(""),
+		&output,
+		io.Discard,
+	); initErr != nil {
+		t.Fatal(initErr)
+	}
+	jsonStart := strings.Index(output.String(), "{")
+	if jsonStart < 0 {
+		t.Fatalf("init output has no MCP snippet:\n%s", output.String())
+	}
+	var snippet struct {
+		Servers map[string]struct {
+			Args []string `json:"args"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal([]byte(output.String()[jsonStart:]), &snippet); err != nil {
+		t.Fatalf("decode MCP snippet: %v\n%s", err, output.String())
+	}
+	args := snippet.Servers["just-mcp-work"].Args
+	wantPrefix := []string{"serve", "--root", worktreeDir}
+	if len(args) < len(wantPrefix) || !slices.Equal(args[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("snippet args = %#v, want prefix %#v", args, wantPrefix)
 	}
 }
 
@@ -386,15 +447,15 @@ func TestResolveServeRootAnchorsOnlyImplicitLinkedWorktree(t *testing.T) {
 		filepath.Join(entryDir, "gitdir"):  filepath.Join(worktreeDir, ".git") + "\n",
 		filepath.Join(worktreeDir, ".git"): "gitdir: " + entryDir + "\n",
 	} {
-		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-			t.Fatal(err)
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
 		}
-		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
-			t.Fatal(err)
+		if writeErr := os.WriteFile(path, []byte(contents), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
 		}
 	}
-	if err := os.MkdirAll(nested, 0o750); err != nil {
-		t.Fatal(err)
+	if mkdirErr := os.MkdirAll(nested, 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
 	}
 
 	root, err := resolveServeRoot(serveOptions{Root: nested})
@@ -404,6 +465,25 @@ func TestResolveServeRootAnchorsOnlyImplicitLinkedWorktree(t *testing.T) {
 	root, err = resolveServeRoot(serveOptions{Root: nested, RootExplicit: true})
 	if err != nil || root != nested {
 		t.Fatalf("explicit root = %q, %v, want %q", root, err, nested)
+	}
+}
+
+func TestResolveServeRootReportsMalformedActiveMarker(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeErr := os.WriteFile(
+		filepath.Join(root, ".git"),
+		[]byte("gitdir: first\nsecond\n"),
+		0o600,
+	); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+
+	if _, resolveErr := resolveServeRoot(serveOptions{Root: root}); resolveErr == nil ||
+		!strings.Contains(resolveErr.Error(), "must contain one line") {
+		t.Fatalf("resolveServeRoot error = %v, want malformed root marker error", resolveErr)
 	}
 }
 
