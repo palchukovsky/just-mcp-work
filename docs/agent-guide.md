@@ -300,7 +300,7 @@ Discovery:
   `max_depth`, `include_hidden`, `runners`.
 - **`list_tasks`** - what can be run in one project. Inputs: `project_path`,
   `runner`, one of `names` / `name_prefix` / `query`, `visibility`, `detail`,
-  `include_stats`, `include_metadata`.
+  `include_stats`, `include_metadata`, `limit`, `cursor`.
 
 Execution:
 
@@ -350,6 +350,14 @@ removed (`pruned.runner`, `pruned.visibility`, `pruned.name`), and
 `unknown_names`: requested names that exist nowhere in the project. An entry in
 `unknown_names` means your name is wrong; an empty result with
 `pruned.name: 0` means the project has no tasks at all.
+
+Pagination is applied after all task selectors and detail options. `limit`
+defaults to 50 and has a maximum of 200. To continue, pass the server-emitted
+`next_cursor` back as the exclusive `cursor` with unchanged filter and detail
+inputs. `truncated: true` and a non-empty `next_cursor` mean another page
+remains; both fields are absent on the terminal page. `applied_filter.returned`
+counts tasks in the current page, while its discovery, pruning, and unknown-name
+counters describe the full task catalog selection.
 
 ### Reading output
 

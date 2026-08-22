@@ -156,6 +156,8 @@ def smoke(_: argparse.Namespace) -> None:
                     "detail",
                     "include_stats",
                     "include_metadata",
+                    "limit",
+                    "cursor",
                 },
                 required={"project_path"},
             )

@@ -85,7 +85,8 @@ HOW TO DRIVE IT
   keeps task identity and parameters, returns at most the first 160 runes of the
   first description line, and drops runner metadata and run statistics. Only
   names, name_prefix, and query are mutually exclusive: use one of those per
-  call.
+  call. Each response is a page: limit defaults to 50 and has a maximum of 200;
+  when truncated is true, continue with next_cursor and unchanged inputs.
 - run_task runs a discovered task and promotes a long run to the background;
   start_task starts it in the background from the beginning.
 - A task may be absent because the operator withheld it through a runner mode.

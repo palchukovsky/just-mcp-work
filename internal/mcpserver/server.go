@@ -44,9 +44,11 @@ func listTasksDescription() string {
 		"search when the exact name is unknown, visibility keeps public or private tasks, and " +
 		"detail: compact keeps identity and parameters, returns at most the first 160 runes of the " +
 		"first description line, and drops runner metadata and run statistics. names, name_prefix, " +
-		"and query answer different questions and must not be combined. applied_filter reports the " +
-		"effective filter, how many tasks it removed, and any requested name that exists nowhere in " +
-		"the project."
+		"and query answer different questions and must not be combined. Results are paginated after " +
+		"filtering: limit defaults to 50 and has a maximum of 200, and cursor is the exclusive " +
+		"server-emitted next_cursor from the previous page with unchanged inputs. truncated and " +
+		"next_cursor explicitly report continuation. applied_filter reports the effective filter, " +
+		"how many tasks it removed, and any requested name that exists nowhere in the project."
 }
 
 // runShellCommandDescription describes the ad-hoc escape hatch of this server.
@@ -433,6 +435,9 @@ const (
 	taskVisibilityPrivate = "private"
 	taskDetailFull        = "full"
 	taskDetailCompact     = "compact"
+	taskListDefaultLimit  = 50
+	runListDefaultLimit   = 20
+	maxListLimit          = 200
 )
 
 //nolint:govet,lll // Field order follows the MCP request shape; the schema help text is one string per field.
@@ -446,6 +451,8 @@ type listTasksInput struct {
 	Detail          string   `json:"detail,omitempty" jsonschema:"compact or full; default full"`
 	IncludeStats    *bool    `json:"include_stats,omitempty" jsonschema:"include run statistics; default true with detail full, false with detail compact"`
 	IncludeMetadata *bool    `json:"include_metadata,omitempty" jsonschema:"include runner metadata; default true with detail full, false with detail compact"`
+	Limit           *int     `json:"limit,omitempty" jsonschema:"maximum tasks, default 50, maximum 200"`
+	Cursor          string   `json:"cursor,omitempty" jsonschema:"exclusive task cursor from next_cursor"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -456,6 +463,8 @@ type listTasksOutput struct {
 	Errors        map[string]string       `json:"errors,omitempty"`
 	Warnings      map[string]string       `json:"warnings,omitempty"`
 	AppliedFilter appliedTaskFilterOutput `json:"applied_filter"`
+	Truncated     bool                    `json:"truncated,omitempty"`
+	NextCursor    string                  `json:"next_cursor,omitempty"`
 	Error         *toolError              `json:"error,omitempty"`
 }
 
@@ -528,6 +537,13 @@ func (s *Server) listTasks(
 			Error:         newToolError(err),
 		}, nil
 	}
+	limit, err := listLimit(input.Limit, taskListDefaultLimit)
+	if err != nil {
+		return toolErrorResult(err), listTasksOutput{
+			AppliedFilter: applied,
+			Error:         newToolError(err),
+		}, nil
+	}
 	s.repairTerminalMetadata()
 	project, err := s.workspace.Find(ctx, input.ProjectPath)
 	if err != nil {
@@ -541,7 +557,20 @@ func (s *Server) listTasks(
 		result.Errors = selectIssues(project.Errors, input.Runner, s.runners)
 		result.Warnings = selectIssues(project.Warnings, input.Runner, s.runners)
 	}
-	result.Tasks = s.selectTasks(project, input.Runner, filter, &applied)
+	selected := s.selectTasks(project, input.Runner, filter, input.Cursor, limit, &applied)
+	if input.Cursor != "" && !selected.cursorFound {
+		cursorErr := fmt.Errorf("unknown task cursor %q", input.Cursor)
+		applied.Returned = 0
+		result.AppliedFilter = applied
+		result.Error = newToolError(cursorErr)
+		return toolErrorResult(cursorErr), result, nil
+	}
+	result.Tasks = selected.tasks
+	applied.Returned = len(result.Tasks)
+	if selected.truncated {
+		result.Truncated = true
+		result.NextCursor = selected.nextCursor
+	}
 	result.AppliedFilter = applied
 	return nil, result, nil
 }
@@ -567,17 +596,29 @@ func selectIssues(
 	return selected
 }
 
-// selectTasks applies the runner filter, the task selectors, and the detail
-// mode in one pass over the discovered tasks, and records in applied what the
-// filters removed and which requested name matched nothing.
+type selectedTaskPage struct {
+	tasks       []taskOutput
+	cursorFound bool
+	truncated   bool
+	nextCursor  string
+}
+
+// selectTasks applies the runner filter and task selectors over the complete
+// catalog, and builds task output only for the requested page. It records in
+// applied what the filters removed and which requested name matched nothing.
 func (s *Server) selectTasks(
 	project workspace.Project,
 	runnerName string,
 	filter taskFilter,
+	cursor string,
+	limit int,
 	applied *appliedTaskFilterOutput,
-) []taskOutput {
+) selectedTaskPage {
 	matched := make(map[string]struct{}, len(filter.names))
-	selected := make([]taskOutput, 0, discoveredTaskCount(project))
+	selected := selectedTaskPage{
+		tasks:       make([]taskOutput, 0, min(limit, discoveredTaskCount(project))),
+		cursorFound: cursor == "",
+	}
 	for _, name := range project.Runners {
 		for _, task := range project.Tasks[name] {
 			applied.Discovered++
@@ -594,10 +635,20 @@ func (s *Server) selectTasks(
 				applied.Pruned.Name++
 				continue
 			}
-			selected = append(selected, s.taskOutput(project.RelPath, task, filter))
+			if !selected.cursorFound {
+				if task.ID == cursor {
+					selected.cursorFound = true
+				}
+				continue
+			}
+			if len(selected.tasks) == limit {
+				selected.truncated = true
+				continue
+			}
+			selected.tasks = append(selected.tasks, s.taskOutput(project.RelPath, task, filter))
+			selected.nextCursor = task.ID
 		}
 	}
-	applied.Returned = len(selected)
 	for _, name := range applied.Names {
 		if _, found := matched[name]; !found {
 			applied.UnknownNames = append(applied.UnknownNames, name)
@@ -1652,7 +1703,7 @@ func (s *Server) listRuns(
 	_ *mcp.CallToolRequest,
 	input listRunsInput,
 ) (*mcp.CallToolResult, listRunsOutput, error) {
-	limit, err := listLimit(input.Limit)
+	limit, err := listLimit(input.Limit, runListDefaultLimit)
 	if err != nil {
 		return toolErrorResult(err), listRunsOutput{Error: newToolError(err)}, nil
 	}
@@ -1968,12 +2019,12 @@ func waitRunDuration(input waitRunInput) (time.Duration, error) {
 	return waitDuration(value)
 }
 
-func listLimit(value *int) (int, error) {
+func listLimit(value *int, fallback int) (int, error) {
 	if value == nil {
-		return 20, nil
+		return fallback, nil
 	}
-	if *value <= 0 || *value > 200 {
-		return 0, fmt.Errorf("limit must be between 1 and 200")
+	if *value <= 0 || *value > maxListLimit {
+		return 0, fmt.Errorf("limit must be between 1 and %d", maxListLimit)
 	}
 	return *value, nil
 }

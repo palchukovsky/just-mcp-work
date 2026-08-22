@@ -844,6 +844,8 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"first 160 runes",
 		"first description line",
 		"names, name_prefix, and query are mutually exclusive",
+		"limit defaults to 50 and has a maximum of 200",
+		"when truncated is true, continue with next_cursor and unchanged inputs",
 		"withheld it through a runner mode",
 		"Never recreate or run such a task",
 		"genuinely ad-hoc commands",

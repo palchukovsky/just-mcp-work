@@ -6,6 +6,8 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -24,7 +26,9 @@ import (
 
 // catalogRunner stands for a project with more tasks than any single answer
 // should carry, including a private helper and a documented parameterized task.
-type catalogRunner struct{}
+type catalogRunner struct {
+	extraTasks int
+}
 
 func (catalogRunner) Name() string { return "catalog" }
 
@@ -37,7 +41,11 @@ const longTaskDescription = "Run the release gate: formatting, dependency metada
 	"vet, race-enabled tests, and the smoke flow, then report a single verdict for the whole tree.\n" +
 	"The second line documents the exit codes."
 
-func (catalogRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
+// maxListTasksResponseBytes is JMW-30's 25,000-token client budget expressed
+// as four ASCII bytes per token. The fixture contains only ASCII payloads.
+const maxListTasksResponseBytes = 100_000
+
+func (catalog catalogRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
 	tasks := []runner.Task{
 		{Name: "build", Description: "Build every package in the module."},
 		{Name: "check-debug", Description: "Run the debug gate."},
@@ -51,6 +59,15 @@ func (catalogRunner) ListTasks(context.Context, string) ([]runner.Task, error) {
 		{Name: "check-release", Description: longTaskDescription},
 		{Name: "_helper", Description: "Internal helper.", Private: true},
 		{Name: "_helper-debug", Description: "Internal DEBUG helper.", Private: true},
+	}
+	for index := range catalog.extraTasks {
+		tasks = append(tasks, runner.Task{
+			Name:        fmt.Sprintf("extra-%03d", index),
+			Description: longTaskDescription,
+			Params: []runner.Param{
+				{Name: "target", Kind: runner.ParamSingular, Doc: "profile name"},
+			},
+		})
 	}
 	for index := range tasks {
 		tasks[index].Runner = "catalog"
@@ -81,11 +98,16 @@ func (catalogRunner) BuildCommand(
 
 func newCatalogTestServer(t *testing.T) *Server {
 	t.Helper()
+	return newCatalogTestServerWithExtraTasks(t, 0)
+}
+
+func newCatalogTestServerWithExtraTasks(t *testing.T, extraTasks int) *Server {
+	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(testRegistration(catalogRunner{}))
+	runners, err := runner.NewRegistry(testRegistration(catalogRunner{extraTasks: extraTasks}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,11 +138,307 @@ func listedTaskIDs(tasks []taskOutput) []string {
 	return ids
 }
 
+func TestListTasksPaginationDefaultsToFifty(t *testing.T) {
+	server := newCatalogTestServerWithExtraTasks(t, 195)
+	result, output, err := server.listTasks(
+		context.Background(),
+		nil,
+		listTasksInput{ProjectPath: "."},
+	)
+	if err != nil || result != nil || output.Error != nil {
+		t.Fatalf("list_tasks default page = %#v, %#v, %v", result, output, err)
+	}
+	if len(output.Tasks) != 50 {
+		t.Fatalf("default page size = %d, want 50", len(output.Tasks))
+	}
+	if !output.Truncated || output.NextCursor != output.Tasks[49].ID {
+		t.Fatalf("default continuation = %#v", output)
+	}
+	if output.AppliedFilter.Returned != 50 || output.AppliedFilter.Discovered != 201 {
+		t.Fatalf("default page counters = %#v", output.AppliedFilter)
+	}
+}
+
+func TestListTasksPaginationTerminalPageIsShorterThanLimit(t *testing.T) {
+	server := newCatalogTestServer(t)
+	limit := 4
+	_, first, err := server.listTasks(context.Background(), nil, listTasksInput{
+		ProjectPath: ".",
+		Limit:       &limit,
+	})
+	if err != nil || first.Error != nil || !first.Truncated || first.NextCursor == "" {
+		t.Fatalf("first page = %#v, %v", first, err)
+	}
+	_, terminal, err := server.listTasks(context.Background(), nil, listTasksInput{
+		ProjectPath: ".",
+		Limit:       &limit,
+		Cursor:      first.NextCursor,
+	})
+	if err != nil || terminal.Error != nil {
+		t.Fatalf("terminal page = %#v, %v", terminal, err)
+	}
+	if len(terminal.Tasks) != 2 {
+		t.Fatalf("terminal page size = %d, want 2", len(terminal.Tasks))
+	}
+	if terminal.Truncated || terminal.NextCursor != "" {
+		t.Fatalf("terminal continuation = %#v", terminal)
+	}
+	if terminal.AppliedFilter.Returned != 2 || terminal.AppliedFilter.Discovered != 6 {
+		t.Fatalf("terminal page counters = %#v", terminal.AppliedFilter)
+	}
+}
+
+func TestListTasksPaginationAcceptsMaximumLimit(t *testing.T) {
+	server := newCatalogTestServerWithExtraTasks(t, 195)
+	limit := 200
+	result, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+		ProjectPath: ".",
+		Limit:       &limit,
+	})
+	if err != nil || result != nil || output.Error != nil {
+		t.Fatalf("list_tasks limit 200 = %#v, %#v, %v", result, output, err)
+	}
+	if len(output.Tasks) != 200 {
+		t.Fatalf("page size = %d, want 200", len(output.Tasks))
+	}
+	if !output.Truncated || output.NextCursor != output.Tasks[199].ID {
+		t.Fatalf("limit 200 continuation = %#v", output)
+	}
+	if output.AppliedFilter.Returned != 200 || output.AppliedFilter.Discovered != 201 {
+		t.Fatalf("limit 200 counters = %#v", output.AppliedFilter)
+	}
+}
+
+func TestListTasksPaginationResponseStaysWithinBudget(t *testing.T) {
+	server := newCatalogTestServerWithExtraTasks(t, maxListLimit)
+	maximum := maxListLimit
+	for _, testCase := range []struct {
+		name  string
+		limit *int
+	}{
+		{name: "default"},
+		{name: "maximum", limit: &maximum},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			result, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+				ProjectPath: ".",
+				Limit:       testCase.limit,
+			})
+			if err != nil || result != nil || output.Error != nil {
+				t.Fatalf("list_tasks = %#v, %#v, %v", result, output, err)
+			}
+			encoded, err := json.Marshal(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(encoded) > maxListTasksResponseBytes {
+				t.Fatalf(
+					"response size = %d bytes, budget = %d bytes",
+					len(encoded),
+					maxListTasksResponseBytes,
+				)
+			}
+		})
+	}
+}
+
+func TestListTasksPaginationTraversesTheCatalog(t *testing.T) {
+	server := newCatalogTestServer(t)
+	limit := 2
+	want := []string{
+		"catalog:build",
+		"catalog:check-debug",
+		"catalog:check-debug-dev",
+		"catalog:check-release",
+		"catalog:_helper",
+		"catalog:_helper-debug",
+	}
+	var got []string
+	cursor := ""
+	for {
+		result, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+			ProjectPath: ".",
+			Limit:       &limit,
+			Cursor:      cursor,
+		})
+		if err != nil || result != nil || output.Error != nil {
+			t.Fatalf("list_tasks page = %#v, %#v, %v", result, output, err)
+		}
+		if len(output.Tasks) != limit {
+			t.Fatalf("page size = %d, want %d", len(output.Tasks), limit)
+		}
+		if output.AppliedFilter.Discovered != len(want) {
+			t.Errorf("discovered = %d, want %d", output.AppliedFilter.Discovered, len(want))
+		}
+		if output.AppliedFilter.Returned != len(output.Tasks) {
+			t.Errorf(
+				"returned = %d, want page size %d",
+				output.AppliedFilter.Returned,
+				len(output.Tasks),
+			)
+		}
+		got = append(got, listedTaskIDs(output.Tasks)...)
+		if !output.Truncated {
+			if output.NextCursor != "" {
+				t.Fatalf("terminal next cursor = %q, want empty", output.NextCursor)
+			}
+			break
+		}
+		if output.NextCursor != output.Tasks[len(output.Tasks)-1].ID {
+			t.Fatalf(
+				"next cursor = %q, want last task ID %q",
+				output.NextCursor,
+				output.Tasks[len(output.Tasks)-1].ID,
+			)
+		}
+		cursor = output.NextCursor
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("traversed task IDs = %#v, want %#v", got, want)
+	}
+}
+
+func TestListTasksPaginationFollowsTheFilter(t *testing.T) {
+	server := newCatalogTestServer(t)
+	limit := 1
+	want := []string{
+		"catalog:check-debug",
+		"catalog:check-debug-dev",
+		"catalog:check-release",
+	}
+	var got []string
+	cursor := ""
+	for {
+		result, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+			ProjectPath: ".",
+			NamePrefix:  "check-",
+			Limit:       &limit,
+			Cursor:      cursor,
+		})
+		if err != nil || result != nil || output.Error != nil {
+			t.Fatalf("filtered list_tasks page = %#v, %#v, %v", result, output, err)
+		}
+		if len(output.Tasks) > limit {
+			t.Fatalf("filtered page size = %d, limit %d", len(output.Tasks), limit)
+		}
+		if output.AppliedFilter.Discovered != 6 || output.AppliedFilter.Pruned.Name != 3 {
+			t.Errorf("filtered counters = %#v", output.AppliedFilter)
+		}
+		if output.AppliedFilter.Returned != len(output.Tasks) {
+			t.Errorf(
+				"returned = %d, want page size %d",
+				output.AppliedFilter.Returned,
+				len(output.Tasks),
+			)
+		}
+		got = append(got, listedTaskIDs(output.Tasks)...)
+		if !output.Truncated {
+			if output.NextCursor != "" {
+				t.Fatalf("terminal next cursor = %q, want empty", output.NextCursor)
+			}
+			break
+		}
+		if output.NextCursor != output.Tasks[len(output.Tasks)-1].ID {
+			t.Fatalf(
+				"next cursor = %q, want last filtered task ID %q",
+				output.NextCursor,
+				output.Tasks[len(output.Tasks)-1].ID,
+			)
+		}
+		cursor = output.NextCursor
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("filtered task IDs = %#v, want %#v", got, want)
+	}
+}
+
+func TestListTasksPaginationKeepsFullCatalogFilterCounters(t *testing.T) {
+	server := newCatalogTestServer(t)
+	limit := 1
+	_, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+		ProjectPath: ".",
+		Names:       []string{"check-debug", "check-debug-dev", "absent"},
+		Limit:       &limit,
+	})
+	if err != nil || output.Error != nil {
+		t.Fatalf("exact-name page = %#v, %v", output, err)
+	}
+	if output.AppliedFilter.Discovered != 6 ||
+		output.AppliedFilter.Pruned.Name != 4 ||
+		!reflect.DeepEqual(output.AppliedFilter.UnknownNames, []string{"absent"}) {
+		t.Fatalf("full-catalog counters = %#v", output.AppliedFilter)
+	}
+	if output.AppliedFilter.Returned != 1 {
+		t.Fatalf("returned = %d, want 1", output.AppliedFilter.Returned)
+	}
+}
+
+func TestListTasksRejectsInvalidPagination(t *testing.T) {
+	server := newCatalogTestServer(t)
+	for _, limit := range []int{-1, 0, maxListLimit + 1} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			result, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+				ProjectPath: ".",
+				Limit:       &limit,
+			})
+			if err != nil {
+				t.Fatalf("list_tasks returned a transport error: %v", err)
+			}
+			if result == nil || !result.IsError || output.Error == nil {
+				t.Fatalf("invalid limit = %#v, %#v", result, output)
+			}
+			if output.Error.Message != fmt.Sprintf("limit must be between 1 and %d", maxListLimit) {
+				t.Fatalf("error = %q", output.Error.Message)
+			}
+			if len(output.Tasks) != 0 {
+				t.Fatalf("invalid limit returned tasks: %#v", output.Tasks)
+			}
+		})
+	}
+
+	result, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+		ProjectPath: ".",
+		Cursor:      "catalog:missing",
+	})
+	if err != nil {
+		t.Fatalf("list_tasks returned a transport error: %v", err)
+	}
+	if result == nil || !result.IsError || output.Error == nil {
+		t.Fatalf("unknown cursor = %#v, %#v", result, output)
+	}
+	if output.Error.Message != `unknown task cursor "catalog:missing"` {
+		t.Fatalf("error = %q", output.Error.Message)
+	}
+	if len(output.Tasks) != 0 || output.AppliedFilter.Returned != 0 {
+		t.Fatalf("unknown cursor returned tasks: %#v", output)
+	}
+}
+
+func TestListLimitUsesCallersDefault(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		fallback int
+	}{
+		{name: "runs", fallback: runListDefaultLimit},
+		{name: "tasks", fallback: taskListDefaultLimit},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			limit, err := listLimit(nil, testCase.fallback)
+			if err != nil || limit != testCase.fallback {
+				t.Fatalf("listLimit(nil, %d) = %d, %v", testCase.fallback, limit, err)
+			}
+		})
+	}
+}
+
 func TestListTasksDescriptionExplainsCompactMode(t *testing.T) {
 	description := listTasksDescription()
 	for _, expected := range []string{
 		"first 160 runes of the first description line",
 		"drops runner metadata and run statistics",
+		"limit defaults to 50 and has a maximum of 200",
+		"exclusive server-emitted next_cursor",
+		"truncated and next_cursor explicitly report continuation",
 	} {
 		if !strings.Contains(description, expected) {
 			t.Errorf("list_tasks description does not mention %q", expected)
