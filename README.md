@@ -42,8 +42,11 @@ server-side authorization mechanism is runner permission declarations and
 modes. Runner modes reduce the task surface but do not isolate it.
 `run_shell_command` and `start_shell_command` are unrestricted escape hatches
 that bypass that mechanism; a task withheld by a runner mode must not be
-recreated through them or another shell path. Need isolation? Run
-`just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
+recreated through them or another shell path. Discovery reads build files
+instead of evaluating them, so a target list is never a promise of
+completeness — most visibly for Make, where a build file outside the safe
+literal subset reports a discovery error instead of a partial list. Need
+isolation? Run `just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
 
 ## Install
 

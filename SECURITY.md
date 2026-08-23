@@ -55,6 +55,37 @@ listing does not configure or regenerate the build tree. Treat generated build
 trees as executable metadata: a selected target is passed to `cmake --build`
 with the same privileges as every other task.
 
+## The safe Make subset
+
+Make target discovery reads the project `GNUmakefile`, `Makefile`, or
+`makefile` as text. It never asks Make to evaluate it, so nothing in the build
+file runs in order to find out what could be run. That is a deliberate
+boundary, not a missing feature: evaluating a Makefile to enumerate its targets
+would execute build-file logic during discovery, which is a different trust
+model from executing it only when a task is invoked.
+
+The subset lists literal explicit targets, including the ones a literal
+`.PHONY` rule names. Consequently:
+
+- Pattern rules, targets whose names begin with a dot, and the Makefile itself
+  are never listed.
+- A construct that cannot be read literally — `include`, conditionals,
+  `define`, `$(eval)`, a custom `.RECIPEPREFIX`, or a target assembled from
+  variables, functions, or wildcards — is reported as a Make discovery error
+  for that project rather than as a silently shortened target list. The other
+  runners of the same project keep working.
+
+The listed set is therefore not a promise of completeness, and a Make project
+whose build file leaves the subset lists nothing at all. There is no evaluated
+discovery mode. If one is ever added it must be opt-in and labelled as the
+different trust model it is.
+
+A target discovery cannot see is not a target an authorization decision
+withheld: no runner mode is involved, and the rule against recreating a
+withheld task through a shell does not apply to it. Run it the way you run any
+other command that has no task — through the shell tools or your own terminal —
+and trust it exactly as much as you trust the rest of that Makefile.
+
 ## What jmw does NOT do
 
 jmw does **not** sandbox execution. No runner mode provides isolation. A task or
