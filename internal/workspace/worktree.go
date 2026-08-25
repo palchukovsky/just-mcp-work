@@ -217,7 +217,14 @@ func (r *Registry) registeredWorktreeDir(
 	if err != nil {
 		return "", false, fmt.Errorf("validate git worktree entry %q: %w", entryDir, err)
 	}
-	if state != pathResolved || resolvedEntry != filepath.Clean(entryDir) {
+	if state != pathResolved {
+		return "", false, nil
+	}
+	sameEntry, err := sameResolvedPath(resolvedEntry, filepath.Clean(entryDir))
+	if err != nil {
+		return "", false, fmt.Errorf("compare resolved git worktree registry entry: %w", err)
+	}
+	if !sameEntry {
 		return "", false, nil
 	}
 	return worktreeDir, true, nil
@@ -375,7 +382,21 @@ func (r *Registry) linkedWorktree(
 		if resolveErr != nil {
 			return Worktree{}, false, fmt.Errorf("validate conventional git directory: %w", resolveErr)
 		}
-		if commonState != pathResolved || resolvedCommon != repository.commonDir {
+		if commonState != pathResolved {
+			return Worktree{}, false, fmt.Errorf(
+				"conventional common git directory %q does not match main checkout %q",
+				repository.commonDir,
+				mainCheckout,
+			)
+		}
+		sameCommon, sameCommonErr := sameResolvedPath(resolvedCommon, repository.commonDir)
+		if sameCommonErr != nil {
+			return Worktree{}, false, fmt.Errorf(
+				"compare conventional common git directory: %w",
+				sameCommonErr,
+			)
+		}
+		if !sameCommon {
 			return Worktree{}, false, fmt.Errorf(
 				"conventional common git directory %q does not match main checkout %q",
 				repository.commonDir,
@@ -440,7 +461,11 @@ func (r *Registry) registeredResolvedWorktree(
 	if err != nil {
 		return false, fmt.Errorf("validate git worktree path %q: %w", dir, err)
 	}
-	if !canonical || filepath.Dir(resolvedGitFile) != dir {
+	sameDirectory, err := sameResolvedPath(filepath.Dir(resolvedGitFile), dir)
+	if err != nil {
+		return false, fmt.Errorf("compare git worktree path %q: %w", dir, err)
+	}
+	if !canonical || !sameDirectory {
 		return false, nil
 	}
 	return true, nil
@@ -552,28 +577,32 @@ func inspectCommonGitRepository(
 	if err != nil {
 		return commonGitRepository{}, fmt.Errorf("resolve common git directory: %w", err)
 	}
-	if canonicalCommonDir != cleanCommonDir {
+	sameCommonDir, err := sameResolvedPath(canonicalCommonDir, cleanCommonDir)
+	if err != nil {
+		return commonGitRepository{}, fmt.Errorf("compare common git directory identity: %w", err)
+	}
+	if !sameCommonDir {
 		return commonGitRepository{}, fmt.Errorf(
 			"common git directory %q contains a symlink",
 			cleanCommonDir,
 		)
 	}
-	info, err := os.Lstat(canonicalCommonDir)
+	info, err := os.Lstat(cleanCommonDir)
 	if err != nil {
 		return commonGitRepository{}, fmt.Errorf("inspect common git directory: %w", err)
 	}
 	if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
 		return commonGitRepository{}, fmt.Errorf(
 			"common git directory %q is not a non-symlink directory",
-			canonicalCommonDir,
+			cleanCommonDir,
 		)
 	}
-	config, err := readGitCoreConfig(filepath.Join(canonicalCommonDir, "config"))
+	config, err := readGitCoreConfig(filepath.Join(cleanCommonDir, "config"))
 	if err != nil {
 		return commonGitRepository{}, err
 	}
 	if config.worktreeConfig {
-		configWorktreePath := filepath.Join(canonicalCommonDir, "config.worktree")
+		configWorktreePath := filepath.Join(cleanCommonDir, "config.worktree")
 		configWorktreeInfo, configWorktreeErr := os.Lstat(configWorktreePath)
 		switch {
 		case errors.Is(configWorktreeErr, fs.ErrNotExist):
@@ -605,27 +634,27 @@ func inspectCommonGitRepository(
 				"git config has conflicting core.bare=true and core.worktree",
 			)
 		}
-		return commonGitRepository{commonDir: canonicalCommonDir, bare: true}, nil
+		return commonGitRepository{commonDir: cleanCommonDir, bare: true}, nil
 	}
 	if config.hasWorktree {
 		worktree := config.worktree
 		if !filepath.IsAbs(worktree) {
-			worktree = filepath.Join(canonicalCommonDir, worktree)
+			worktree = filepath.Join(cleanCommonDir, worktree)
 		}
 		return commonGitRepository{
-			commonDir: canonicalCommonDir,
+			commonDir: cleanCommonDir,
 			worktree:  filepath.Clean(worktree),
 		}, nil
 	}
-	if !pathNamesEqual(filepath.Base(canonicalCommonDir), ".git") {
+	if !pathNamesEqual(filepath.Base(cleanCommonDir), ".git") {
 		return commonGitRepository{}, fmt.Errorf(
 			"non-bare custom git directory %q is missing required core.worktree",
-			canonicalCommonDir,
+			cleanCommonDir,
 		)
 	}
 	return commonGitRepository{
-		commonDir:    canonicalCommonDir,
-		worktree:     filepath.Dir(canonicalCommonDir),
+		commonDir:    cleanCommonDir,
+		worktree:     filepath.Dir(cleanCommonDir),
 		conventional: true,
 	}, nil
 }
@@ -1392,7 +1421,7 @@ func (r *pathResolver) relativeComponentsWithin(
 		if err != nil || state != pathResolved {
 			return nil, state, err
 		}
-		if name != boundaryPart || !mode.IsDir() {
+		if !pathNamesEqual(name, boundaryPart) || !mode.IsDir() {
 			return nil, pathOutside, nil
 		}
 		parent = filepath.Join(parent, boundaryPart)
@@ -1428,7 +1457,7 @@ func canonicalPathWithin(parent, child string) bool {
 		return false
 	}
 	for index, part := range parentParts {
-		if childParts[index] != part {
+		if !pathNamesEqual(childParts[index], part) {
 			return false
 		}
 	}

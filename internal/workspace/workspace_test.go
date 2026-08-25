@@ -807,7 +807,7 @@ func TestFindClassifiesCommonGitDirectoryFromConfig(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return "[core]\n\tbare = false\n\tworktree = " + relative + "\n"
+				return "[core]\n\tbare = false\n\tworktree = " + filepath.ToSlash(relative) + "\n"
 			},
 			wantMain: "main",
 			relative: true,
@@ -818,7 +818,7 @@ func TestFindClassifiesCommonGitDirectoryFromConfig(t *testing.T) {
 				return filepath.Join(base, "absolute-metadata.git")
 			},
 			config: func(_ string, mainDir string) string {
-				return "[core]\n\tbare = false\n\tworktree = " + mainDir + "\n"
+				return "[core]\n\tbare = false\n\tworktree = " + filepath.ToSlash(mainDir) + "\n"
 			},
 			wantMain: "main",
 		},
@@ -875,7 +875,7 @@ func TestFindClassifiesCommonGitDirectoryFromConfig(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return "[core]\n\tworktree = " + relative + "\n"
+				return "[core]\n\tworktree = " + filepath.ToSlash(relative) + "\n"
 			},
 			wantError: "missing required core.bare",
 		},

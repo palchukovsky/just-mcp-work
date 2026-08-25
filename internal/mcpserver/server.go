@@ -597,10 +597,10 @@ func selectIssues(
 }
 
 type selectedTaskPage struct {
+	nextCursor  string
 	tasks       []taskOutput
 	cursorFound bool
 	truncated   bool
-	nextCursor  string
 }
 
 // selectTasks applies the runner filter and task selectors over the complete

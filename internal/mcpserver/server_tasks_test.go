@@ -213,8 +213,8 @@ func TestListTasksPaginationResponseStaysWithinBudget(t *testing.T) {
 	server := newCatalogTestServerWithExtraTasks(t, maxListLimit)
 	maximum := maxListLimit
 	for _, testCase := range []struct {
-		name  string
 		limit *int
+		name  string
 	}{
 		{name: "default"},
 		{name: "maximum", limit: &maximum},
