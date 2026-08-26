@@ -42,6 +42,16 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Set up Semgrep
+        shell: bash
+        run: |
+          python -m venv .venv
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            .venv/Scripts/python.exe -m pip install --requirement checks/requirements.txt
+          else
+            .venv/bin/python -m pip install --requirement checks/requirements.txt
+          fi
+
       - name: Set up just
         uses: extractions/setup-just@v3
 

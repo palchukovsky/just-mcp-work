@@ -44,6 +44,12 @@ jobs:
         with:
           python-version: "3.x"
 
+      - name: Set up Semgrep
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --requirement checks/requirements.txt
+
       - name: Set up just
         uses: extractions/setup-just@v3
 
