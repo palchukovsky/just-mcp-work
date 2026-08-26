@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -217,8 +218,10 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name: "run_task",
-			Description: "Run one discovered task. A running receipt with promoted: true is normal: use " +
-				"its run_id with wait_run or get_run_status, never start the task again.",
+			Description: "Run one discovered task. Arguments are positional values; for a task with " +
+				"declared parameters, name=value arguments are rejected. A running receipt with " +
+				"promoted: true is normal: use its run_id with wait_run or get_run_status, never " +
+				"start the task again.",
 		},
 		recoverTool(withUpdateNotification(s, s.runTask)),
 	)
@@ -227,8 +230,9 @@ func (s *Server) Run(ctx context.Context) error {
 		&mcp.Tool{
 			Name: "start_task",
 			Description: "Start one discovered task asynchronously and return its run_id immediately. " +
-				"Prefer this for long check/verify/CI-style gates; while a run_id is active, never " +
-				"launch the task again.",
+				"Arguments are positional values; for a task with declared parameters, name=value " +
+				"arguments are rejected. Prefer this for long check/verify/CI-style gates; while a " +
+				"run_id is active, never launch the task again.",
 		},
 		recoverTool(withUpdateNotification(s, s.startTask)),
 	)
@@ -911,7 +915,7 @@ func singleTaskSelector(names, prefix, query bool) error {
 type runTaskInput struct {
 	ProjectPath string   `json:"project_path" jsonschema:"relative path returned by list_projects"`
 	TaskID      string   `json:"task_id" jsonschema:"task ID returned by list_tasks"`
-	Arguments   []string `json:"arguments,omitempty" jsonschema:"arguments passed to the selected task"`
+	Arguments   []string `json:"arguments,omitempty" jsonschema:"positional task values; tasks with declared parameters reject name=value forms"`
 	MaxWaitMS   *int64   `json:"max_wait_ms,omitempty" jsonschema:"wait up to this many milliseconds; 0 starts immediately, -1 waits for completion"`
 }
 
@@ -970,7 +974,7 @@ func (s *Server) runTask(
 type startTaskInput struct {
 	ProjectPath string   `json:"project_path" jsonschema:"relative path returned by list_projects"`
 	TaskID      string   `json:"task_id" jsonschema:"task ID returned by list_tasks"`
-	Arguments   []string `json:"arguments,omitempty" jsonschema:"arguments passed to the selected task"`
+	Arguments   []string `json:"arguments,omitempty" jsonschema:"positional task values; tasks with declared parameters reject name=value forms"`
 }
 
 func (s *Server) startTask(
@@ -1040,6 +1044,9 @@ func (s *Server) startTaskRun(
 	}
 	handle.Meta.Runner = runnerName
 	handle.Meta.CWD = project.Dir
+	if validationErr := validatePositionalTaskArguments(task, input.Arguments); validationErr != nil {
+		return nil, stats, receiptForHandle(handle, s.reject(handle, validationErr))
+	}
 	if validator, supportsValidation := candidate.(runner.TaskInputValidator); supportsValidation {
 		if validationErr := validator.ValidateTaskInput(task, input.Arguments); validationErr != nil {
 			return nil, stats, receiptForHandle(handle, s.reject(handle, validationErr))
@@ -1061,6 +1068,41 @@ func (s *Server) startTaskRun(
 		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
 	return s.startRun(handle, cmd, stats)
+}
+
+var parameterAssignmentPrefix = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*=`)
+
+func validatePositionalTaskArguments(task runner.Task, arguments []string) error {
+	if !slices.ContainsFunc(task.Params, func(parameter runner.Param) bool {
+		return parameter.Name != ""
+	}) {
+		return nil
+	}
+	var rejectedArgument string
+	if !slices.ContainsFunc(arguments, func(argument string) bool {
+		if parameterAssignmentPrefix.MatchString(argument) {
+			rejectedArgument = argument
+			return true
+		}
+		return false
+	}) {
+		return nil
+	}
+	parameterName := strings.TrimSuffix(parameterAssignmentPrefix.FindString(rejectedArgument), "=")
+	if slices.ContainsFunc(task.Params, func(parameter runner.Param) bool {
+		return parameter.Name == parameterName
+	}) {
+		return fmt.Errorf(
+			"argument %q must be a positional value for declared parameter %q; omit the %q prefix",
+			rejectedArgument,
+			parameterName,
+			parameterName+"=",
+		)
+	}
+	return fmt.Errorf(
+		"argument %q must be a positional value; a task with declared parameters rejects the name=value form",
+		rejectedArgument,
+	)
 }
 
 //nolint:govet // Field order follows the MCP request shape.

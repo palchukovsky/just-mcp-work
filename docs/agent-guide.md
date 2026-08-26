@@ -159,7 +159,7 @@ nothing explains itself without a second call.
 
 - **`just`** - `just:<namepath>`, for example `just:verify` or
   `just:docs::build` for a module recipe. Arguments fill the recipe parameters
-  reported in `parameters`.
+  reported in `parameters` as positional values.
 - **`make`** - `make:<target>`, for example `make:test`. Arguments follow the
   target on the `make` command line.
 - **`cmake`** - `cmake:<kind>:<name>` for presets, where `kind` is `configure`,
@@ -176,7 +176,10 @@ Two task fields are worth reading before invoking anything:
 
 - `parameters` - name, kind (`singular`, `plus`, `star`), default, and doc.
   They survive `detail: compact`, because a parameterized task cannot be
-  called without them.
+  called without them. For a task with named parameters, values must be
+  positional: JMW rejects every `name=value` form, including an unknown or
+  misspelled name. A value that itself has that form, such as `FOO=bar`, cannot
+  be passed.
 - `private` - the runner marked this task as an internal helper, such as a
   `just` recipe starting with `_` or carrying `[private]`. Hide them with
   `visibility: public`.
@@ -250,9 +253,9 @@ report a long average duration.
 | `cancelled` | Stopped by `stop_run` or shutdown. | `false` |
 | `spawn_error` | Never started at all. | `false` |
 
-`spawn_error` covers an unknown task, arguments a runner rejected, an invalid
-working directory, and a process that failed to start. It arrives as a normal
-receipt with an explanation in `message`, not as a tool error.
+`spawn_error` covers an unknown task, arguments JMW or a runner rejected, an
+invalid working directory, and a process that failed to start. It arrives as a
+normal receipt with an explanation in `message`, not as a tool error.
 
 ### What a receipt actually contains
 

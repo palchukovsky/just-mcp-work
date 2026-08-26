@@ -27,7 +27,20 @@ import (
 // catalogRunner stands for a project with more tasks than any single answer
 // should carry, including a private helper and a documented parameterized task.
 type catalogRunner struct {
-	extraTasks int
+	runRecorder             *catalogRunRecorder
+	extraTasks              int
+	argumentValidationTasks bool
+}
+
+type catalogRunRecorder struct {
+	validatedArguments []string
+	builtArguments     []string
+	validationCalls    int
+	buildCalls         int
+}
+
+type catalogInputValidatingRunner struct {
+	catalogRunner
 }
 
 func (catalogRunner) Name() string { return "catalog" }
@@ -60,6 +73,39 @@ func (catalog catalogRunner) ListTasks(context.Context, string) ([]runner.Task, 
 		{Name: "_helper", Description: "Internal helper.", Private: true},
 		{Name: "_helper-debug", Description: "Internal DEBUG helper.", Private: true},
 	}
+	if catalog.argumentValidationTasks {
+		tasks = append(tasks,
+			runner.Task{
+				Name:        "check-debug-matrix",
+				Description: "Run the debug gate against an argument matrix.",
+				Params: []runner.Param{
+					{Name: "target", Kind: runner.ParamSingular, Doc: "profile name"},
+					{Name: "profile", Kind: runner.ParamSingular, Doc: "profile name"},
+				},
+			},
+			runner.Task{
+				Name:        "check-debug-options",
+				Description: "Run the debug gate with required options.",
+				Params: []runner.Param{
+					{Name: "options", Kind: runner.ParamPlus, Doc: "required options"},
+				},
+			},
+			runner.Task{
+				Name:        "check-debug-labels",
+				Description: "Run the debug gate with optional labels.",
+				Params: []runner.Param{
+					{Name: "labels", Kind: runner.ParamStar, Doc: "optional labels"},
+				},
+			},
+			runner.Task{
+				Name:        "check-empty-parameter",
+				Description: "Run the debug gate with an unnamed test parameter.",
+				Params: []runner.Param{
+					{Name: "", Kind: runner.ParamSingular, Doc: "unnamed test parameter"},
+				},
+			},
+		)
+	}
 	for index := range catalog.extraTasks {
 		tasks = append(tasks, runner.Task{
 			Name:        fmt.Sprintf("extra-%03d", index),
@@ -83,12 +129,24 @@ func (catalog catalogRunner) ListTasks(context.Context, string) ([]runner.Task, 
 	return tasks, nil
 }
 
-func (catalogRunner) BuildCommand(
+func (catalog catalogInputValidatingRunner) ValidateTaskInput(_ runner.Task, arguments []string) error {
+	if catalog.runRecorder != nil {
+		catalog.runRecorder.validationCalls++
+		catalog.runRecorder.validatedArguments = slices.Clone(arguments)
+	}
+	return nil
+}
+
+func (catalog catalogRunner) BuildCommand(
 	ctx context.Context,
 	projectDir string,
 	_ runner.Task,
-	_ []string,
+	arguments []string,
 ) (*exec.Cmd, error) {
+	if catalog.runRecorder != nil {
+		catalog.runRecorder.buildCalls++
+		catalog.runRecorder.builtArguments = slices.Clone(arguments)
+	}
 	// #nosec G204,G702 -- the test re-executes its own fixed helper process.
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestMCPServerHelperProcess")
 	cmd.Dir = projectDir
@@ -102,12 +160,16 @@ func newCatalogTestServer(t *testing.T) *Server {
 }
 
 func newCatalogTestServerWithExtraTasks(t *testing.T, extraTasks int) *Server {
+	return newCatalogTestServerWithRunner(t, catalogRunner{extraTasks: extraTasks})
+}
+
+func newCatalogTestServerWithRunner(t *testing.T, candidate runner.Runner) *Server {
 	t.Helper()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(testRegistration(catalogRunner{extraTasks: extraTasks}))
+	runners, err := runner.NewRegistry(testRegistration(candidate))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,6 +190,192 @@ func newCatalogTestServerWithExtraTasks(t *testing.T, extraTasks int) *Server {
 		t.Fatal(err)
 	}
 	return server
+}
+
+func TestTaskArgumentsRejectAssignmentFormsBeforeRunnerValidation(t *testing.T) {
+	testCases := []struct {
+		name        string
+		taskID      string
+		wantMessage string
+		arguments   []string
+		startAsync  bool
+	}{
+		{
+			name:      "matching name",
+			taskID:    "catalog:check-debug-dev",
+			arguments: []string{"target=dev"},
+			wantMessage: "argument \"target=dev\" must be a positional value for " +
+				"declared parameter \"target\"; omit the \"target=\" prefix",
+		},
+		{
+			name:      "matching name with an empty value",
+			taskID:    "catalog:check-debug-dev",
+			arguments: []string{"target="},
+			wantMessage: "argument \"target=\" must be a positional value for " +
+				"declared parameter \"target\"; omit the \"target=\" prefix",
+			startAsync: true,
+		},
+		{
+			name:      "misspelled name",
+			taskID:    "catalog:check-debug-dev",
+			arguments: []string{"pit_chekout=../pit"},
+			wantMessage: "argument \"pit_chekout=../pit\" must be a positional value; " +
+				"a task with declared parameters rejects the name=value form",
+		},
+		{
+			name:      "wrong name",
+			taskID:    "catalog:check-debug-dev",
+			arguments: []string{"checkout=../pit"},
+			wantMessage: "argument \"checkout=../pit\" must be a positional value; " +
+				"a task with declared parameters rejects the name=value form",
+		},
+		{
+			name:      "matching name after a positional value",
+			taskID:    "catalog:check-debug-matrix",
+			arguments: []string{"dev", "target=x"},
+			wantMessage: "argument \"target=x\" must be a positional value for " +
+				"declared parameter \"target\"; omit the \"target=\" prefix",
+		},
+		{
+			name:      "matching second parameter name",
+			taskID:    "catalog:check-debug-matrix",
+			arguments: []string{"dev", "profile=x"},
+			wantMessage: "argument \"profile=x\" must be a positional value for " +
+				"declared parameter \"profile\"; omit the \"profile=\" prefix",
+		},
+		{
+			name:      "plus parameter name",
+			taskID:    "catalog:check-debug-options",
+			arguments: []string{"options=lint"},
+			wantMessage: "argument \"options=lint\" must be a positional value for " +
+				"declared parameter \"options\"; omit the \"options=\" prefix",
+		},
+		{
+			name:      "star parameter name",
+			taskID:    "catalog:check-debug-labels",
+			arguments: []string{"labels=fast"},
+			wantMessage: "argument \"labels=fast\" must be a positional value for " +
+				"declared parameter \"labels\"; omit the \"labels=\" prefix",
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := &catalogRunRecorder{}
+			server := newCatalogTestServerWithRunner(t, catalogInputValidatingRunner{
+				catalogRunner: catalogRunner{
+					runRecorder:             recorder,
+					argumentValidationTasks: true,
+				},
+			})
+			input := runTaskInput{
+				ProjectPath: ".",
+				TaskID:      testCase.taskID,
+				Arguments:   testCase.arguments,
+			}
+			var receipt runTaskOutput
+			var err error
+			if testCase.startAsync {
+				_, receipt, err = server.startTask(context.Background(), nil, startTaskInput{
+					ProjectPath: input.ProjectPath,
+					TaskID:      input.TaskID,
+					Arguments:   input.Arguments,
+				})
+			} else {
+				_, receipt, err = server.runTask(context.Background(), nil, input)
+			}
+			if err != nil || receipt.Status != runstore.StatusSpawnError || receipt.RunID == "" {
+				t.Fatalf("rejected task = %#v, %v", receipt, err)
+			}
+			if receipt.Message != testCase.wantMessage {
+				t.Fatalf("rejection = %q, want %q", receipt.Message, testCase.wantMessage)
+			}
+			if recorder.validationCalls != 0 || recorder.buildCalls != 0 {
+				t.Fatalf(
+					"runner validation/build calls = %d/%d, want 0/0",
+					recorder.validationCalls,
+					recorder.buildCalls,
+				)
+			}
+			meta, metaErr := server.store.Get(receipt.RunID)
+			if metaErr != nil {
+				t.Fatal(metaErr)
+			}
+			if meta.Status != runstore.StatusSpawnError || meta.PID != 0 {
+				t.Fatalf("rejected task ledger entry = %#v", meta)
+			}
+		})
+	}
+}
+
+func TestTaskArgumentsPreserveAllowedPositionalValues(t *testing.T) {
+	testCases := []struct {
+		name      string
+		taskID    string
+		arguments []string
+	}{
+		{
+			name:      "declared positional value",
+			taskID:    "catalog:check-debug-dev",
+			arguments: []string{"dev"},
+		},
+		{
+			name:      "leading dash equals value with declared parameters",
+			taskID:    "catalog:check-debug-dev",
+			arguments: []string{"--target=dev"},
+		},
+		{
+			name:      "path equals value with declared parameters",
+			taskID:    "catalog:check-debug-dev",
+			arguments: []string{"path/to=x"},
+		},
+		{
+			name:      "name=value shape without declared parameters",
+			taskID:    "catalog:build",
+			arguments: []string{"target=dev"},
+		},
+		{
+			name:      "empty parameter name permits an equals positional value",
+			taskID:    "catalog:check-empty-parameter",
+			arguments: []string{"=value"},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := &catalogRunRecorder{}
+			server := newCatalogTestServerWithRunner(t, catalogInputValidatingRunner{
+				catalogRunner: catalogRunner{
+					runRecorder:             recorder,
+					argumentValidationTasks: true,
+				},
+			})
+			_, receipt, err := server.runTask(context.Background(), nil, runTaskInput{
+				ProjectPath: ".",
+				TaskID:      testCase.taskID,
+				Arguments:   testCase.arguments,
+			})
+			if err != nil || !receipt.OK {
+				t.Fatalf("allowed task = %#v, %v", receipt, err)
+			}
+			if recorder.validationCalls != 1 || recorder.buildCalls != 1 {
+				t.Fatalf(
+					"runner validation/build calls = %d/%d, want 1/1",
+					recorder.validationCalls,
+					recorder.buildCalls,
+				)
+			}
+			if !reflect.DeepEqual(recorder.validatedArguments, testCase.arguments) ||
+				!reflect.DeepEqual(recorder.builtArguments, testCase.arguments) {
+				t.Fatalf(
+					"runner arguments = validation %#v, build %#v, want %#v",
+					recorder.validatedArguments,
+					recorder.builtArguments,
+					testCase.arguments,
+				)
+			}
+		})
+	}
 }
 
 func listedTaskIDs(tasks []taskOutput) []string {
