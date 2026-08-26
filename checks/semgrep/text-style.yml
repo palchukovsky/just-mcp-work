@@ -1,0 +1,85 @@
+# Text style and hygiene in Go and Python source.
+#
+# Scope trimmed to the languages this repository actually has (Go product
+# code, Python dev scripts). The byte-content rules exclude *_test.go: this
+# project's tests exercise UTF-8 and unicode edge cases deliberately (see
+# internal/runstore/store_test.go), so ASCII/invisible-character/emoji
+# findings inside test fixtures would be noise rather than a real defect.
+
+rules:
+  - id: ascii-punctuation-only
+    message: >-
+      Use ASCII punctuation: replace an em dash or en dash with a hyphen.
+      Non-ASCII dashes render inconsistently across terminals, diffs, and
+      documentation pipelines.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: '[\x{2013}\x{2014}]'
+    paths:
+      include:
+        - "*.go"
+        - "*.py"
+      exclude:
+        - "**/*_test.go"
+        - "**/vendor/**"
+        - dist
+        - .tmp
+        - .venv
+
+  - id: no-invisible-characters
+    message: >-
+      Invisible or zero-width characters are not allowed in source. They are
+      unreadable in review, survive copy-paste, and are a known vector for
+      hidden text and homoglyph confusion.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: '[\x{200B}-\x{200F}\x{2060}-\x{2064}\x{2066}-\x{206F}]'
+    paths:
+      include:
+        - "*.go"
+        - "*.py"
+      exclude:
+        - "**/*_test.go"
+        - "**/vendor/**"
+        - dist
+        - .tmp
+        - .venv
+
+  - id: no-emoji-in-source
+    message: >-
+      Emoji do not belong in source: they are not searchable, render
+      unpredictably, and carry no meaning a word cannot.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: '[\x{1F300}-\x{1FAFF}\x{2700}-\x{27BF}]'
+    paths:
+      include:
+        - "*.go"
+        - "*.py"
+      exclude:
+        - "**/*_test.go"
+        - "**/vendor/**"
+        - dist
+        - .tmp
+        - .venv
+
+  - id: no-conversational-comments
+    message: >-
+      Comments state why, not narrate. Drop conversational and hedging openers
+      ("Note that", "It is important to", "Let's", "In summary") and apologetic
+      or first-person phrasing - they add length without adding information.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: >-
+      (?i)(//|#)\s*(note that|it'?s important to|it is important to|it is
+      worth noting|this ensures that|let'?s |in summary|overall,|as we can
+      see|i cannot|i'?m sorry|i apologize)
+    paths:
+      include:
+        - "*.go"
+        - "*.py"
+      exclude:
+        - "**/vendor/**"
+        - dist
+        - .tmp
+        - .venv

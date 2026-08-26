@@ -1,0 +1,62 @@
+# Swallowed errors (Go). Held back from checks/semgrep/: 19 real findings in
+# the current tree. Run manually with:
+#
+#   .venv/bin/semgrep --config checks/semgrep-pending/errors-go.yml .
+#
+# A discarded error is a fallback: execution continues on an assumption that was
+# never checked. Scope is the whole Go tree - narrowing it by package only moves
+# the problem somewhere less watched.
+#
+# Confirmed non-duplicate: `just lint` (golangci-lint, errcheck with
+# check-blank: true) passes clean on every finding below - its
+# common-false-positives preset already tolerates a blank-discarded Close,
+# Kill, or best-effort cleanup call. tools/code_style.md is stricter: "Do not
+# ignore errors unless the omission is intentional and documented by a short
+# comment." None of the sites below carry that comment, so this rule surfaces
+# real, currently-unenforced gaps rather than restating errcheck.
+#
+# The findings (see checks/README.md for the full list): 16 discarded-error
+# sites (Process.Kill, CloseHandle, Handle.Finish, StopWithReason, os.Remove,
+# filepath.WalkDir) across executor, runmanager, runstore, mcpserver,
+# updatecheck; 3 error-dropped-on-return sites (terminate_unix.go
+# SIGTERM/SIGKILL, runner/just). Move to checks/semgrep/ once each site either
+# gets the short comment code_style.md requires, is wrapped, or the rule is
+# narrowed to an agreed convention - not fixed unilaterally here.
+
+rules:
+  - id: discarded-error
+    message: >-
+      The error is discarded. Continuing past a failure that was never inspected
+      is a fallback: it hides the cause and fails later, somewhere else. Handle
+      it, wrap it, or return it.
+    severity: ERROR
+    languages: [go]
+    patterns:
+      - pattern: _ = $CALL(...)
+      # Deferred cleanup: nothing useful can be done with the error there.
+      - pattern-not: defer $X.Close()
+      - pattern-not: _ = $X.Close()
+    paths:
+      exclude:
+        - "**/*_test.go"
+        - "**/vendor/**"
+
+  - id: error-dropped-on-return
+    message: >-
+      The error is checked and then dropped: the caller cannot distinguish
+      failure from an empty result. Return the error, wrapped with context.
+    severity: ERROR
+    languages: [go]
+    pattern-either:
+      - pattern: |
+          if err != nil {
+            return nil
+          }
+      - pattern: |
+          if err != nil {
+            return
+          }
+    paths:
+      exclude:
+        - "**/*_test.go"
+        - "**/vendor/**"

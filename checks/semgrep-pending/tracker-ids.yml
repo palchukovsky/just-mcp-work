@@ -1,0 +1,32 @@
+# Held back from checks/semgrep/isolation.yml: this rule has one real finding
+# in the current tree. Run manually with:
+#
+#   .venv/bin/semgrep --config checks/semgrep-pending/tracker-ids.yml .
+#
+# Move to checks/semgrep/ once the finding below is fixed:
+#
+#   internal/mcpserver/server_tasks_test.go:57 - "JMW-30" in a comment.
+
+rules:
+  - id: no-tracker-ids-in-code
+    message: >-
+      Issue identifiers do not belong in source. They rot when the tracker
+      changes and mean nothing to a reader without access to the private Jira
+      project (JMW). Describe the pending work in words instead.
+    severity: ERROR
+    languages: [generic]
+    patterns:
+      - pattern-regex: '\b[A-Z]{2,10}-\d+\b|TODO\([^)]*-\d+\)'
+      # UTF-8 is a text-encoding name, not a tracker reference; it is the one
+      # false positive this pattern hits in the current tree.
+      - pattern-not-regex: '\bUTF-\d+\b'
+    paths:
+      include:
+        - "*.go"
+        - "*.py"
+      exclude:
+        - "**/vendor/**"
+        - dist
+        - .tmp
+        - .venv
+        - CHANGELOG.md

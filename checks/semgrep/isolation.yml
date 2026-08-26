@@ -1,0 +1,49 @@
+# Module isolation and reference hygiene.
+#
+# jmw/ is the public half of a two-repo workspace: the sibling `tools/`
+# directory and the operator's machine-local home hold the private half
+# (workspace tooling, Jira notes, generated navigation data). See the
+# workspace CLAUDE.md: "Never put private tools, credentials, generated data,
+# internal notes, or machine-local paths into jmw/."
+#
+# The binding-isolation rules from the template are dropped: this product is
+# a single Go executable with no language bindings (see
+# tools/code_style.md: "There are no bindings, wiki mirrors, or cross-language
+# API-parity requirements").
+#
+# no-tracker-ids-in-code is a sibling rule from the same template file, held
+# back in checks/semgrep-pending/tracker-ids.yml: it has one real finding in
+# the current tree (see checks/README.md).
+
+rules:
+  - id: no-internal-document-reference
+    message: >-
+      Public source and documentation must not reference the private half of
+      the workspace: an absolute machine-local home path, or a path into the
+      sibling tools/ directory. Either it discloses a machine-local layout, or
+      it discloses private workspace tooling that has no public counterpart.
+      State the contract in place instead.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: >-
+      (/Users/[A-Za-z0-9_.-]+/(Projects|Desktop|Documents)/|/home/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]*|\.\./tools/(agents|graphify-out|serena|data)/|\bworkspace/tools/)
+    paths:
+      include:
+        - "*.go"
+        - "*.py"
+        - "*.md"
+      exclude:
+        - "**/vendor/**"
+        - dist
+        - .tmp
+        - .venv
+        - graphify-out
+        - .serena
+        - .claude
+        - .wt
+        - .cursor
+        - .codex
+        - .git
+        # The gate's own configuration and docs describe this policy; they are
+        # not the public product surface the policy protects.
+        - checks

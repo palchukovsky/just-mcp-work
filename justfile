@@ -11,6 +11,8 @@ golangci_lint := env_var_or_default("GOLANGCI_LINT", default_golangci_lint)
 go_cache := env_var_or_default("GOCACHE", repo_dir / ".tmp" / "go-build-cache")
 golangci_lint_cache := env_var_or_default("GOLANGCI_LINT_CACHE", repo_dir / ".tmp" / "golangci-lint-cache")
 python := if os_family() == "windows" { "python" } else { "python3" }
+venv_dir := repo_dir / ".venv"
+semgrep := if os_family() == "windows" { venv_dir / "Scripts" / "semgrep.exe" } else { venv_dir / "bin" / "semgrep" }
 export GOCACHE := go_cache
 export GOLANGCI_LINT_CACHE := golangci_lint_cache
 
@@ -70,7 +72,11 @@ tidy:
 check: fmt-check tidy-check check-dry
 
 # Run the non-mutating build, lint, and test checks.
-check-dry: lint vet test test-race build
+check-dry: lint vet test test-race build check-semgrep
+
+# Run the project-specific invariant rule set.
+check-semgrep:
+    {{ semgrep }} --config checks/semgrep/ --error --quiet .
 
 # Run the project gate required by the workspace, including the MCP smoke test.
 verify: check

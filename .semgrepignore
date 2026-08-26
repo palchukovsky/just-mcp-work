@@ -1,0 +1,11 @@
+# Semgrep's bundled default ignore list skips *_test.go. That default fits
+# most of checks/semgrep/text-style.yml (byte-level rules there already carry
+# an explicit paths.exclude for the same reason: this project's tests exercise
+# UTF-8 and unicode edge cases on purpose - see internal/runstore/store_test.go).
+#
+# It does not fit checks/semgrep/isolation.yml or checks/semgrep-pending/
+# tracker-ids.yml: a private-tracker reference or a machine-local path is just
+# as much a hygiene defect inside a test comment as anywhere else. Un-ignore
+# test files here so each rule's own paths.exclude is what actually decides
+# their scope.
+!**/*_test.go
