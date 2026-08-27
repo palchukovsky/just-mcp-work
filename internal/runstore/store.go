@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -562,11 +563,17 @@ func (s *Store) Cleanup(retention time.Duration) error {
 			result = errors.Join(result, err)
 			continue
 		}
-		if hasSymlink(dir) {
+		hasLink, err := hasSymlink(dir)
+		if err != nil {
+			result = errors.Join(result, fmt.Errorf("inspect run directory %q for symlinks: %w", dir, err))
+			continue
+		}
+		if hasLink {
 			continue
 		}
 		meta, err := readMeta(filepath.Join(dir, "meta.json"))
 		if err != nil {
+			result = errors.Join(result, cleanupMetadataError(entry, dir, deadline, err))
 			continue
 		}
 		if !expiredForCleanup(meta, deadline) {
@@ -577,6 +584,25 @@ func (s *Store) Cleanup(retention time.Duration) error {
 		}
 	}
 	return result
+}
+
+func cleanupMetadataError(
+	entry os.DirEntry,
+	dir string,
+	deadline time.Time,
+	metaErr error,
+) error {
+	if !errors.Is(metaErr, os.ErrNotExist) {
+		return fmt.Errorf("read run metadata in %q: %w", dir, metaErr)
+	}
+	info, err := entry.Info()
+	if err != nil {
+		return fmt.Errorf("read run directory info for %q: %w", dir, err)
+	}
+	if info.ModTime().Before(deadline) {
+		return fmt.Errorf("read run metadata in %q: %w", dir, metaErr)
+	}
+	return nil
 }
 
 func expiredForCleanup(meta Meta, deadline time.Time) bool {
@@ -646,6 +672,7 @@ func (s *Store) writeMeta(dir string, meta Meta) error {
 	temporaryName := temporary.Name()
 	defer func() {
 		//nolint:errcheck // The temporary file is best-effort cleanup after a failed publish.
+		// nosemgrep: discarded-error
 		_ = os.Remove(temporaryName)
 	}()
 	if _, err := temporary.Write(data); err != nil {
@@ -740,17 +767,26 @@ func (s *Store) isActive(id string) bool {
 	return active
 }
 
-func hasSymlink(root string) bool {
+func hasSymlink(root string) (bool, error) {
 	found := false
-	//nolint:errcheck // A walk failure is treated as unsafe and therefore retains the run.
-	_ = filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
-		if err != nil || entry.Type()&os.ModeSymlink != 0 {
-			found = true
+	if err := filepath.WalkDir(root, hasSymlinkWalkFunc(&found)); err != nil {
+		// Treat an uninspectable directory as unsafe even if no symlink was observed.
+		return true, fmt.Errorf("walk run directory: %w", err)
+	}
+	return found, nil
+}
+
+func hasSymlinkWalkFunc(found *bool) fs.WalkDirFunc {
+	return func(_ string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			*found = true
 			return filepath.SkipDir
 		}
 		return nil
-	})
-	return found
+	}
 }
 
 func stringsHasParent(path string) bool {

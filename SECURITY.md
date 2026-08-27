@@ -69,9 +69,9 @@ The subset lists literal explicit targets, including the ones a literal
 
 - Pattern rules, targets whose names begin with a dot, and the Makefile itself
   are never listed.
-- A construct that cannot be read literally — `include`, conditionals,
+- A construct that cannot be read literally - `include`, conditionals,
   `define`, `$(eval)`, a custom `.RECIPEPREFIX`, or a target assembled from
-  variables, functions, or wildcards — is reported as a Make discovery error
+  variables, functions, or wildcards - is reported as a Make discovery error
   for that project rather than as a silently shortened target list. The other
   runners of the same project keep working.
 
@@ -83,7 +83,7 @@ different trust model it is.
 A target discovery cannot see is not a target an authorization decision
 withheld: no runner mode is involved, and the rule against recreating a
 withheld task through a shell does not apply to it. Run it the way you run any
-other command that has no task — through the shell tools or your own terminal —
+other command that has no task - through the shell tools or your own terminal -
 and trust it exactly as much as you trust the rest of that Makefile.
 
 ## What jmw does NOT do
@@ -92,23 +92,23 @@ jmw does **not** sandbox execution. No runner mode provides isolation. A task or
 shell command, once invoked, runs as a child process with the same privileges,
 filesystem access, and environment as the jmw process itself. It can read and
 write anywhere that process can, open network connections, and spawn further
-processes — whatever the task definition, synthesized command, or command text
+processes - whatever the task definition, synthesized command, or command text
 tells it to.
 
 A task file (justfile, Makefile, Dockerfile, Compose manifest, …) is code.
 Pointing jmw at a project is the same act as running that project's build
-scripts by hand — because it is the same thing. Do not point jmw at task files
+scripts by hand - because it is the same thing. Do not point jmw at task files
 you do not trust.
 
 Docker tasks reach the furthest. A build executes the instructions of the
 project `Dockerfile`, and a Compose service runs with the bind mounts,
-published ports, and privileges its manifest declares — all through the Docker
+published ports, and privileges its manifest declares - all through the Docker
 daemon, which is a privileged service on most hosts. Compose services are
 started detached, so their containers outlive the run that started them until
 `docker:compose:down` stops them.
 
-Permission and approval rules configured in the calling client — agent
-allow-lists, approval modes, and per-tool confirmation prompts — are
+Permission and approval rules configured in the calling client - agent
+allow-lists, approval modes, and per-tool confirmation prompts - are
 convenience and operator discipline, not a server-side security boundary. jmw
 executes what it is handed; it neither knows nor relies on what the calling
 agent chose to confirm or auto-approve.
@@ -139,7 +139,7 @@ secrets a task echoed.
 ## If you need real isolation
 
 Run jmw inside a container, devcontainer, or VM. jmw is designed to compose
-with that boundary — it relies on the surrounding environment for containment
+with that boundary - it relies on the surrounding environment for containment
 rather than trying to be a sandbox itself. If a task must not touch your
 host, put jmw somewhere that task cannot reach the host.
 

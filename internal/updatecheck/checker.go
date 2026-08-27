@@ -409,6 +409,7 @@ func (c *Checker) persistStateLocked() {
 	temporaryName := temporary.Name()
 	defer func() {
 		//nolint:errcheck // The temporary file is best-effort cleanup after a failed publish.
+		// nosemgrep: discarded-error
 		_ = os.Remove(temporaryName)
 	}()
 	if _, err := temporary.Write(append(data, '\n')); err != nil {

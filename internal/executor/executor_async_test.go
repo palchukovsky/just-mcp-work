@@ -201,7 +201,7 @@ func TestTimeoutDiagnosticPreservesAppliedLimit(t *testing.T) {
 		t.Fatalf("timeout result = %#v", result)
 	}
 	meta, err := store.Get(result.RunID)
-	if err != nil || meta.Error != result.Message {
+	if err != nil || !strings.Contains(meta.Error, result.Message) {
 		t.Fatalf("timeout metadata = %#v, %v", meta, err)
 	}
 }

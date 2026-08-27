@@ -54,7 +54,7 @@ const longTaskDescription = "Run the release gate: formatting, dependency metada
 	"vet, race-enabled tests, and the smoke flow, then report a single verdict for the whole tree.\n" +
 	"The second line documents the exit codes."
 
-// maxListTasksResponseBytes is JMW-30's 25,000-token client budget expressed
+// maxListTasksResponseBytes is the 25,000-token client budget expressed
 // as four ASCII bytes per token. The fixture contains only ASCII payloads.
 const maxListTasksResponseBytes = 100_000
 

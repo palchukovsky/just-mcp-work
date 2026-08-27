@@ -11,9 +11,7 @@
 # tools/code_style.md: "There are no bindings, wiki mirrors, or cross-language
 # API-parity requirements").
 #
-# no-tracker-ids-in-code is a sibling rule from the same template file, held
-# back in checks/semgrep-pending/tracker-ids.yml: it has one real finding in
-# the current tree (see checks/README.md).
+# no-tracker-ids-in-code is active in checks/semgrep/tracker-ids.yml.
 
 rules:
   - id: no-internal-document-reference
@@ -28,10 +26,6 @@ rules:
     pattern-regex: >-
       (/Users/[A-Za-z0-9_.-]+/(Projects|Desktop|Documents)/|/home/[A-Za-z0-9_.-]+/[A-Za-z0-9_./-]*|\.\./tools/(agents|graphify-out|serena|data)/|\bworkspace/tools/)
     paths:
-      include:
-        - "*.go"
-        - "*.py"
-        - "*.md"
       exclude:
         - "**/vendor/**"
         - dist

@@ -32,6 +32,7 @@ func processIdentity(pid int) (string, bool) {
 	}
 	defer func() {
 		//nolint:errcheck // A failed close must not make cleanup delete a live run.
+		// nosemgrep: discarded-error
 		_ = windows.CloseHandle(process)
 	}()
 	var exitCode uint32

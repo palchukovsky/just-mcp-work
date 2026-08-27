@@ -225,6 +225,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 			go func(runID string, run *executor.Run) {
 				defer wait.Done()
 				//nolint:errcheck // Shutdown is best-effort; the ledger error is already recorded.
+				// nosemgrep: discarded-error
 				_ = run.StopWithReason("server shutdown")
 				m.releaseFinishedRun(runID, run)
 			}(runID, run)

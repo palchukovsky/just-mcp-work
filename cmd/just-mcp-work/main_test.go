@@ -41,6 +41,60 @@ func TestHelpFlagsReturnSuccess(t *testing.T) {
 	}
 }
 
+func TestPrintUsageAndRunHelpReturnSuccess(t *testing.T) {
+	const expected = "Usage: just-mcp-work <command> [options]\n" +
+		"\nCommands:\n" +
+		"  serve    Start the local STDIO MCP server\n" +
+		"  init     Add managed task-server instructions for coding agents\n" +
+		"  version  Print version and commit\n"
+
+	var output bytes.Buffer
+	if err := printUsage(&output); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != expected {
+		t.Fatalf("usage output = %q, want %q", output.String(), expected)
+	}
+
+	for _, test := range []struct {
+		name string
+		args []string
+	}{
+		{name: "no arguments", args: nil},
+		{name: "help command", args: []string{"help"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			actual := captureStdout(t, func() {
+				if runErr := run(test.args); runErr != nil {
+					t.Fatal(runErr)
+				}
+			})
+			if actual != expected {
+				t.Fatalf("usage output = %q, want %q", actual, expected)
+			}
+		})
+	}
+}
+
+type erroringWriter struct {
+	err error
+}
+
+func (w erroringWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestPrintUsageWrapsWriteError(t *testing.T) {
+	writeErr := errors.New("write failed")
+	err := printUsage(erroringWriter{err: writeErr})
+	if !errors.Is(err, writeErr) {
+		t.Fatalf("printUsage() error = %v, want wrapped %v", err, writeErr)
+	}
+	if err.Error() != "write usage: write failed" {
+		t.Fatalf("printUsage() error = %q", err)
+	}
+}
+
 func TestServerRunErrorAcceptsContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

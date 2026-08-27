@@ -1,11 +1,5 @@
-# Held back from checks/semgrep/isolation.yml: this rule has one real finding
-# in the current tree. Run manually with:
-#
-#   .venv/bin/semgrep --config checks/semgrep-pending/tracker-ids.yml .
-#
-# Move to checks/semgrep/ once the finding below is fixed:
-#
-#   internal/mcpserver/server_tasks_test.go:57 - "JMW-30" in a comment.
+# Private tracker identifiers across source and documentation. Rejects
+# tracker-style issue references and TODO forms. See checks/README.md.
 
 rules:
   - id: no-tracker-ids-in-code
@@ -21,9 +15,6 @@ rules:
       # false positive this pattern hits in the current tree.
       - pattern-not-regex: '\bUTF-\d+\b'
     paths:
-      include:
-        - "*.go"
-        - "*.py"
       exclude:
         - "**/vendor/**"
         - dist

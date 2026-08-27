@@ -49,8 +49,8 @@ type Run struct {
 	config     Config
 	stdoutTail *Tail
 	stderrTail *Tail
-	killTree   func()
-	cleanup    func()
+	killTree   func() error
+	cleanup    func() error
 	done       chan struct{}
 	stop       chan stopRequest
 	stopOnce   sync.Once
@@ -150,15 +150,16 @@ func normalizeConfig(config Config) Config {
 }
 
 func (r *Run) failSetup(err error, message string) {
+	var terminationErr error
 	if r.killTree != nil {
-		r.killTree()
+		terminationErr = r.killTree()
 	} else if r.cmd.Process != nil {
-		//nolint:errcheck // The setup failure remains the actionable error.
-		_ = r.cmd.Process.Kill()
+		terminationErr = r.cmd.Process.Kill()
 	}
 	waitErr := r.cmd.Wait()
+	var cleanupErr error
 	if r.cleanup != nil {
-		r.cleanup()
+		cleanupErr = r.cleanup()
 	}
 	finalErr := r.handle.Finish(
 		runstore.StatusSpawnError,
@@ -177,14 +178,11 @@ func (r *Run) failSetup(err error, message string) {
 			r.stderrTail.String(),
 			r.stdoutTail.String(),
 		),
-		errors.Join(err, waitErr, finalErr),
+		errors.Join(err, terminationErr, waitErr, cleanupErr, finalErr),
 	)
 }
 
 func (r *Run) await() {
-	if r.cleanup != nil {
-		defer r.cleanup()
-	}
 	waitDone := make(chan error, 1)
 	go func() { waitDone <- r.cmd.Wait() }()
 	var timeout <-chan time.Time
@@ -196,10 +194,11 @@ func (r *Run) await() {
 	}
 
 	var (
-		waitErr error
-		status  = runstore.StatusOK
-		message = "OK"
-		errText string
+		waitErr        error
+		terminationErr error
+		status         = runstore.StatusOK
+		message        = "OK"
+		errText        string
 	)
 	select {
 	case waitErr = <-waitDone:
@@ -214,13 +213,13 @@ func (r *Run) await() {
 			r.config.Timeout,
 		)
 		errText = message
-		terminate(r.cmd, r.config.Grace, r.killTree)
+		terminationErr = terminate(r.cmd, r.config.Grace, r.killTree)
 		waitErr = <-waitDone
 	case request := <-r.stop:
 		status = request.status
 		message = request.message
 		errText = request.errText
-		terminate(r.cmd, r.config.Grace, r.killTree)
+		terminationErr = terminate(r.cmd, r.config.Grace, r.killTree)
 		waitErr = <-waitDone
 	}
 	if errors.Is(waitErr, exec.ErrWaitDelay) && r.cmd.ProcessState != nil && r.cmd.ProcessState.Success() {
@@ -236,6 +235,13 @@ func (r *Run) await() {
 	}
 	if errText == "" {
 		errText = errorText(waitErr, status)
+	}
+	if terminationErr != nil {
+		errText = joinErrorText(errText, terminationErr)
+	}
+	var cleanupErr error
+	if r.cleanup != nil {
+		cleanupErr = r.cleanup()
 	}
 	finalErr := r.handle.Finish(
 		status,
@@ -254,7 +260,7 @@ func (r *Run) await() {
 			r.stderrTail.String(),
 			r.stdoutTail.String(),
 		),
-		finalErr,
+		errors.Join(finalErr, terminationErr, cleanupErr),
 	)
 }
 
@@ -436,6 +442,13 @@ func errorText(waitErr error, status runstore.Status) string {
 		return ""
 	}
 	return waitErr.Error()
+}
+
+func joinErrorText(text string, err error) string {
+	if text == "" {
+		return err.Error()
+	}
+	return errors.Join(errors.New(text), err).Error()
 }
 
 func writeExecutorWarning(handle *runstore.Handle, err error) error {

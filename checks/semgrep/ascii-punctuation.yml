@@ -1,0 +1,19 @@
+# ASCII punctuation across the tree. Rejects em and en dashes in text Semgrep
+# can read. See checks/README.md.
+
+rules:
+  - id: ascii-punctuation-only
+    message: >-
+      Use ASCII punctuation: replace an em dash or en dash with a hyphen.
+      Non-ASCII dashes render inconsistently across terminals, diffs, and
+      documentation pipelines.
+    severity: ERROR
+    languages: [generic]
+    pattern-regex: '[\x{2013}\x{2014}]'
+    paths:
+      exclude:
+        - "**/*_test.go"
+        - "**/vendor/**"
+        - dist
+        - .tmp
+        - .venv

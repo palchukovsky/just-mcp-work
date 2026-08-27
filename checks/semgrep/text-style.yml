@@ -1,31 +1,15 @@
-# Text style and hygiene in Go and Python source.
+# Text style and hygiene across the whole tree: source, docs, config.
 #
-# Scope trimmed to the languages this repository actually has (Go product
-# code, Python dev scripts). The byte-content rules exclude *_test.go: this
+# Generic pattern-regex rules, so no paths.include - every text file Semgrep
+# can read is in scope. The byte-content rules exclude *_test.go: this
 # project's tests exercise UTF-8 and unicode edge cases deliberately (see
-# internal/runstore/store_test.go), so ASCII/invisible-character/emoji
-# findings inside test fixtures would be noise rather than a real defect.
+# internal/runstore/store_test.go), so invisible-character/emoji findings
+# inside test fixtures would be noise rather than a real defect.
+#
+# ascii-punctuation-only is active in
+# checks/semgrep/ascii-punctuation.yml.
 
 rules:
-  - id: ascii-punctuation-only
-    message: >-
-      Use ASCII punctuation: replace an em dash or en dash with a hyphen.
-      Non-ASCII dashes render inconsistently across terminals, diffs, and
-      documentation pipelines.
-    severity: ERROR
-    languages: [generic]
-    pattern-regex: '[\x{2013}\x{2014}]'
-    paths:
-      include:
-        - "*.go"
-        - "*.py"
-      exclude:
-        - "**/*_test.go"
-        - "**/vendor/**"
-        - dist
-        - .tmp
-        - .venv
-
   - id: no-invisible-characters
     message: >-
       Invisible or zero-width characters are not allowed in source. They are
@@ -35,9 +19,6 @@ rules:
     languages: [generic]
     pattern-regex: '[\x{200B}-\x{200F}\x{2060}-\x{2064}\x{2066}-\x{206F}]'
     paths:
-      include:
-        - "*.go"
-        - "*.py"
       exclude:
         - "**/*_test.go"
         - "**/vendor/**"
@@ -53,9 +34,6 @@ rules:
     languages: [generic]
     pattern-regex: '[\x{1F300}-\x{1FAFF}\x{2700}-\x{27BF}]'
     paths:
-      include:
-        - "*.go"
-        - "*.py"
       exclude:
         - "**/*_test.go"
         - "**/vendor/**"
@@ -75,9 +53,6 @@ rules:
       worth noting|this ensures that|let'?s |in summary|overall,|as we can
       see|i cannot|i'?m sorry|i apologize)
     paths:
-      include:
-        - "*.go"
-        - "*.py"
       exclude:
         - "**/vendor/**"
         - dist

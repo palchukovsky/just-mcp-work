@@ -1,8 +1,9 @@
 # Semgrep invariant gate
 
 Project-specific checks for invariants `golangci-lint` does not cover: text
-hygiene and reference isolation for a public repository. Rules are worded
-neutrally - they read as style, security, and architecture checks.
+hygiene, reference isolation, and swallowed errors, for a public repository.
+Rules are worded neutrally - they read as style, security, and architecture
+checks.
 
 ## Run it
 
@@ -11,44 +12,41 @@ neutrally - they read as style, security, and architecture checks.
 ```
 
 Wired into the justfile as `check-semgrep`, a prerequisite of `check-dry`, so
-it also runs as part of `check` and `verify`.
+it also runs as part of `check` and `verify`, locally and in CI.
 
-## Active (`semgrep/`)
+The generic rules (`text-style.yml`, `isolation.yml`, `ascii-punctuation.yml`,
+`tracker-ids.yml`) carry no `paths.include`: they scan every text file Semgrep
+can read across the whole tree (`.go`, `.py`, `.md`, `.yml`, `.json`,
+justfiles, `.gitignore`/`.gitattributes`), not only source files. `errors-go.yml`
+is Go-specific by `languages: [go]`, not by an include list. Each rule's own
+`paths.exclude` is what narrows it, and every exclusion is documented in the
+rule file it appears in.
 
-- `text-style.yml` - ASCII punctuation, invisible characters, emoji,
-  conversational comments.
+## Rules (`semgrep/`)
+
+- `text-style.yml` - invisible characters, emoji, conversational comments.
 - `isolation.yml` - no references to the private half of the workspace
   (machine-local paths, the sibling `tools/` directory).
+- `ascii-punctuation.yml` - ASCII punctuation only, no em/en dashes.
+- `tracker-ids.yml` - no private-tracker issue IDs in source or docs.
+- `errors-go.yml` - `discarded-error` catches one-result and two-result all-blank
+  assignments (`_ = call(...)` and `_, _ = call(...)`);
+  `error-dropped-on-return` catches a checked error path that returns without
+  the error.
 
-## Held back (`semgrep-pending/`, real findings, not wired into the gate)
+## Documented exceptions
 
-- `tracker-ids.yml` - 1 finding:
-  `internal/mcpserver/server_tasks_test.go:57`, a `JMW-30` reference in a
-  test comment.
-- `errors-go.yml` - 19 findings: 16 discarded-error sites (`Process.Kill`,
-  `CloseHandle`, `Handle.Finish`, `StopWithReason`, `os.Remove`,
-  `filepath.WalkDir`) and 3 error-dropped-on-return sites
-  (`terminate_unix.go` SIGTERM/SIGKILL, `runner/just`). `golangci-lint`
-  already tolerates these; `tools/code_style.md` requires a short comment
-  documenting an intentionally ignored error, and none of these carry one.
+All active rules must pass. `discarded-error` excludes direct `.Close()` calls
+as deferred cleanup. Every other ignored error needs a short rationale and an
+exact `nosemgrep` suppression for that rule. This is reserved for best-effort
+cleanup whose failure cannot change the operation's outcome, not for ordinary
+error handling.
 
-Run a held-back rule manually with
-`.venv/bin/semgrep --config checks/semgrep-pending/<file> .`. Move it into
-`semgrep/` once its findings are fixed or the rule is narrowed to an agreed
-convention.
-
-## Held back (`docs_style.py`, not a Semgrep rule)
-
-Semgrep does not parse Markdown. `docs_style.py` is a standard-library-only
-Python check (no shell: `grep -P` is not portable to BSD grep on macOS or to
-Windows) for the same punctuation and invisible-character invariants over the
-public docs (`README.md`, `SECURITY.md`, `docs/*.md`). 16 findings today, all
-`non-ascii-dash` (7 in `README.md`, 9 in `SECURITY.md`); no invisible
-characters. Run with `.venv/bin/python checks/docs_style.py` from the
-repository root; exits 1 on findings, 0 clean.
+Mixed-result assignments, such as `value, _ := call(...)` or
+`value, _ = call(...)`, are not matched. All-blank assignments with three or
+more results, such as `_, _, _ = call(...)`, are also not matched.
 
 ## The approval marker
 
-Not currently used: none of the active or held-back rules here are of the
-"unmarked fallback" kind that the `// fallback(approved): <reason>` marker
-applies to.
+Not currently used: none of the rules here are of the "unmarked fallback"
+kind that the `// fallback(approved): <reason>` marker applies to.

@@ -1424,13 +1424,15 @@ func (s *Server) progressReporter(
 }
 
 func (s *Server) cancel(handle *runstore.Handle, reason error) executor.Result {
-	//nolint:errcheck // The compact cancellation receipt is still returned if ledger finalization fails.
-	_ = handle.Finish(runstore.StatusCancelled, -1, reason.Error(), false, false)
+	message := "Task cancelled"
+	if err := handle.Finish(runstore.StatusCancelled, -1, reason.Error(), false, false); err != nil {
+		message = fmt.Sprintf("%s; finalize cancelled task: %v", message, err)
+	}
 	return executor.Result{
 		RunID:      handle.Meta.RunID,
 		ExitCode:   -1,
 		DurationMS: handle.Meta.DurationMS,
-		Message:    "Task cancelled",
+		Message:    message,
 		Status:     runstore.StatusCancelled,
 		LogsReady:  true,
 	}
@@ -1461,14 +1463,16 @@ func shellCommand(dir, command string) (*exec.Cmd, error) {
 }
 
 func (s *Server) reject(handle *runstore.Handle, reason error) executor.Result {
-	//nolint:errcheck // The compact error receipt is still returned if ledger finalization fails.
-	_ = handle.Finish(runstore.StatusSpawnError, -1, reason.Error(), false, false)
+	message := reason.Error()
+	if err := handle.Finish(runstore.StatusSpawnError, -1, message, false, false); err != nil {
+		message = fmt.Sprintf("%s; finalize rejected task: %v", message, err)
+	}
 	return executor.Result{
 		RunID:      handle.Meta.RunID,
 		OK:         false,
 		ExitCode:   -1,
 		DurationMS: handle.Meta.DurationMS,
-		Message:    reason.Error(),
+		Message:    message,
 		Status:     runstore.StatusSpawnError,
 		LogsReady:  true,
 	}

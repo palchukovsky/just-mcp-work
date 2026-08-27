@@ -568,6 +568,101 @@ func TestCleanupDoesNotFollowSymlinks(t *testing.T) {
 	}
 }
 
+func TestCleanupReportsUnreadableMetadataWithoutDeletingRun(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(handle.dir, "meta.json"), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupErr := store.Cleanup(time.Hour)
+	if cleanupErr == nil || !strings.Contains(cleanupErr.Error(), handle.dir) {
+		t.Fatalf("cleanup error = %v, want error naming %q", cleanupErr, handle.dir)
+	}
+	if _, err := os.Stat(handle.dir); err != nil {
+		t.Fatalf("run with unreadable metadata was removed: %v", err)
+	}
+}
+
+func TestCleanupReportsOnlyStaleRunMissingMetadataWithoutDeletingRuns(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHandle, err := store.Begin(Meta{TaskID: "just:old"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = oldHandle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(filepath.Join(oldHandle.dir, "meta.json")); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-2 * time.Hour)
+	if err = os.Chtimes(oldHandle.dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	freshHandle, err := store.Begin(Meta{TaskID: "just:fresh"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = freshHandle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(filepath.Join(freshHandle.dir, "meta.json")); err != nil {
+		t.Fatal(err)
+	}
+	fresh := time.Now().UTC().Add(-30 * time.Minute)
+	if err = os.Chtimes(freshHandle.dir, fresh, fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	cleanupErr := store.Cleanup(time.Hour)
+	if cleanupErr == nil {
+		t.Fatal("cleanup accepted stale run with missing metadata")
+	}
+	if !strings.Contains(cleanupErr.Error(), oldHandle.dir) {
+		t.Fatalf("cleanup error = %v, want error naming %q", cleanupErr, oldHandle.dir)
+	}
+	if strings.Contains(cleanupErr.Error(), freshHandle.dir) {
+		t.Fatalf("cleanup error = %v, fresh run %q must be skipped", cleanupErr, freshHandle.dir)
+	}
+	if _, err := os.Stat(oldHandle.dir); err != nil {
+		t.Fatalf("stale run with missing metadata was removed: %v", err)
+	}
+	if _, err := os.Stat(freshHandle.dir); err != nil {
+		t.Fatalf("fresh run with missing metadata was removed: %v", err)
+	}
+}
+
+func TestHasSymlinkTreatsWalkFailureAsUnsafe(t *testing.T) {
+	wantErr := errors.New("walk failed")
+	callbackErr := hasSymlinkWalkFunc(new(bool))("unreadable", nil, wantErr)
+	if !errors.Is(callbackErr, wantErr) {
+		t.Fatalf("walk callback returned %v, want propagated walk error", callbackErr)
+	}
+	found, err := hasSymlink(filepath.Join(t.TempDir(), "missing"))
+	if err == nil {
+		t.Fatal("hasSymlink accepted a directory that could not be inspected")
+	}
+	if !found {
+		t.Fatal("hasSymlink did not fail closed: uninspectable directory must be treated as unsafe")
+	}
+}
+
 func TestReadLogRefusesSymlinkedRunDirectory(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewForWorktree(root, root)

@@ -40,8 +40,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		printUsage(os.Stdout)
-		return nil
+		return printUsage(os.Stdout)
 	}
 	switch args[0] {
 	case "serve":
@@ -52,8 +51,7 @@ func run(args []string) error {
 		fmt.Printf("just-mcp-work %s (%s)\n", version.Current().Display(), version.Commit)
 		return nil
 	case "help", "--help", "-h":
-		printUsage(os.Stdout)
-		return nil
+		return printUsage(os.Stdout)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -129,6 +127,7 @@ func parseServeOptions(args []string) (serveOptions, error) {
 	)
 	flags.Usage = func() {
 		//nolint:errcheck // FlagSet usage callbacks cannot return output errors.
+		// nosemgrep: discarded-error
 		_, _ = fmt.Fprintln(
 			flags.Output(),
 			"Usage: just-mcp-work serve [--root <dir>] [--timeout <duration>] "+
@@ -300,6 +299,7 @@ func initCommandWithIO(
 	)
 	flags.Usage = func() {
 		//nolint:errcheck // FlagSet usage callbacks cannot return output errors.
+		// nosemgrep: discarded-error
 		_, _ = fmt.Fprintln(
 			flags.Output(),
 			"Usage: just-mcp-work init [--dir <dir>] [--agents <names>] [--dry-run] "+
@@ -583,17 +583,26 @@ func (c *initConsole) confirmClaudePermissions(path string, _ string) (bool, err
 	}
 }
 
-func printUsage(output *os.File) {
-	//nolint:errcheck // Usage output cannot be reported through this void helper.
-	_, _ = fmt.Fprintln(output, "Usage: just-mcp-work <command> [options]")
-	//nolint:errcheck // Usage output cannot be reported through this void helper.
-	_, _ = fmt.Fprintln(output, "\nCommands:")
-	//nolint:errcheck // Usage output cannot be reported through this void helper.
-	_, _ = fmt.Fprintln(output, "  serve    Start the local STDIO MCP server")
-	//nolint:errcheck // Usage output cannot be reported through this void helper.
-	_, _ = fmt.Fprintln(output, "  init     Add managed task-server instructions for coding agents")
-	//nolint:errcheck // Usage output cannot be reported through this void helper.
-	_, _ = fmt.Fprintln(output, "  version  Print version and commit")
+func printUsage(output io.Writer) error {
+	if _, err := fmt.Fprintln(output, "Usage: just-mcp-work <command> [options]"); err != nil {
+		return fmt.Errorf("write usage: %w", err)
+	}
+	if _, err := fmt.Fprintln(output, "\nCommands:"); err != nil {
+		return fmt.Errorf("write usage: %w", err)
+	}
+	if _, err := fmt.Fprintln(output, "  serve    Start the local STDIO MCP server"); err != nil {
+		return fmt.Errorf("write usage: %w", err)
+	}
+	if _, err := fmt.Fprintln(
+		output,
+		"  init     Add managed task-server instructions for coding agents",
+	); err != nil {
+		return fmt.Errorf("write usage: %w", err)
+	}
+	if _, err := fmt.Fprintln(output, "  version  Print version and commit"); err != nil {
+		return fmt.Errorf("write usage: %w", err)
+	}
+	return nil
 }
 
 func envOr(name, fallback string) string {

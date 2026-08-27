@@ -6,7 +6,7 @@
 [![Go][go-badge]][go-cache]
 [![License: MIT][license-badge]][license]
 
-> Just work with your workspace — over MCP.
+> Just work with your workspace - over MCP.
 
 Your coding agent spends context reading build files and re-reading logs it
 already ran. `just-mcp-work` is a small local MCP server that gives it one way
@@ -17,7 +17,7 @@ instead of a wall of output.
   projects nested anywhere in the workspace are discovered on demand. The agent
   asks for one task and gets that one task.
 - **Output only when it is wanted.** A run answers with its status, exit code,
-  and short output tails. The full stdout and stderr stay one call away — for
+  and short output tails. The full stdout and stderr stay one call away - for
   the failures where they matter.
 - **Long runs stay out of the way.** Anything slow moves to the background with
   a run ID the agent can follow, wait on, or stop.
@@ -44,7 +44,7 @@ modes. Runner modes reduce the task surface but do not isolate it.
 that bypass that mechanism; a task withheld by a runner mode must not be
 recreated through them or another shell path. Discovery reads build files
 instead of evaluating them, so a target list is never a promise of
-completeness — most visibly for Make, where a build file outside the safe
+completeness - most visibly for Make, where a build file outside the safe
 literal subset reports a discovery error instead of a partial list. Need
 isolation? Run `just-mcp-work` in a container. See [SECURITY.md](SECURITY.md).
 
@@ -107,14 +107,14 @@ just-mcp-work init
 
 Each invocation is authoritative inside the workspace scope resolved from
 `--dir`, for the surfaces it manages. It adds the canonical instruction block
-for the selected agents — Claude Code, Codex, Cursor, Copilot, and Windsurf —
+for the selected agents - Claude Code, Codex, Cursor, Copilot, and Windsurf -
 and never reads or changes the instruction file of an agent that is not
 selected. `.claude/settings.json` is touched only when `claude` is one of the
 selected agents, and then follows the permission answer. `.mcp.json` and
 `.codex/config.toml` follow `--write-mcp-config` rather than `--agents`: they
 are rewritten when it is true and stripped of their JMW entries when it is
 false, whether or not `codex` was selected. Two agent targets that resolve to
-one document — a `CLAUDE.md` symlinked to an `AGENTS.md`, say — are each
+one document - a `CLAUDE.md` symlinked to an `AGENTS.md`, say - are each
 written with their own header, so keep such a document under a single selected
 agent, or give it text of its own before the first `init`.
 
@@ -159,8 +159,8 @@ agent targets and the server options.
 | `--timeout` | `JMW_TIMEOUT` | `15m` (`0` disables the timeout) |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` |
 | `--retention` | `JMW_RETENTION` | `72h` |
-| `--exclude` | — | None |
-| `--runner-mode <name>=<mode>` | — | Each runner's declared default |
+| `--exclude` | - | None |
+| `--runner-mode <name>=<mode>` | - | Each runner's declared default |
 
 Run data is kept under `.just-mcp-work/log/` in the selected workspace.
 

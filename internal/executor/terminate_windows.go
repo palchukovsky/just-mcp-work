@@ -27,7 +27,7 @@ func prepare(cmd *exec.Cmd) {
 	cmd.SysProcAttr.CreationFlags |= windows.CREATE_SUSPENDED
 }
 
-func attach(cmd *exec.Cmd) (func(), func(), error) {
+func attach(cmd *exec.Cmd) (func() error, func() error, error) {
 	pid, err := windowsPID(cmd.Process.Pid)
 	if err != nil {
 		return nil, nil, err
@@ -44,8 +44,12 @@ func attach(cmd *exec.Cmd) (func(), func(), error) {
 		uintptr(unsafe.Pointer(&limits)),
 		uint32(unsafe.Sizeof(limits)),
 	); setErr != nil {
-		//nolint:errcheck // The job setup error remains the actionable error.
-		_ = windows.CloseHandle(job)
+		if closeErr := windows.CloseHandle(job); closeErr != nil {
+			return nil, nil, errors.Join(
+				fmt.Errorf("set process job limits: %w", setErr),
+				fmt.Errorf("close task job: %w", closeErr),
+			)
+		}
 		return nil, nil, fmt.Errorf("set process job limits: %w", setErr)
 	}
 	process, err := windows.OpenProcess(
@@ -54,25 +58,34 @@ func attach(cmd *exec.Cmd) (func(), func(), error) {
 		pid,
 	)
 	if err != nil {
-		//nolint:errcheck // The process-open error remains the actionable error.
-		_ = windows.CloseHandle(job)
+		if closeErr := windows.CloseHandle(job); closeErr != nil {
+			return nil, nil, errors.Join(
+				fmt.Errorf("open task process: %w", err),
+				fmt.Errorf("close task job: %w", closeErr),
+			)
+		}
 		return nil, nil, fmt.Errorf("open task process: %w", err)
 	}
 	defer func() {
 		//nolint:errcheck // The process operation error takes precedence over handle cleanup.
+		// nosemgrep: discarded-error
 		_ = windows.CloseHandle(process)
 	}()
 	if err := windows.AssignProcessToJobObject(job, process); err != nil {
-		//nolint:errcheck // The job-assignment error remains the actionable error.
-		_ = windows.CloseHandle(job)
+		if closeErr := windows.CloseHandle(job); closeErr != nil {
+			return nil, nil, errors.Join(
+				fmt.Errorf("assign task process to job: %w", err),
+				fmt.Errorf("close task job: %w", closeErr),
+			)
+		}
 		return nil, nil, fmt.Errorf("assign task process to job: %w", err)
 	}
 	var once sync.Once
-	closeJob := func() {
+	closeJob := func() (err error) {
 		once.Do(func() {
-			//nolint:errcheck // Job closure is best effort during process cleanup.
-			_ = windows.CloseHandle(job)
+			err = windows.CloseHandle(job)
 		})
+		return err
 	}
 	if err := resumeProcess(pid); err != nil {
 		return closeJob, closeJob, fmt.Errorf("resume task process: %w", err)
@@ -95,6 +108,7 @@ func resumeProcess(pid uint32) error {
 	}
 	defer func() {
 		//nolint:errcheck // The earlier thread operation remains the actionable error.
+		// nosemgrep: discarded-error
 		_ = windows.CloseHandle(snapshot)
 	}()
 	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
@@ -122,6 +136,7 @@ func resumeThread(threadID uint32) error {
 	}
 	defer func() {
 		//nolint:errcheck // ResumeThread errors take precedence over handle cleanup.
+		// nosemgrep: discarded-error
 		_ = windows.CloseHandle(thread)
 	}()
 	previousCount, err := windows.ResumeThread(thread)
@@ -134,13 +149,12 @@ func resumeThread(threadID uint32) error {
 	return nil
 }
 
-func terminate(cmd *exec.Cmd, _ time.Duration, killTree func()) {
+func terminate(cmd *exec.Cmd, _ time.Duration, killTree func() error) error {
 	if cmd.Process == nil {
-		return
+		return nil
 	}
 	if killTree != nil {
-		killTree()
-		return
+		return killTree()
 	}
 	// #nosec G204 -- the PID comes from the process started by this executor.
 	if killErr := exec.CommandContext(
@@ -151,8 +165,13 @@ func terminate(cmd *exec.Cmd, _ time.Duration, killTree func()) {
 		"/PID",
 		fmt.Sprint(cmd.Process.Pid),
 	).Run(); killErr == nil {
-		return
+		return nil
+	} else if fallbackErr := cmd.Process.Kill(); fallbackErr != nil {
+		return errors.Join(
+			fmt.Errorf("terminate task tree: %w", killErr),
+			fmt.Errorf("terminate task process: %w", fallbackErr),
+		)
+	} else {
+		return fmt.Errorf("terminate task tree: %w", killErr)
 	}
-	//nolint:errcheck // taskkill already failed and terminate has no error channel.
-	_ = cmd.Process.Kill()
 }

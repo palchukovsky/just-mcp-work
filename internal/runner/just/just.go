@@ -138,6 +138,10 @@ func collectSources(dump justDump, sources map[string]struct{}) {
 func tasksFromDump(dump justDump) ([]runner.Task, error) {
 	aliases := aliasesByTarget(dump.Aliases)
 	names := sortedKeys(dump.Recipes)
+	modules, err := jsonValue(dump.Modules)
+	if err != nil {
+		return nil, fmt.Errorf("encode just modules metadata: %w", err)
+	}
 	tasks := make([]runner.Task, 0, len(names))
 	for _, name := range names {
 		recipe := dump.Recipes[name]
@@ -169,7 +173,7 @@ func tasksFromDump(dump justDump) ([]runner.Task, error) {
 			"aliases":  aliases[recipe.Name],
 			"confirm":  hasAttribute(recipe.Attributes, "confirm"),
 			"group":    group,
-			"modules":  jsonValue(dump.Modules),
+			"modules":  modules,
 			"namepath": namepath,
 		}
 		tasks = append(tasks, runner.Task{
@@ -307,19 +311,16 @@ func groupForRecipe(raw json.RawMessage, recipe string) string {
 	return ""
 }
 
-func jsonValue(value any) any {
+func jsonValue(value any) (any, error) {
 	raw, err := json.Marshal(value)
 	if err != nil {
-		return nil
-	}
-	if len(raw) == 0 {
-		return nil
+		return nil, fmt.Errorf("encode JSON value: %w", err)
 	}
 	var decoded any
 	if err := json.Unmarshal(raw, &decoded); err != nil {
-		return string(raw)
+		return nil, fmt.Errorf("decode JSON value: %w", err)
 	}
-	return decoded
+	return decoded, nil
 }
 
 func sortedKeys[V any](values map[string]V) []string {
