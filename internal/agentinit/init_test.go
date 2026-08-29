@@ -65,7 +65,11 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPaths := []string{path, policy.Path(dir)}
+	wantPaths := []string{
+		path,
+		resolvedTestPath(t, filepath.Join(dir, manifestFile)),
+		policy.Path(dir),
+	}
 	if !slices.Equal(first.Paths, wantPaths) {
 		t.Fatalf("first result paths = %#v", first.Paths)
 	}
@@ -203,8 +207,9 @@ func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(result.Paths) != 0 {
-				t.Fatalf("narrow selection changed paths: %#v", result.Paths)
+			manifestPath := resolvedTestPath(t, filepath.Join(dir, manifestFile))
+			if len(result.Paths) != 1 || result.Paths[0] != manifestPath {
+				t.Fatalf("narrow selection paths = %#v, want only %s", result.Paths, manifestPath)
 			}
 			for _, named := range agentTargets() {
 				path := filepath.Join(dir, named.target.path)
@@ -684,6 +689,7 @@ func TestApplyDryRunPlansCleanupWithoutWriting(t *testing.T) {
 		filepath.Join(dir, codexConfig),
 		filepath.Join(dir, claudeSettings),
 		policy.Path(dir),
+		resolvedTestPath(t, filepath.Join(dir, manifestFile)),
 	}
 	before := make(map[string][]byte, len(paths))
 	for _, path := range paths {
@@ -812,6 +818,7 @@ func TestApplyReportsPolicyAfterManagedConfigurations(t *testing.T) {
 		filepath.Join(dir, mcpConfig),
 		resolvedTestPath(t, filepath.Join(dir, codexConfig)),
 		resolvedTestPath(t, filepath.Join(dir, claudeSettings)),
+		resolvedTestPath(t, filepath.Join(dir, manifestFile)),
 		policy.Path(dir),
 	}
 	if !slices.Equal(result.Paths, want) {
@@ -1082,7 +1089,8 @@ func TestApplyUpdatesEarlierManagedPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(result.Paths) != 2 || !containsPath(result.Paths, policy.Path(dir)) {
+	if len(result.Paths) != 3 || !containsPath(result.Paths, policy.Path(dir)) ||
+		!containsPath(result.Paths, resolvedTestPath(t, filepath.Join(dir, manifestFile))) {
 		t.Fatalf("updated paths = %#v", result.Paths)
 	}
 	// #nosec G304 -- path is created in this test's temporary directory.
@@ -1361,8 +1369,9 @@ func TestApplyKeepsCRLFLineEndings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Paths) != len(files)+1 || !containsPath(first.Paths, policy.Path(dir)) {
-		t.Fatalf("apply changed %v, want all files and policy", first.Paths)
+	if len(first.Paths) != len(files)+2 || !containsPath(first.Paths, policy.Path(dir)) ||
+		!containsPath(first.Paths, resolvedTestPath(t, filepath.Join(dir, manifestFile))) {
+		t.Fatalf("apply changed %v, want all files, policy, and manifest", first.Paths)
 	}
 	for path := range files {
 		// #nosec G304 -- path is created in this test's temporary directory.

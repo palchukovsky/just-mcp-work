@@ -206,6 +206,14 @@ Managed MCP and Codex server arguments are `serve --root <dir>` and carry no
 runner selection. The policy, not the server arguments, defines the authorized
 task surface an agent sees.
 
+`init` also records the managed configuration it wrote in JMW's own
+`.just-mcp-work/` state directory. At startup, `serve` checks that the recorded
+configuration is still present and unchanged. If that record is absent, there
+is no check and startup behaves as it did before the record existed. In block
+files, JMW owns the text between its managed markers. In JSON files, it owns the
+`just-mcp-work` server entry and every JMW-prefixed permission entry it
+generates; foreign servers and permission entries remain local content.
+
 `init --runner-mode <name>=<mode>` remains repeatable for answering runner
 questions non-interactively. `serve --runner-mode` is retired: it is parsed
 only to report `--runner-mode is no longer accepted by serve; the runner policy
@@ -481,6 +489,27 @@ delegated build that pours a full log into its own context defeats the purpose.
 - `runner policy is missing registered runners ["..."]` - the workspace policy
   is incomplete. Run `init` to rewrite it; `serve` will not inherit omitted
   runners' defaults.
+- `managed manifest <path> is unreadable` - JMW cannot read or decode the state
+  written by `init`. Run `just-mcp-work init --dir "<root>"`.
+- `managed manifest <path> has unsupported schema version <n>` or `is too new
+  (schema version <n>)` - this binary cannot use the recorded schema. Run
+  `just-mcp-work init --dir "<root>"`.
+- `managed manifest <path> is unusable` - a recorded surface path is unsafe or
+  cannot be contained within the workspace. Run `just-mcp-work init --dir
+  "<root>"`.
+- `managed configuration in <path> is malformed` - JMW cannot parse the owned
+  fragment and reports the underlying cause. Fix that cause, then run
+  `just-mcp-work init --dir "<root>"`.
+- `managed configuration in <path> was edited` - JMW-owned content changed.
+  Keep local text outside managed markers in block files; in JSON files, keep
+  local servers and permissions separate from the entries JMW generates. Then
+  run `just-mcp-work init --dir "<root>"`.
+- `managed configuration in <path> is missing` - a file or the JMW-owned
+  fragment in it was removed. Run `just-mcp-work init --dir "<root>"`.
+- `generated configuration changed since it was written` - the current JMW
+  executable would generate different managed content from the record. The
+  release shown in the error is context only. Run `just-mcp-work init --dir
+  "<root>"`.
 
 Tool errors arrive as an MCP error result whose payload carries
 `error.message`.
@@ -506,6 +535,7 @@ configuration for the selected agents, and writes the runner policy. The
 ```text
 <workspace root>/.just-mcp-work.json  runner policy; selects runners
 <workspace root>/.just-mcp-work/
+├── managed.json              init record checked when serve starts
 ├── version.json              update-check state
 └── log/
     └── <run_id>/

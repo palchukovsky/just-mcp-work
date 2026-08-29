@@ -193,6 +193,10 @@ func serve(args []string) error {
 			policy.Path(root),
 		)
 	}
+	verifyErr := agentinit.VerifyManagedSurfaces(root)
+	if verifyErr != nil {
+		return fmt.Errorf("verify managed surfaces: %w", verifyErr)
+	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	registry, err := runnerRegistry(root, logger)
 	if err != nil {

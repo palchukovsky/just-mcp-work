@@ -253,30 +253,38 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	agentEdits, err := planAgentInstructions(scope, selected)
+	agentEdits, surfaces, err := planAgentInstructions(scope, selected)
 	if err != nil {
 		return Result{}, err
 	}
 	edits := append([]plannedEdit(nil), agentEdits...)
-	mcpEdit, err := planMCPConfig(scope, preserveMCPAnchor, options)
+	mcpEdit, mcpSurface, err := planMCPConfig(scope, preserveMCPAnchor, options)
 	if err != nil {
 		return Result{}, err
 	}
 	edits = appendEdit(edits, mcpEdit)
-	codexEdit, err := planCodexConfig(scope, options)
+	surfaces = appendManifestSurface(surfaces, mcpSurface)
+	codexEdit, codexSurface, err := planCodexConfig(scope, options)
 	if err != nil {
 		return Result{}, err
 	}
 	edits = appendEdit(edits, codexEdit)
+	surfaces = appendManifestSurface(surfaces, codexSurface)
 	// The Claude settings file belongs to the claude agent, so an invocation that
 	// does not select claude plans nothing for it, whatever ClaudePermissions says.
 	if _, claudeSelected := selected["claude"]; claudeSelected {
-		claudeEdit, claudeErr := planClaudeSettings(scope, options)
+		claudeEdit, claudeSurface, claudeErr := planClaudeSettings(scope, options)
 		if claudeErr != nil {
 			return Result{}, claudeErr
 		}
 		edits = appendEdit(edits, claudeEdit)
+		surfaces = appendManifestSurface(surfaces, claudeSurface)
 	}
+	manifestEdit, err := planManifest(scope, surfaces)
+	if err != nil {
+		return Result{}, err
+	}
+	edits = appendEdit(edits, manifestEdit)
 	// Publish policy last. If another write fails, an absent policy keeps every runner
 	// disabled and an existing policy keeps its previous modes, so init cannot widen access.
 	edits = appendEdit(edits, policyEdit)
@@ -299,125 +307,153 @@ func Apply(options Options) (Result, error) {
 func planAgentInstructions(
 	scope string,
 	selected map[string]struct{},
-) ([]plannedEdit, error) {
+) ([]plannedEdit, []manifestSurface, error) {
 	edits := make([]plannedEdit, 0, len(selected))
+	surfaces := make([]manifestSurface, 0, len(selected))
 	for _, named := range agentTargets() {
 		if _, keep := selected[named.name]; !keep {
 			continue
 		}
 		path, err := findAgentInstruction(scope, named.target)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		before, beforeExists, err := readOptionalFile(path)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		after, err := managedContent(before, named.target.header)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", path, err)
+			return nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
+		surface, err := blockManifestSurface(
+			named.target.path,
+			manifestKindAgentInstructions,
+			after,
+			managedBlockRange,
+		)
+		if err != nil {
+			return nil, nil, fmt.Errorf("record %s: %w", path, err)
+		}
+		surfaces = append(surfaces, surface)
 		edits = appendEdit(
 			edits,
 			newEdit(path, before, after, 0o644, beforeExists, false),
 		)
 	}
-	return edits, nil
+	return edits, surfaces, nil
 }
 
 func planMCPConfig(
 	scope string,
 	preserveAnchor bool,
 	options Options,
-) (*plannedEdit, error) {
+) (*plannedEdit, *manifestSurface, error) {
 	path, err := findMCPConfig(scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	before, beforeExists, err := readOptionalFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if options.WriteMCPConfig {
 		after, mergeErr := mergeMCPConfig(before, scope)
 		if mergeErr != nil {
-			return nil, mergeErr
+			return nil, nil, mergeErr
 		}
-		return newEdit(path, before, after, 0o644, beforeExists, false), nil
+		surface, surfaceErr := mcpManifestSurface(after)
+		if surfaceErr != nil {
+			return nil, nil, surfaceErr
+		}
+		return newEdit(path, before, after, 0o644, beforeExists, false), &surface, nil
 	}
 	after, remove, err := removeMCPConfig(before)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if remove && !preserveAnchor {
 		preserveAnchor, err = hasHigherMCPConfig(scope)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if remove && preserveAnchor {
 		after = []byte("{}" + documentLineBreak(before))
 		remove = false
 	}
-	return newEdit(path, before, after, 0o644, beforeExists, remove), nil
+	return newEdit(path, before, after, 0o644, beforeExists, remove), nil, nil
 }
 
-func planCodexConfig(scope string, options Options) (*plannedEdit, error) {
+func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurface, error) {
 	path, err := findCodexConfig(scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	before, beforeExists, err := readOptionalFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if options.WriteMCPConfig {
 		after, mergeErr := mergeCodexConfig(before, scope)
 		if mergeErr != nil {
-			return nil, fmt.Errorf("merge %s: %w", path, mergeErr)
+			return nil, nil, fmt.Errorf("merge %s: %w", path, mergeErr)
 		}
-		return newEdit(path, before, after, 0o600, beforeExists, false), nil
+		surface, surfaceErr := blockManifestSurface(
+			codexConfig,
+			manifestKindCodexConfig,
+			after,
+			codexBlockRange,
+		)
+		if surfaceErr != nil {
+			return nil, nil, fmt.Errorf("record %s: %w", path, surfaceErr)
+		}
+		return newEdit(path, before, after, 0o600, beforeExists, false), &surface, nil
 	}
 	after, remove, err := removeCodexConfig(before)
 	if err != nil {
-		return nil, fmt.Errorf("clean %s: %w", path, err)
+		return nil, nil, fmt.Errorf("clean %s: %w", path, err)
 	}
 	remove, err = preserveScopedFileSymlink(scope, codexConfig, remove)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return newEdit(path, before, after, 0o600, beforeExists, remove), nil
+	return newEdit(path, before, after, 0o600, beforeExists, remove), nil, nil
 }
 
 // planClaudeSettings plans the Claude permission lists of a selected claude
 // agent. Its caller decides whether the agent is selected at all.
-func planClaudeSettings(scope string, options Options) (*plannedEdit, error) {
+func planClaudeSettings(scope string, options Options) (*plannedEdit, *manifestSurface, error) {
 	path, err := findClaudeSettings(scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	before, beforeExists, err := readOptionalFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	cleaned, remove, err := removeManagedClaudeSettings(before)
 	if err != nil {
-		return nil, fmt.Errorf("clean %s: %w", path, err)
+		return nil, nil, fmt.Errorf("clean %s: %w", path, err)
 	}
 	if options.ClaudePermissions == ClaudePermissionsNo {
 		remove, err = preserveScopedFileSymlink(scope, claudeSettings, remove)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil
+		return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil, nil
 	}
 	after, err := mergeClaudeSettings(before)
 	if err != nil {
-		return nil, fmt.Errorf("merge %s: %w", path, err)
+		return nil, nil, fmt.Errorf("merge %s: %w", path, err)
+	}
+	surface, err := claudeManifestSurface(after)
+	if err != nil {
+		return nil, nil, err
 	}
 	edit := newEdit(path, before, after, 0o600, beforeExists, false)
 	if options.DryRun || options.ClaudePermissions == ClaudePermissionsYes {
-		return edit, nil
+		return edit, &surface, nil
 	}
 	confirmed, err := confirmClaudePermissions(
 		path,
@@ -425,16 +461,16 @@ func planClaudeSettings(scope string, options Options) (*plannedEdit, error) {
 		options,
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if confirmed {
-		return edit, nil
+		return edit, &surface, nil
 	}
 	remove, err = preserveScopedFileSymlink(scope, claudeSettings, remove)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil
+	return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil, nil
 }
 
 func planPolicy(

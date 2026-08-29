@@ -723,11 +723,89 @@ func TestParseServeOptionsAllowsUnlimitedTimeout(t *testing.T) {
 
 func TestServeRejectsRetiredRunnerModeWithMigrationMessage(t *testing.T) {
 	root := t.TempDir()
+	manifestPath := filepath.Join(root, ".just-mcp-work", "managed.json")
+	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
 	err := serve([]string{"--root", root, "--runner-mode", "go=safe"})
 	if err == nil || !strings.Contains(err.Error(), "no longer accepted by serve") ||
 		!strings.Contains(err.Error(), policy.Path(root)) ||
 		!strings.Contains(err.Error(), "run just-mcp-work init") {
 		t.Fatalf("serve retired runner-mode error = %v, want policy migration guidance", err)
+	}
+}
+
+func TestServeVerifiesManagedSurfacesBeforeRunnerRegistry(t *testing.T) {
+	root := t.TempDir()
+	if err := initCommandWithIO(
+		[]string{"--dir", root, "--agents", "codex"},
+		defaultRunnerInput(),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	managedPath := filepath.Join(root, "AGENTS.md")
+	editedBlock := "<!-- BEGIN just-mcp-work (managed) -->\n" +
+		"edited\n" +
+		"<!-- END just-mcp-work (managed) -->\n"
+	if err := os.WriteFile(managedPath, []byte(editedBlock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policy.Path(root), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := serve([]string{"--root", root})
+	if err == nil ||
+		!strings.Contains(err.Error(), "verify managed surfaces") ||
+		!strings.Contains(err.Error(), managedPath) ||
+		!strings.Contains(err.Error(), "was edited") ||
+		strings.Contains(err.Error(), "load runner policy") {
+		t.Fatalf(
+			"serve error = %v, want managed-surface refusal before runner policy",
+			err,
+		)
+	}
+}
+
+func TestServeWithoutManifestDoesNotSearchForWorkspaceState(t *testing.T) {
+	parent := t.TempDir()
+	parentManifest := filepath.Join(parent, ".just-mcp-work", "managed.json")
+	if err := os.MkdirAll(filepath.Dir(parentManifest), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(parentManifest, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(parent, "nested")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	managedPath := filepath.Join(root, "AGENTS.md")
+	managedBlock := "<!-- BEGIN just-mcp-work (managed) -->\n" +
+		"locally changed without a manifest\n" +
+		"<!-- END just-mcp-work (managed) -->\n"
+	if err := os.WriteFile(managedPath, []byte(managedBlock), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(policy.Path(root), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := serve([]string{"--root", root})
+	if err == nil ||
+		!strings.Contains(err.Error(), "load runner policy") ||
+		strings.Contains(err.Error(), "verify managed surfaces") {
+		t.Fatalf(
+			"serve error = %v, want unchanged no-manifest policy validation",
+			err,
+		)
 	}
 }
 
