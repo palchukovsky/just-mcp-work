@@ -144,9 +144,10 @@ runtime catalog. `init` asks about every declared runner; Go defaults to
 existing `all` behavior by default or `disabled` for compatibility while their
 command surfaces are reviewed separately. Pass the repeatable
 `init --runner-mode <name>=<mode>` option to answer selected runner questions
-non-interactively. `init` persists the complete canonical selection in managed
-MCP and Codex server arguments, and those arguments drive `serve`. Manual
-`serve` invocations support the same repeatable `--runner-mode` option.
+non-interactively. `init` writes the complete canonical selection to
+`.just-mcp-work.json` in the workspace scope root, next to `.mcp.json`.
+Managed MCP and Codex server arguments are `serve --root <dir>`; to change the
+selection, run `init`, not `serve --runner-mode`.
 
 Run `init` again after an update. `init --help` and `serve --help` list the
 agent targets and the server options.
@@ -160,7 +161,6 @@ agent targets and the server options.
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` |
 | `--retention` | `JMW_RETENTION` | `72h` |
 | `--exclude` | - | None |
-| `--runner-mode <name>=<mode>` | - | Each runner's declared default |
 
 Run data is kept under `.just-mcp-work/log/` in the selected workspace.
 

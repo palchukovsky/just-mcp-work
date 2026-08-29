@@ -20,6 +20,7 @@ import (
 
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/mcpserver"
+	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	cmakerunner "github.com/palchukovsky/just-mcp-work/internal/runner/cmake"
 	dockerrunner "github.com/palchukovsky/just-mcp-work/internal/runner/docker"
@@ -62,15 +63,15 @@ func run(args []string) error {
 //
 //nolint:govet // Field order follows the documented flag order.
 type serveOptions struct {
-	Root             string
-	RootExplicit     bool
-	Timeout          time.Duration
-	TimeoutUnlimited bool
-	SyncDeadline     time.Duration
-	Retention        time.Duration
-	Exclude          []string
-	RunnerModes      []runner.Selection
-	HelpOnly         bool
+	Root              string
+	RootExplicit      bool
+	Timeout           time.Duration
+	TimeoutUnlimited  bool
+	SyncDeadline      time.Duration
+	Retention         time.Duration
+	Exclude           []string
+	RetiredRunnerMode bool
+	HelpOnly          bool
 }
 
 type runnerModeFlag []runner.Selection
@@ -119,11 +120,14 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		"",
 		"comma-separated directory names or relative glob patterns to skip",
 	)
-	var runnerModes runnerModeFlag
-	flags.Var(
-		&runnerModes,
+	retiredRunnerMode := false
+	flags.Func(
 		"runner-mode",
-		"runner permission mode as name=mode (case-sensitive); repeat for multiple runners",
+		"retired; run just-mcp-work init to write the workspace runner policy",
+		func(string) error {
+			retiredRunnerMode = true
+			return nil
+		},
 	)
 	flags.Usage = func() {
 		//nolint:errcheck // FlagSet usage callbacks cannot return output errors.
@@ -132,7 +136,7 @@ func parseServeOptions(args []string) (serveOptions, error) {
 			flags.Output(),
 			"Usage: just-mcp-work serve [--root <dir>] [--timeout <duration>] "+
 				"[--sync-deadline <duration>] [--retention <duration>] "+
-				"[--exclude <glob>,...] [--runner-mode <name>=<mode>]...",
+				"[--exclude <glob>,...]",
 		)
 		flags.PrintDefaults()
 	}
@@ -158,14 +162,14 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		}
 	})
 	return serveOptions{
-		Root:             *root,
-		RootExplicit:     rootExplicit,
-		Timeout:          *timeout,
-		TimeoutUnlimited: *timeout == 0,
-		SyncDeadline:     *syncDeadline,
-		Retention:        *retention,
-		Exclude:          splitCSV(*exclude),
-		RunnerModes:      runnerModes,
+		Root:              *root,
+		RootExplicit:      rootExplicit,
+		Timeout:           *timeout,
+		TimeoutUnlimited:  *timeout == 0,
+		SyncDeadline:      *syncDeadline,
+		Retention:         *retention,
+		Exclude:           splitCSV(*exclude),
+		RetiredRunnerMode: retiredRunnerMode,
 	}, nil
 }
 
@@ -178,15 +182,19 @@ func serve(args []string) error {
 		return nil
 	}
 
-	catalog, err := runnerCatalog()
-	if err != nil {
-		return fmt.Errorf("create runner catalog: %w", err)
-	}
-	registry, err := catalog.Resolve(options.RunnerModes)
-	if err != nil {
-		return fmt.Errorf("resolve runner modes: %w", err)
-	}
 	root, err := resolveServeRoot(options)
+	if err != nil {
+		return err
+	}
+	if options.RetiredRunnerMode {
+		return fmt.Errorf(
+			"--runner-mode is no longer accepted by serve; the runner policy now lives in %s; "+
+				"run just-mcp-work init to write it",
+			policy.Path(root),
+		)
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	registry, err := runnerRegistry(root, logger)
 	if err != nil {
 		return err
 	}
@@ -201,7 +209,6 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("create run store: %w", err)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	server, err := mcpserver.New(
 		workspaceRegistry,
 		registry,
@@ -250,6 +257,49 @@ func runnerCatalog() (*runner.Catalog, error) {
 		return nil, fmt.Errorf("register production runners: %w", err)
 	}
 	return catalog, nil
+}
+
+func runnerRegistry(root string, logger *slog.Logger) (*runner.Registry, error) {
+	workspacePolicy, err := policy.Load(root)
+	if err != nil {
+		return nil, fmt.Errorf("load runner policy: %w", err)
+	}
+	catalog, err := runnerCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("create runner catalog: %w", err)
+	}
+	if !workspacePolicy.Found {
+		logger.Warn(
+			"runner policy is absent; no runner is enabled; run just-mcp-work init to write it",
+			"policy_path",
+			policy.Path(root),
+		)
+		registry, resolveErr := catalog.Resolve(catalog.DisabledSelections())
+		if resolveErr != nil {
+			return nil, fmt.Errorf(
+				"resolve disabled runner modes: %w",
+				resolveErr,
+			)
+		}
+		return registry, nil
+	}
+	_, err = catalog.CompleteSelections(workspacePolicy.Selections)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"validate runner policy %s: %w",
+			policy.Path(root),
+			err,
+		)
+	}
+	registry, err := catalog.Resolve(workspacePolicy.Selections)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve runner policy %s: %w",
+			policy.Path(root),
+			err,
+		)
+	}
+	return registry, nil
 }
 
 func serverRunError(ctx context.Context, err error) error {
@@ -325,7 +375,15 @@ func initCommandWithIO(
 		return fmt.Errorf("create runner catalog: %w", err)
 	}
 	console := initConsole{input: bufio.NewReader(input), output: diagnosticOutput}
-	canonicalModes, err := console.selectRunnerModes(catalog, runnerModes)
+	scope, err := agentinit.ResolveScope(*dir)
+	if err != nil {
+		return fmt.Errorf("resolve init scope: %w", err)
+	}
+	currentModes, err := console.currentRunnerModes(scope, catalog)
+	if err != nil {
+		return fmt.Errorf("read current runner modes: %w", err)
+	}
+	canonicalModes, err := console.selectRunnerModes(catalog, runnerModes, currentModes)
 	if err != nil {
 		return fmt.Errorf("select runner modes: %w", err)
 	}
@@ -343,7 +401,7 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("apply agent instructions: %w", err)
 	}
-	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig, canonicalModes)
+	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig)
 }
 
 func writeInitResult(
@@ -351,7 +409,6 @@ func writeInitResult(
 	result agentinit.Result,
 	dryRun bool,
 	writeMCPConfig bool,
-	canonicalModes runner.ValidatedSelections,
 ) error {
 	if dryRun {
 		for _, diff := range result.Diffs {
@@ -378,7 +435,7 @@ func writeInitResult(
 			"Restart Codex or your MCP client to load updated server configuration.\n",
 		)
 	}
-	snippet, snippetErr := agentinit.MCPConfigSnippet(result.Scope, canonicalModes)
+	snippet, snippetErr := agentinit.MCPConfigSnippet(result.Scope)
 	if snippetErr != nil {
 		return fmt.Errorf("build MCP config snippet: %w", snippetErr)
 	}
@@ -403,9 +460,88 @@ func writeInitOutput(output io.Writer, format string, arguments ...any) error {
 	return nil
 }
 
+func (c *initConsole) currentRunnerModes(
+	scope string,
+	catalog *runner.Catalog,
+) (map[string]runner.Mode, error) {
+	data, found, err := policy.Read(scope)
+	if err != nil {
+		return nil, fmt.Errorf("read runner policy %s: %w", policy.Path(scope), err)
+	}
+	if !found {
+		return map[string]runner.Mode{}, nil
+	}
+	currentPolicy, err := policy.Parse(data)
+	if err != nil {
+		if writeErr := c.announcePolicyFallback(scope, err); writeErr != nil {
+			return nil, writeErr
+		}
+		return map[string]runner.Mode{}, nil
+	}
+	current, changed, err := currentModesForCatalog(catalog, currentPolicy.Selections)
+	if err != nil {
+		if writeErr := c.announcePolicyFallback(scope, err); writeErr != nil {
+			return nil, writeErr
+		}
+		return map[string]runner.Mode{}, nil
+	}
+	if changed {
+		if writeErr := writeInitOutput(
+			c.output,
+			"Registered runner set changed; keeping current modes for matching runners, "+
+				"using declared defaults for new runners, and dropping unregistered runners.\n",
+		); writeErr != nil {
+			return nil, writeErr
+		}
+	}
+	return current, nil
+}
+
+func (c *initConsole) announcePolicyFallback(scope string, policyErr error) error {
+	return writeInitOutput(
+		c.output,
+		"Existing runner policy %s could not be read; using declared defaults: %v\n",
+		policy.Path(scope),
+		policyErr,
+	)
+}
+
+func currentModesForCatalog(
+	catalog *runner.Catalog,
+	selections []runner.Selection,
+) (map[string]runner.Mode, bool, error) {
+	requests := catalog.PermissionRequests()
+	byName := make(map[string]runner.PermissionRequest, len(requests))
+	for _, request := range requests {
+		byName[request.Name] = request
+	}
+	current := make(map[string]runner.Mode, len(requests))
+	changed := len(selections) != len(requests)
+	for _, selection := range selections {
+		request, registered := byName[selection.Name]
+		if !registered {
+			changed = true
+			continue
+		}
+		if _, supported := findRequestedMode(request, string(selection.Mode)); !supported {
+			return nil, false, fmt.Errorf(
+				"runner %q has unsupported current mode %q",
+				selection.Name,
+				selection.Mode,
+			)
+		}
+		current[selection.Name] = selection.Mode
+	}
+	if len(current) != len(requests) {
+		changed = true
+	}
+	return current, changed, nil
+}
+
 func (c *initConsole) selectRunnerModes(
 	catalog *runner.Catalog,
 	overrides []runner.Selection,
+	currentModes map[string]runner.Mode,
 ) (runner.ValidatedSelections, error) {
 	validated, err := catalog.CanonicalSelections(overrides)
 	if err != nil {
@@ -426,7 +562,11 @@ func (c *initConsole) selectRunnerModes(
 		if _, found := overridden[request.Name]; found {
 			continue
 		}
-		mode, askErr := c.askRunnerMode(request)
+		offer := runnerModeOffer{mode: request.Default}
+		if currentMode, found := currentModes[request.Name]; found {
+			offer = runnerModeOffer{mode: currentMode, current: true}
+		}
+		mode, askErr := c.askRunnerMode(request, offer)
 		if askErr != nil {
 			return runner.ValidatedSelections{}, askErr
 		}
@@ -439,14 +579,25 @@ func (c *initConsole) selectRunnerModes(
 	return canonical, nil
 }
 
-func (c *initConsole) askRunnerMode(request runner.PermissionRequest) (runner.Mode, error) {
-	if err := c.writeRunnerModeRequest(request); err != nil {
-		return "", err
-	}
-	return c.readRunnerMode(request)
+type runnerModeOffer struct {
+	mode    runner.Mode
+	current bool
 }
 
-func (c *initConsole) writeRunnerModeRequest(request runner.PermissionRequest) error {
+func (c *initConsole) askRunnerMode(
+	request runner.PermissionRequest,
+	offer runnerModeOffer,
+) (runner.Mode, error) {
+	if err := c.writeRunnerModeRequest(request, offer); err != nil {
+		return "", err
+	}
+	return c.readRunnerMode(request, offer)
+}
+
+func (c *initConsole) writeRunnerModeRequest(
+	request runner.PermissionRequest,
+	offer runnerModeOffer,
+) error {
 	review := "reviewed"
 	if !request.Reviewed {
 		review = "unreviewed"
@@ -462,15 +613,11 @@ func (c *initConsole) writeRunnerModeRequest(request runner.PermissionRequest) e
 		return err
 	}
 	for _, choice := range request.Choices {
-		defaultLabel := ""
-		if choice.Mode == request.Default {
-			defaultLabel = " (default)"
-		}
 		if err := writeInitOutput(
 			c.output,
 			"  %s%s - %s: %s\n",
 			choice.Mode,
-			defaultLabel,
+			runnerModeChoiceLabel(choice.Mode, request.Default, offer),
 			choice.Label,
 			choice.Description,
 		); err != nil {
@@ -485,9 +632,34 @@ func (c *initConsole) writeRunnerModeRequest(request runner.PermissionRequest) e
 	return nil
 }
 
-func (c *initConsole) readRunnerMode(request runner.PermissionRequest) (runner.Mode, error) {
+func runnerModeChoiceLabel(
+	mode runner.Mode,
+	declaredDefault runner.Mode,
+	offer runnerModeOffer,
+) string {
+	labels := make([]string, 0, 2)
+	if offer.current && mode == offer.mode {
+		labels = append(labels, "current")
+	}
+	if mode == declaredDefault {
+		labels = append(labels, "default")
+	}
+	if len(labels) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(labels, ", ") + ")"
+}
+
+func (c *initConsole) readRunnerMode(
+	request runner.PermissionRequest,
+	offer runnerModeOffer,
+) (runner.Mode, error) {
+	source := "default"
+	if offer.current {
+		source = "current"
+	}
 	for {
-		if err := writeInitOutput(c.output, "Mode [%s]: ", request.Default); err != nil {
+		if err := writeInitOutput(c.output, "Mode [%s, %s]: ", offer.mode, source); err != nil {
 			return "", err
 		}
 		answer, err := c.input.ReadString('\n')
@@ -500,8 +672,14 @@ func (c *initConsole) readRunnerMode(request runner.PermissionRequest) (runner.M
 				if writeErr := writeInitOutput(c.output, "\n"); writeErr != nil {
 					return "", writeErr
 				}
+				return "", fmt.Errorf(
+					"runner %q mode was unanswered at end of input; use "+
+						"--runner-mode %s=<mode> for non-interactive init",
+					request.Name,
+					request.Name,
+				)
 			}
-			return request.Default, nil
+			return offer.mode, nil
 		}
 		if mode, found := findRequestedMode(request, trimmed); found {
 			return mode, nil

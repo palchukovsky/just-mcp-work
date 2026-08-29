@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
@@ -189,7 +190,7 @@ type Options struct {
 	DryRun         bool
 	WriteMCPConfig bool
 	// RunnerModes is the complete, catalog-ordered runner selection persisted in
-	// every managed MCP server command.
+	// the workspace policy file.
 	RunnerModes runner.ValidatedSelections
 	// ClaudePermissions selects how the Claude permission lists are treated. The
 	// zero value asks through Confirm.
@@ -207,7 +208,17 @@ type Result struct {
 	Diffs []string
 }
 
+// ResolveScope returns the workspace boundary that Apply uses for dir.
+func ResolveScope(dir string) (string, error) {
+	scope, _, err := resolveScope(dir)
+	if err != nil {
+		return "", err
+	}
+	return scope, nil
+}
+
 type plannedEdit struct {
+	apply        func() error
 	path         string
 	before       []byte
 	after        []byte
@@ -220,14 +231,10 @@ type plannedEdit struct {
 // surface owned by JMW. All paths and contents are planned before the first
 // write, so a malformed later target cannot leave an earlier one updated.
 func Apply(options Options) (Result, error) {
-	if _, err := options.RunnerModes.Args(); err != nil {
-		return Result{}, fmt.Errorf("validate runner mode arguments: %w", err)
+	if _, err := options.RunnerModes.Selections(); err != nil {
+		return Result{}, fmt.Errorf("validate runner selections: %w", err)
 	}
-	dir, err := filepath.Abs(options.Dir)
-	if err != nil {
-		return Result{}, fmt.Errorf("resolve workspace directory: %w", err)
-	}
-	scope, preserveMCPAnchor, err := findScopeRoot(dir)
+	scope, preserveMCPAnchor, err := resolveScope(options.Dir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -242,10 +249,15 @@ func Apply(options Options) (Result, error) {
 		}
 		selected[agent] = struct{}{}
 	}
-	edits, err := planAgentInstructions(scope, selected)
+	policyEdit, err := planPolicy(scope, options.RunnerModes)
 	if err != nil {
 		return Result{}, err
 	}
+	agentEdits, err := planAgentInstructions(scope, selected)
+	if err != nil {
+		return Result{}, err
+	}
+	edits := append([]plannedEdit(nil), agentEdits...)
 	mcpEdit, err := planMCPConfig(scope, preserveMCPAnchor, options)
 	if err != nil {
 		return Result{}, err
@@ -265,6 +277,9 @@ func Apply(options Options) (Result, error) {
 		}
 		edits = appendEdit(edits, claudeEdit)
 	}
+	// Publish policy last. If another write fails, an absent policy keeps every runner
+	// disabled and an existing policy keeps its previous modes, so init cannot widen access.
+	edits = appendEdit(edits, policyEdit)
 	result := resultForEdits(edits)
 	result.Scope = scope
 	if options.DryRun {
@@ -324,7 +339,7 @@ func planMCPConfig(
 		return nil, err
 	}
 	if options.WriteMCPConfig {
-		after, mergeErr := mergeMCPConfig(before, scope, options.RunnerModes)
+		after, mergeErr := mergeMCPConfig(before, scope)
 		if mergeErr != nil {
 			return nil, mergeErr
 		}
@@ -357,7 +372,7 @@ func planCodexConfig(scope string, options Options) (*plannedEdit, error) {
 		return nil, err
 	}
 	if options.WriteMCPConfig {
-		after, mergeErr := mergeCodexConfig(before, scope, options.RunnerModes)
+		after, mergeErr := mergeCodexConfig(before, scope)
 		if mergeErr != nil {
 			return nil, fmt.Errorf("merge %s: %w", path, mergeErr)
 		}
@@ -422,6 +437,39 @@ func planClaudeSettings(scope string, options Options) (*plannedEdit, error) {
 	return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil
 }
 
+func planPolicy(
+	scope string,
+	selections runner.ValidatedSelections,
+) (*plannedEdit, error) {
+	path := policy.Path(scope)
+	before, beforeExists, err := policy.Read(scope)
+	if err != nil {
+		return nil, fmt.Errorf("plan workspace policy %s: %w", path, err)
+	}
+	after, err := policyContents(selections)
+	if err != nil {
+		return nil, err
+	}
+	edit := newEdit(path, before, after, 0o644, beforeExists, false)
+	if edit != nil {
+		edit.apply = func() error {
+			if err := policy.Save(scope, selections); err != nil {
+				return fmt.Errorf("save workspace policy: %w", err)
+			}
+			return nil
+		}
+	}
+	return edit, nil
+}
+
+func policyContents(selections runner.ValidatedSelections) ([]byte, error) {
+	data, err := policy.Encode(selections)
+	if err != nil {
+		return nil, fmt.Errorf("render workspace policy: %w", err)
+	}
+	return data, nil
+}
+
 func readOptionalFile(path string) ([]byte, bool, error) {
 	// #nosec G304 -- callers pass a validated workspace-local managed path.
 	data, err := os.ReadFile(path)
@@ -432,6 +480,18 @@ func readOptionalFile(path string) ([]byte, bool, error) {
 		return nil, false, nil
 	}
 	return nil, false, fmt.Errorf("read %s: %w", path, err)
+}
+
+func resolveScope(dir string) (string, bool, error) {
+	dir, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve workspace directory: %w", err)
+	}
+	scope, preserveMCPAnchor, err := findScopeRoot(dir)
+	if err != nil {
+		return "", false, err
+	}
+	return scope, preserveMCPAnchor, nil
 }
 
 func newEdit(
@@ -490,6 +550,12 @@ func applyEdits(edits []plannedEdit) error {
 		}
 		if err := os.MkdirAll(filepath.Dir(edit.path), 0o750); err != nil {
 			return fmt.Errorf("create directory for %s: %w", edit.path, err)
+		}
+		if edit.apply != nil {
+			if err := edit.apply(); err != nil {
+				return fmt.Errorf("write %s: %w", edit.path, err)
+			}
+			continue
 		}
 		// #nosec G306,G703 -- every edit path was resolved and validated within
 		// the current workspace scope before this write phase began.
@@ -817,14 +883,11 @@ func resolvePath(path string) (string, error) {
 }
 
 // MCPConfigSnippet is a ready-to-paste local MCP configuration for scopeRoot.
-func MCPConfigSnippet(
-	scopeRoot string,
-	selections runner.ValidatedSelections,
-) (string, error) {
+func MCPConfigSnippet(scopeRoot string) (string, error) {
 	if scopeRoot == "" {
 		return "", fmt.Errorf("MCP config scope root is required")
 	}
-	data, err := mergeMCPConfig(nil, scopeRoot, selections)
+	data, err := mergeMCPConfig(nil, scopeRoot)
 	if err != nil {
 		return "", err
 	}
@@ -930,10 +993,7 @@ type serverEntry struct {
 	Args    []string `json:"args"`
 }
 
-func managedServerEntry(
-	root string,
-	selections runner.ValidatedSelections,
-) (serverEntry, error) {
+func managedServerEntry(root string) (serverEntry, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("resolve executable: %w", err)
@@ -946,11 +1006,7 @@ func managedServerEntry(
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("resolve workspace root: %w", err)
 	}
-	args, err := managedServerArgs(root, selections)
-	if err != nil {
-		return serverEntry{}, err
-	}
-	return serverEntry{Command: executable, Args: args}, nil
+	return serverEntry{Command: executable, Args: managedServerArgs(root)}, nil
 }
 
 // mergeMCPConfig writes the managed server entry into the configuration text.
@@ -959,9 +1015,8 @@ func managedServerEntry(
 func mergeMCPConfig(
 	before []byte,
 	scopeRoot string,
-	selections runner.ValidatedSelections,
 ) ([]byte, error) {
-	entry, err := managedServerEntry(scopeRoot, selections)
+	entry, err := managedServerEntry(scopeRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -1351,7 +1406,6 @@ func isManagedClaudeTool(entry string) bool {
 func mergeCodexConfig(
 	before []byte,
 	root string,
-	selections runner.ValidatedSelections,
 ) ([]byte, error) {
 	if _, _, _, err := codexBlockRange(string(before)); err != nil {
 		return nil, err
@@ -1372,11 +1426,7 @@ func mergeCodexConfig(
 	if err != nil {
 		return nil, fmt.Errorf("encode executable path: %w", err)
 	}
-	args, err := managedServerArgs(root, selections)
-	if err != nil {
-		return nil, err
-	}
-	argsValue, err := tomlStringArray(args)
+	argsValue, err := tomlStringArray(managedServerArgs(root))
 	if err != nil {
 		return nil, fmt.Errorf("encode server arguments: %w", err)
 	}
@@ -1516,13 +1566,8 @@ func tomlStringArray(values []string) (string, error) {
 	return "[" + strings.Join(encoded, ", ") + "]", nil
 }
 
-func managedServerArgs(root string, selections runner.ValidatedSelections) ([]string, error) {
-	modeArgs, err := selections.Args()
-	if err != nil {
-		return nil, fmt.Errorf("build runner mode arguments: %w", err)
-	}
-	args := []string{"serve", "--root", root}
-	return append(args, modeArgs...), nil
+func managedServerArgs(root string) []string {
+	return []string{"serve", "--root", root}
 }
 
 func unique(values []string) []string {

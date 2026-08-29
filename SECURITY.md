@@ -14,10 +14,32 @@ fixed command table when it finds a regular `go.mod`.
 ## Runner authorization
 
 Every runner must register a permission declaration before it can enter the
-runtime catalog. `init` asks for a mode from each declaration and persists the
-complete selection in the server arguments. A repeatable
-`init --runner-mode <name>=<mode>` option answers selected questions
-non-interactively; manual `serve` uses the same repeatable option.
+runtime catalog. `init` asks for a mode from each declaration and writes the
+complete selection to `.just-mcp-work.json` in the workspace scope root, next
+to `.mcp.json`. Managed MCP and Codex server arguments are `serve --root <dir>`
+and carry no runner selection. A repeatable `init --runner-mode <name>=<mode>`
+option answers selected questions non-interactively. `serve --runner-mode` is
+retired and tells the operator to run `init`.
+
+For automation, pass `--runner-mode <name>=<mode>` for every runner whose
+question is not answered interactively. If input ends with a runner question
+unanswered, `init` fails and names that runner and flag instead of accepting a
+mode. When an existing policy is readable, an interactive prompt offers its
+current mode and labels it `current`; otherwise it offers the declared default.
+If the existing policy cannot be parsed or has an unsupported current mode,
+`init` prints that fallback. If the registered runner set changed, it prints
+that it keeps matching current modes, uses declared defaults for new runners,
+and drops unregistered runners. A successful `init` invocation makes the
+complete policy authoritative.
+
+The policy is fail-closed. A policy that omits a registered runner is rejected
+at startup and names the missing runners; a truncated or hand-edited policy
+cannot inherit a default. An absent `.just-mcp-work.json` disables every runner,
+so no task is discovered or run; the shell tools are unaffected and remain the
+escape hatch described below. `serve` warns the operator to run `init`. This
+includes a fresh workspace where `init` has never run: jmw exposes no tasks
+until the policy exists. Deleting the policy therefore cannot widen the task
+surface.
 
 The reviewed Go declaration provides these modes:
 

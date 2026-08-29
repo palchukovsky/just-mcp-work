@@ -139,7 +139,7 @@ type Selection struct {
 }
 
 // ValidatedSelections is a complete, catalog-ordered runner selection set.
-// Its zero value is invalid; only Catalog.CanonicalSelections can create a
+// Its zero value is invalid; only Catalog selection constructors can create a
 // value accepted by persistence boundaries.
 type ValidatedSelections struct {
 	selections []Selection
@@ -152,19 +152,6 @@ func (s ValidatedSelections) Selections() ([]Selection, error) {
 		return nil, fmt.Errorf("runner selections were not validated by a catalog")
 	}
 	return slices.Clone(s.selections), nil
-}
-
-// Args returns repeatable --runner-mode arguments in canonical catalog order.
-func (s ValidatedSelections) Args() ([]string, error) {
-	selections, err := s.Selections()
-	if err != nil {
-		return nil, err
-	}
-	args := make([]string, 0, len(selections)*2)
-	for _, selection := range selections {
-		args = append(args, "--runner-mode", selection.Name+"="+string(selection.Mode))
-	}
-	return args, nil
 }
 
 // Catalog is a validated, immutable set of runner registrations.
@@ -379,6 +366,18 @@ func (c *Catalog) PermissionRequests() []PermissionRequest {
 	return requests
 }
 
+// DisabledSelections returns one disabled selection per registration in catalog order.
+func (c *Catalog) DisabledSelections() []Selection {
+	selections := make([]Selection, 0, len(c.registrations))
+	for _, registration := range c.registrations {
+		selections = append(selections, Selection{
+			Name: registration.name,
+			Mode: ModeDisabled,
+		})
+	}
+	return selections
+}
+
 // CanonicalSelections applies explicit overrides to declared defaults and
 // returns one selection per registration in catalog order.
 func (c *Catalog) CanonicalSelections(overrides []Selection) (ValidatedSelections, error) {
@@ -413,6 +412,35 @@ func (c *Catalog) CanonicalSelections(overrides []Selection) (ValidatedSelection
 		})
 	}
 	return ValidatedSelections{selections: selections, valid: true}, nil
+}
+
+// CompleteSelections validates a selection for every registered runner and
+// returns them in catalog order. Incomplete sets fail instead of inheriting a
+// registered default, because persisted policy must not widen silently.
+func (c *Catalog) CompleteSelections(
+	selections []Selection,
+) (ValidatedSelections, error) {
+	canonical, err := c.CanonicalSelections(selections)
+	if err != nil {
+		return ValidatedSelections{}, err
+	}
+	present := make(map[string]struct{}, len(selections))
+	for _, selection := range selections {
+		present[selection.Name] = struct{}{}
+	}
+	missing := make([]string, 0, len(c.registrations)-len(present))
+	for _, registration := range c.registrations {
+		if _, found := present[registration.name]; !found {
+			missing = append(missing, registration.name)
+		}
+	}
+	if len(missing) != 0 {
+		return ValidatedSelections{}, fmt.Errorf(
+			"runner policy is missing registered runners %q; run just-mcp-work init to rewrite it",
+			missing,
+		)
+	}
+	return canonical, nil
 }
 
 // Resolve applies explicit selections over declared defaults and creates the

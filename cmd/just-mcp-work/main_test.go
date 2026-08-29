@@ -11,14 +11,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
+	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 )
 
@@ -80,6 +83,10 @@ type erroringWriter struct {
 	err error
 }
 
+func defaultRunnerInput() *strings.Reader {
+	return strings.NewReader(strings.Repeat("\n", 5))
+}
+
 func (w erroringWriter) Write([]byte) (int, error) {
 	return 0, w.err
 }
@@ -112,7 +119,7 @@ func TestInitWritesMCPConfigByDefault(t *testing.T) {
 	dir := t.TempDir()
 	if initErr := initCommandWithIO(
 		[]string{"--dir", dir, "--agents", "codex"},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		io.Discard,
 		io.Discard,
 	); initErr != nil {
@@ -164,7 +171,7 @@ func TestInitSnippetPinsSelectedLinkedWorktreeWhenCWDIsDifferent(t *testing.T) {
 			"--agents", "codex",
 			"--write-mcp-config=false",
 		},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		&output,
 		io.Discard,
 	); initErr != nil {
@@ -183,9 +190,9 @@ func TestInitSnippetPinsSelectedLinkedWorktreeWhenCWDIsDifferent(t *testing.T) {
 		t.Fatalf("decode MCP snippet: %v\n%s", err, output.String())
 	}
 	args := snippet.Servers["just-mcp-work"].Args
-	wantPrefix := []string{"serve", "--root", worktreeDir}
-	if len(args) < len(wantPrefix) || !slices.Equal(args[:len(wantPrefix)], wantPrefix) {
-		t.Fatalf("snippet args = %#v, want prefix %#v", args, wantPrefix)
+	want := []string{"serve", "--root", worktreeDir}
+	if !slices.Equal(args, want) {
+		t.Fatalf("snippet args = %#v, want %#v", args, want)
 	}
 }
 
@@ -194,38 +201,26 @@ func TestInitQuestionsUseDefaultsAndPersistCanonicalSelections(t *testing.T) {
 	var output bytes.Buffer
 	err := initCommandWithIO(
 		[]string{"--dir", dir, "--agents", "codex"},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		io.Discard,
 		&output,
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantSelections := []string{
-		"just=all",
-		"cmake=all",
-		"docker=all",
-		"go=safe",
-		"make=all",
+	wantSelections := []runner.Selection{
+		{Name: "just", Mode: runner.ModeAll},
+		{Name: "cmake", Mode: runner.ModeAll},
+		{Name: "docker", Mode: runner.ModeAll},
+		{Name: "go", Mode: runner.ModeSafe},
+		{Name: "make", Mode: runner.ModeAll},
 	}
-	for _, path := range []string{
-		filepath.Join(dir, ".mcp.json"),
-		filepath.Join(dir, ".codex", "config.toml"),
-	} {
-		// #nosec G304 -- path is created in this test's temporary directory.
-		data, readErr := os.ReadFile(path)
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-		text := string(data)
-		previous := -1
-		for _, selection := range wantSelections {
-			position := strings.Index(text, `"`+selection+`"`)
-			if position <= previous {
-				t.Fatalf("%s does not contain canonical selections in order: %s", path, text)
-			}
-			previous = position
-		}
+	loaded, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Found || !slices.Equal(loaded.Selections, wantSelections) {
+		t.Fatalf("workspace policy = %+v, want selections %#v", loaded, wantSelections)
 	}
 	text := output.String()
 	for _, name := range []string{"just", "cmake", "docker", "go", "make"} {
@@ -252,7 +247,7 @@ func TestInitRunnerOverrideSkipsQuestionAndCanDisable(t *testing.T) {
 			"--agents", "codex",
 			"--runner-mode", " go = disabled ",
 		},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		io.Discard,
 		&output,
 	)
@@ -262,13 +257,13 @@ func TestInitRunnerOverrideSkipsQuestionAndCanDisable(t *testing.T) {
 	if strings.Contains(output.String(), "go runner") {
 		t.Fatalf("overridden Go runner was still questioned:\n%s", output.String())
 	}
-	// #nosec G304 -- path is created in this test's temporary directory.
-	data, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
+	loaded, err := policy.Load(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "go=disabled") {
-		t.Fatalf("disabled Go selection was not persisted:\n%s", data)
+	wantGo := runner.Selection{Name: "go", Mode: runner.ModeDisabled}
+	if !slices.Contains(loaded.Selections, wantGo) {
+		t.Fatalf("disabled Go selection was not persisted: %+v", loaded)
 	}
 }
 
@@ -300,7 +295,7 @@ func TestInitRunnerQuestionRepromptsAndSharesInputWithClaudeConfirmation(t *test
 	}
 }
 
-func TestInitEOFUsesDefaultsAndSeparatesPromptsFromResults(t *testing.T) {
+func TestInitEOFRejectsUnansweredRunnerQuestion(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -310,18 +305,22 @@ func TestInitEOFUsesDefaultsAndSeparatesPromptsFromResults(t *testing.T) {
 		&result,
 		&diagnostics,
 	)
-	if err != nil {
-		t.Fatal(err)
+	if err == nil || !strings.Contains(err.Error(), `runner "just"`) ||
+		!strings.Contains(err.Error(), "--runner-mode") {
+		t.Fatalf("init EOF error = %v, want runner name and --runner-mode guidance", err)
 	}
 	if strings.Contains(result.String(), " runner ") || strings.Contains(result.String(), "Mode [") {
 		t.Fatalf("result output contains prompts:\n%s", result.String())
 	}
-	if !strings.Contains(result.String(), "Updated ") {
-		t.Fatalf("result output does not report changes:\n%s", result.String())
+	if result.Len() != 0 {
+		t.Fatalf("result output = %q, want empty after unanswered question", result.String())
 	}
-	if !strings.Contains(diagnostics.String(), "go runner") ||
-		!strings.Contains(diagnostics.String(), "Mode [safe]:") {
+	if !strings.Contains(diagnostics.String(), "just runner") ||
+		!strings.Contains(diagnostics.String(), "Mode [all, default]:") {
 		t.Fatalf("diagnostic output does not contain prompts:\n%s", diagnostics.String())
+	}
+	if _, statErr := os.Stat(policy.Path(dir)); !os.IsNotExist(statErr) {
+		t.Fatalf("unanswered question wrote a policy: %v", statErr)
 	}
 }
 
@@ -329,7 +328,7 @@ func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 	dir := t.TempDir()
 	if err := initCommandWithIO(
 		[]string{"--dir", dir, "--agents", "codex"},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		io.Discard,
 		io.Discard,
 	); err != nil {
@@ -349,7 +348,7 @@ func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 			"--dry-run",
 			"--write-mcp-config=false",
 		},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		&result,
 		&diagnostics,
 	)
@@ -369,6 +368,168 @@ func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 	}
 }
 
+func TestInitDryRunReportsPolicyWithoutWritingIt(t *testing.T) {
+	dir := t.TempDir()
+	var result bytes.Buffer
+	if err := initCommandWithIO(
+		[]string{"--dir", dir, "--agents", "codex", "--dry-run"},
+		defaultRunnerInput(),
+		&result,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	path := policy.Path(dir)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("dry run wrote policy %s: %v", path, err)
+	}
+	if !strings.Contains(result.String(), "+++ "+path) {
+		t.Fatalf("dry-run output does not report policy %s:\n%s", path, result.String())
+	}
+}
+
+func TestInitOffersExistingRunnerModesAsCurrent(t *testing.T) {
+	dir := t.TempDir()
+	catalog, err := runnerCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := catalog.CanonicalSelections(
+		[]runner.Selection{
+			{Name: "just", Mode: runner.ModeDisabled},
+			{Name: "go", Mode: runner.ModeAll},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saveErr := policy.Save(dir, current); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	want, err := current.Selections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics bytes.Buffer
+	if initErr := initCommandWithIO(
+		[]string{"--dir", dir, "--agents", "codex"},
+		defaultRunnerInput(),
+		io.Discard,
+		&diagnostics,
+	); initErr != nil {
+		t.Fatal(initErr)
+	}
+	loaded, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(loaded.Selections, want) {
+		t.Fatalf("accepted current selections = %#v, want %#v", loaded.Selections, want)
+	}
+	if !strings.Contains(diagnostics.String(), "Mode [disabled, current]:") ||
+		!strings.Contains(diagnostics.String(), "all (default)") {
+		t.Fatalf("current offer was not distinguished from the default:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitReplacesMalformedPolicyAndAnnouncesDefaultFallback(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(policy.Path(dir), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics bytes.Buffer
+	if initErr := initCommandWithIO(
+		[]string{"--dir", dir, "--agents", "codex"},
+		defaultRunnerInput(),
+		io.Discard,
+		&diagnostics,
+	); initErr != nil {
+		t.Fatal(initErr)
+	}
+	if strings.Count(diagnostics.String(), "could not be read; using declared defaults") != 1 {
+		t.Fatalf("malformed-policy fallback was not announced once:\n%s", diagnostics.String())
+	}
+	if !strings.Contains(diagnostics.String(), policy.Path(dir)) {
+		t.Fatalf("malformed-policy announcement does not name %s", policy.Path(dir))
+	}
+	if _, err := policy.Load(dir); err != nil {
+		t.Fatalf("replacement policy is malformed: %v", err)
+	}
+}
+
+func TestInitReconcilesChangedRunnerSet(t *testing.T) {
+	dir := t.TempDir()
+	document := `{"version":1,"runners":[` +
+		`{"name":"just","mode":"disabled"},` +
+		`{"name":"retired","mode":"all"}]}`
+	if err := os.WriteFile(policy.Path(dir), []byte(document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics bytes.Buffer
+	if initErr := initCommandWithIO(
+		[]string{"--dir", dir, "--agents", "codex"},
+		defaultRunnerInput(),
+		io.Discard,
+		&diagnostics,
+	); initErr != nil {
+		t.Fatal(initErr)
+	}
+	want := []runner.Selection{
+		{Name: "just", Mode: runner.ModeDisabled},
+		{Name: "cmake", Mode: runner.ModeAll},
+		{Name: "docker", Mode: runner.ModeAll},
+		{Name: "go", Mode: runner.ModeSafe},
+		{Name: "make", Mode: runner.ModeAll},
+	}
+	loaded, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(loaded.Selections, want) {
+		t.Fatalf("reconciled selections = %#v, want %#v", loaded.Selections, want)
+	}
+	if strings.Count(diagnostics.String(), "Registered runner set changed") != 1 ||
+		!strings.Contains(diagnostics.String(), "Mode [disabled, current]:") ||
+		!strings.Contains(diagnostics.String(), "Mode [all, default]:") {
+		t.Fatalf("changed runner set was not explained in prompts:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitRejectsPolicySymlinkWithoutExposingTarget(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges on Windows")
+	}
+	for _, dryRun := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dry-run=%v", dryRun), func(t *testing.T) {
+			dir := t.TempDir()
+			const targetContents = "policy symlink target must stay private"
+			target := filepath.Join(dir, "target.txt")
+			if err := os.WriteFile(target, []byte(targetContents), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := policy.Path(dir)
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"--dir", dir, "--agents", "codex"}
+			if dryRun {
+				args = append(args, "--dry-run")
+			}
+			var result bytes.Buffer
+			var diagnostics bytes.Buffer
+			err := initCommandWithIO(args, defaultRunnerInput(), &result, &diagnostics)
+			if err == nil || !strings.Contains(err.Error(), path) ||
+				!strings.Contains(err.Error(), "symbolic link") {
+				t.Fatalf("init error = %v, want policy path and symbolic-link type", err)
+			}
+			output := result.String() + diagnostics.String()
+			if strings.Contains(output, targetContents) {
+				t.Fatalf("init exposed symlink target contents: %q", output)
+			}
+		})
+	}
+}
+
 func TestInitHelpAndFlagErrorsUseDiagnosticOutput(t *testing.T) {
 	for _, testCase := range []struct {
 		name    string
@@ -383,7 +544,7 @@ func TestInitHelpAndFlagErrorsUseDiagnosticOutput(t *testing.T) {
 			var diagnostics bytes.Buffer
 			err := initCommandWithIO(
 				testCase.args,
-				strings.NewReader(""),
+				defaultRunnerInput(),
 				&result,
 				&diagnostics,
 			)
@@ -413,12 +574,18 @@ func TestInitRejectsRunnerOverridesBeforeWritingFiles(t *testing.T) {
 		t.Run(strings.Join(extra, "_"), func(t *testing.T) {
 			dir := t.TempDir()
 			args := append([]string{"--dir", dir, "--agents", "codex"}, extra...)
-			err := initCommandWithIO(args, strings.NewReader(""), io.Discard, io.Discard)
+			err := initCommandWithIO(args, defaultRunnerInput(), io.Discard, io.Discard)
 			if err == nil {
 				t.Fatalf("init accepted invalid runner override %v", extra)
 			}
-			for _, path := range []string{"AGENTS.md", ".mcp.json", ".codex"} {
-				if _, statErr := os.Stat(filepath.Join(dir, path)); !os.IsNotExist(statErr) {
+			paths := []string{
+				filepath.Join(dir, "AGENTS.md"),
+				filepath.Join(dir, ".mcp.json"),
+				filepath.Join(dir, ".codex"),
+				policy.Path(dir),
+			}
+			for _, path := range paths {
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 					t.Fatalf("invalid override wrote %s: %v", path, statErr)
 				}
 			}
@@ -554,32 +721,13 @@ func TestParseServeOptionsAllowsUnlimitedTimeout(t *testing.T) {
 	}
 }
 
-func TestParseServeOptionsCollectsRunnerModes(t *testing.T) {
-	options, err := parseServeOptions(
-		[]string{
-			"--runner-mode", " go = all ",
-			"--runner-mode", "docker=disabled",
-			// A mixed-case value is not a parse error: the parser carries it
-			// through verbatim, and rejecting a case mismatch is the catalog's
-			// job at Resolve, not the flag's job at Set.
-			"--runner-mode", "Go=ALL",
-		},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []runner.Selection{
-		{Name: "go", Mode: runner.ModeAll},
-		{Name: "docker", Mode: runner.ModeDisabled},
-		{Name: "Go", Mode: runner.Mode("ALL")},
-	}
-	if !slices.Equal(options.RunnerModes, want) {
-		t.Fatalf("runner modes = %#v, want %#v", options.RunnerModes, want)
-	}
-	for _, value := range []string{"go", "=all", "go="} {
-		if _, err := parseServeOptions([]string{"--runner-mode", value}); err == nil {
-			t.Fatalf("runner mode %q was accepted", value)
-		}
+func TestServeRejectsRetiredRunnerModeWithMigrationMessage(t *testing.T) {
+	root := t.TempDir()
+	err := serve([]string{"--root", root, "--runner-mode", "go=safe"})
+	if err == nil || !strings.Contains(err.Error(), "no longer accepted by serve") ||
+		!strings.Contains(err.Error(), policy.Path(root)) ||
+		!strings.Contains(err.Error(), "run just-mcp-work init") {
+		t.Fatalf("serve retired runner-mode error = %v, want policy migration guidance", err)
 	}
 }
 
@@ -661,27 +809,123 @@ func TestProductionCatalogDeclaresEveryInitQuestion(t *testing.T) {
 	}
 }
 
-func TestProductionRunnerCatalogRejectsInvalidServeSelections(t *testing.T) {
-	catalog, err := runnerCatalog()
+func TestRunnerRegistryRequiresCompleteKnownPolicyAndFailsClosedWhenAbsent(t *testing.T) {
+	tests := []struct {
+		name      string
+		document  string
+		wantError string
+		wantNames []string
+	}{
+		{
+			name: "missing runner",
+			document: `{"version":1,"runners":[` +
+				`{"name":"just","mode":"all"},` +
+				`{"name":"cmake","mode":"all"},` +
+				`{"name":"go","mode":"safe"},` +
+				`{"name":"make","mode":"all"}]}`,
+			wantError: "docker",
+		},
+		{
+			name: "unknown runner",
+			document: `{"version":1,"runners":[` +
+				`{"name":"just","mode":"all"},` +
+				`{"name":"cmake","mode":"all"},` +
+				`{"name":"docker","mode":"all"},` +
+				`{"name":"go","mode":"safe"},` +
+				`{"name":"make","mode":"all"},` +
+				`{"name":"future","mode":"all"}]}`,
+			wantError: `unknown runner selection "future"`,
+		},
+		{
+			name: "complete policy",
+			document: `{"version":1,"runners":[` +
+				`{"name":"just","mode":"disabled"},` +
+				`{"name":"cmake","mode":"disabled"},` +
+				`{"name":"docker","mode":"disabled"},` +
+				`{"name":"go","mode":"safe"},` +
+				`{"name":"make","mode":"disabled"}]}`,
+			wantNames: []string{"go"},
+		},
+		{name: "absent policy"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if test.document != "" {
+				if err := os.WriteFile(
+					policy.Path(root),
+					[]byte(test.document),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+			registry, err := runnerRegistry(root, logger)
+			if test.wantError != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantError) ||
+					!strings.Contains(err.Error(), policy.Path(root)) {
+					t.Fatalf(
+						"runnerRegistry error = %v, want %q and policy path",
+						err,
+						test.wantError,
+					)
+				}
+				if test.name == "missing runner" &&
+					!strings.Contains(err.Error(), "run just-mcp-work init") {
+					t.Fatalf("missing runner error has no init guidance: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			catalog, catalogErr := runnerCatalog()
+			if catalogErr != nil {
+				t.Fatal(catalogErr)
+			}
+			for _, name := range catalog.Names() {
+				_, found := registry.Get(name)
+				if found != slices.Contains(test.wantNames, name) {
+					t.Errorf(
+						"registry runner %q found = %v, want %v",
+						name,
+						found,
+						slices.Contains(test.wantNames, name),
+					)
+				}
+			}
+			if len(registry.All()) != len(test.wantNames) {
+				t.Fatalf("registry runners = %#v, want %q", registry.All(), test.wantNames)
+			}
+		})
+	}
+}
+
+func TestRunnerRegistryWarnsOnceWhenPolicyIsAbsent(t *testing.T) {
+	root := t.TempDir()
+	var output bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&output, nil))
+	registry, err := runnerRegistry(root, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tests := [][]string{
-		{"--runner-mode", "unknown=all"},
-		{"--runner-mode", "go=invalid"},
-		{"--runner-mode", "just=safe"},
-		{"--runner-mode", "go=all", "--runner-mode", "go=safe"},
-		{"--runner-mode", "GO=safe"},
-		{"--runner-mode", "go=SAFE"},
+	if len(registry.All()) != 0 {
+		t.Fatalf("absent-policy registry contains runners: %#v", registry.All())
 	}
-	for _, args := range tests {
-		options, parseErr := parseServeOptions(args)
-		if parseErr != nil {
-			t.Fatalf("parseServeOptions(%v): %v", args, parseErr)
-		}
-		if _, resolveErr := catalog.Resolve(options.RunnerModes); resolveErr == nil {
-			t.Fatalf("catalog accepted selections from %v", args)
-		}
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("absent-policy log lines = %d, want 1: %q", len(lines), output.String())
+	}
+	var record map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &record); err != nil {
+		t.Fatalf("decode absent-policy warning: %v", err)
+	}
+	const message = "runner policy is absent; no runner is enabled; " +
+		"run just-mcp-work init to write it"
+	if record["level"] != "WARN" || record["msg"] != message ||
+		record["policy_path"] != policy.Path(root) {
+		t.Fatalf("absent-policy warning = %#v", record)
 	}
 }
 
@@ -689,7 +933,7 @@ func TestInitWritesClaudePermissionsWithFlag(t *testing.T) {
 	dir := t.TempDir()
 	initErr := initCommandWithIO(
 		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "yes"},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		io.Discard,
 		io.Discard,
 	)
@@ -716,7 +960,7 @@ func TestInitKeepsClaudePermissionsWhenDeclinedByFlag(t *testing.T) {
 	dir := t.TempDir()
 	initErr := initCommandWithIO(
 		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "no"},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		io.Discard,
 		io.Discard,
 	)
@@ -735,7 +979,7 @@ func TestInitClaudeConfirmationReportsAccurateOutcomeOnFreshWorkspace(t *testing
 	// workspace that never had a settings file, so nothing is actually removed.
 	initErr := initCommandWithIO(
 		[]string{"--dir", dir, "--agents", "claude"},
-		strings.NewReader(""),
+		defaultRunnerInput(),
 		io.Discard,
 		&output,
 	)

@@ -194,8 +194,43 @@ started them until `docker:compose:down` stops them.
 ## Runner modes
 
 Every runner registers a permission declaration, and the operator picks a mode
-during `init`. The choice is persisted in the server arguments, so the task
-surface an agent sees is already the authorized one.
+during `init`. `init` writes `.just-mcp-work.json` in the workspace scope root,
+next to `.mcp.json`. The file starts with `version` and has an ordered `runners`
+array of selections:
+
+```json
+{"version": 1, "runners": [{"name": "go", "mode": "safe"}]}
+```
+
+Managed MCP and Codex server arguments are `serve --root <dir>` and carry no
+runner selection. The policy, not the server arguments, defines the authorized
+task surface an agent sees.
+
+`init --runner-mode <name>=<mode>` remains repeatable for answering runner
+questions non-interactively. `serve --runner-mode` is retired: it is parsed
+only to report `--runner-mode is no longer accepted by serve; the runner policy
+now lives in <path>; run just-mcp-work init to write it` instead of an unknown
+flag error.
+
+For automation, pass `--runner-mode <name>=<mode>` for every runner whose
+question is not answered interactively. If input ends with a runner question
+unanswered, `init` fails and names that runner and flag instead of accepting a
+mode. When an existing policy is readable, an interactive prompt offers its
+current mode and labels it `current`; otherwise it offers the declared default.
+If the existing policy cannot be parsed or has an unsupported current mode,
+`init` prints that fallback. If the registered runner set changed, it prints
+that it keeps matching current modes, uses declared defaults for new runners,
+and drops unregistered runners. A successful `init` invocation makes the
+complete policy authoritative.
+
+A policy must select every registered runner. If it omits one, `serve` refuses
+to start and names the missing runners, so a truncated or hand-edited file never
+inherits a default. If `.just-mcp-work.json` is absent, every runner is
+disabled: no task is discovered or run, including in a fresh workspace where
+`init` has never run. The shell tools are unaffected and remain the escape hatch
+for genuinely ad-hoc commands. `serve` logs one warning naming the file and
+telling the operator to run `init`; deleting the policy cannot widen the task
+surface.
 
 | Runner | Modes | Default |
 | --- | --- | --- |
@@ -440,6 +475,12 @@ delegated build that pours a full log into its own context defeats the purpose.
   started it, and only that process can stop it.
 - `max_wait_ms must be between 0 and 600000` - `wait_run` accepts at most ten
   minutes per call. Call it again; the run keeps going.
+- `--runner-mode is no longer accepted by serve; the runner policy now lives in
+  <path>; run just-mcp-work init to write it` - an old managed configuration is
+  still passing the retired flag. Run `init` to rewrite it.
+- `runner policy is missing registered runners ["..."]` - the workspace policy
+  is incomplete. Run `init` to rewrite it; `serve` will not inherit omitted
+  runners' defaults.
 
 Tool errors arrive as an MCP error result whose payload carries
 `error.message`.
@@ -455,15 +496,15 @@ The operator sets these; an agent cannot change them at runtime.
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` | Default synchronous wait. |
 | `--retention` | `JMW_RETENTION` | `72h` | Run-log retention. |
 | `--exclude` | - | none | Extra directories to skip. |
-| `--runner-mode` | - | per runner | Runner authorization. |
 
 `just-mcp-work init` writes the managed instruction block and the MCP
-configuration for the selected agents, and persists the runner selection in the
-server arguments. The [README](../README.md) covers that setup flow.
+configuration for the selected agents, and writes the runner policy. The
+[README](../README.md) covers that setup flow.
 
 ## On-disk layout
 
 ```text
+<workspace root>/.just-mcp-work.json  runner policy; selects runners
 <workspace root>/.just-mcp-work/
 ├── version.json              update-check state
 └── log/
@@ -472,6 +513,11 @@ server arguments. The [README](../README.md) covers that setup flow.
         ├── stdout.log        raw stream
         └── stderr.log        raw stream
 ```
+
+JMW does not choose whether to share the policy. Commit it to share the team's
+runner modes; otherwise keep it per-machine, and a fresh checkout without it
+starts with every runner disabled. The repository ignore rule covers the
+`.just-mcp-work/` directory, not `.just-mcp-work.json`.
 
 This ledger is the source of truth for `get_run`, `get_run_logs`, `list_runs`,
 and the duration statistics. Later runs prune it according to `--retention`.

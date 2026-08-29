@@ -90,6 +90,20 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			want: "invalid default",
 		},
 		{
+			name: "missing disabled mode",
+			registrations: []runner.Registration{runner.NewRegistration(
+				"fake",
+				runner.ReviewedPermissions(
+					"Choose access.",
+					"Reviewed context.",
+					runner.ModeAll,
+					testPermissionChoice(runner.ModeAll),
+				),
+				validFactory,
+			)},
+			want: "must declare disabled mode",
+		},
+		{
 			name: "missing question",
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake",
@@ -346,6 +360,31 @@ func TestCatalogSelectionsFailClosed(t *testing.T) {
 	}
 }
 
+func TestCatalogDisabledSelectionsAreCompleteAndOrdered(t *testing.T) {
+	catalog, err := runner.NewCatalog(
+		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := catalog.DisabledSelections()
+	want := []runner.Selection{
+		{Name: "first", Mode: runner.ModeDisabled},
+		{Name: "second", Mode: runner.ModeDisabled},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("disabled selections = %#v, want %#v", got, want)
+	}
+	registry, err := catalog.Resolve(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registry.All()) != 0 {
+		t.Fatalf("disabled selections resolved runners: %#v", registry.All())
+	}
+}
+
 func TestCatalogCanonicalSelectionsAreCompleteAndOrdered(t *testing.T) {
 	catalog, err := runner.NewCatalog(
 		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions()),
@@ -379,16 +418,47 @@ func TestCatalogCanonicalSelectionsAreCompleteAndOrdered(t *testing.T) {
 	if !slices.Equal(again, want) {
 		t.Fatalf("validated selections were mutated through returned copy: %#v", again)
 	}
-	wantArgs := []string{
-		"--runner-mode", "first=all",
-		"--runner-mode", "second=disabled",
-	}
-	args, err := validated.Args()
+}
+
+func TestCatalogCompleteSelectionsRejectsOnlyIncompleteSets(t *testing.T) {
+	catalog, err := runner.NewCatalog(
+		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions()),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Equal(args, wantArgs) {
-		t.Fatalf("validated selection args = %#v, want %#v", args, wantArgs)
+	partial := []runner.Selection{{Name: "second", Mode: runner.ModeDisabled}}
+	if _, canonicalErr := catalog.CanonicalSelections(partial); canonicalErr != nil {
+		t.Fatalf("lenient canonical selections rejected a partial set: %v", canonicalErr)
+	}
+	if _, completeErr := catalog.CompleteSelections(partial); completeErr == nil ||
+		!strings.Contains(completeErr.Error(), "first") ||
+		!strings.Contains(completeErr.Error(), "run just-mcp-work init") {
+		t.Fatalf(
+			"complete selections error = %v, want missing first runner and init guidance",
+			completeErr,
+		)
+	}
+	complete, err := catalog.CompleteSelections(
+		[]runner.Selection{
+			{Name: "second", Mode: runner.ModeDisabled},
+			{Name: "first", Mode: runner.ModeAll},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := complete.Selections()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []runner.Selection{
+		{Name: "first", Mode: runner.ModeAll},
+		{Name: "second", Mode: runner.ModeDisabled},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("complete selections = %#v, want catalog order %#v", got, want)
 	}
 }
 
@@ -396,9 +466,6 @@ func TestValidatedSelectionsZeroValueIsInvalid(t *testing.T) {
 	var selections runner.ValidatedSelections
 	if _, err := selections.Selections(); err == nil {
 		t.Fatal("zero validated selections exposed raw selections")
-	}
-	if _, err := selections.Args(); err == nil {
-		t.Fatal("zero validated selections exposed server args")
 	}
 }
 

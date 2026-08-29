@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -15,10 +16,11 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 )
 
-func TestInitRunnerModesRoundTripThroughManagedServeConfigs(t *testing.T) {
+func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(
 		filepath.Join(root, "go.mod"),
@@ -31,8 +33,11 @@ func TestInitRunnerModesRoundTripThroughManagedServeConfigs(t *testing.T) {
 		[]string{
 			"--dir", root,
 			"--agents", "codex",
+			"--runner-mode", "just=all",
+			"--runner-mode", "cmake=all",
 			"--runner-mode", "docker=disabled",
 			"--runner-mode", "go=all",
+			"--runner-mode", "make=all",
 		},
 		strings.NewReader(""),
 		io.Discard,
@@ -48,18 +53,20 @@ func TestInitRunnerModesRoundTripThroughManagedServeConfigs(t *testing.T) {
 		{Name: "go", Mode: runner.ModeAll},
 		{Name: "make", Mode: runner.ModeAll},
 	}
-	modeArgs := make([]string, 0, len(wantSelections)*2)
-	for _, selection := range wantSelections {
-		modeArgs = append(
-			modeArgs,
-			"--runner-mode",
-			selection.Name+"="+string(selection.Mode),
-		)
+	loaded, err := policy.Load(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	configs := []managedServeConfig{
+	if !loaded.Found || !slices.Equal(loaded.Selections, wantSelections) {
+		t.Fatalf("workspace policy = %+v, want selections %#v", loaded, wantSelections)
+	}
+	wantArgs := []string{"serve", "--root", root}
+	configs := []struct {
+		name string
+		args []string
+	}{
 		{
 			name: "mcp json",
-			root: root,
 			args: readJSONManagedServeArgs(
 				t,
 				filepath.Join(root, ".mcp.json"),
@@ -67,60 +74,23 @@ func TestInitRunnerModesRoundTripThroughManagedServeConfigs(t *testing.T) {
 		},
 		{
 			name: "codex toml",
-			root: root,
 			args: readCodexManagedServeArgs(
 				t,
 				filepath.Join(root, ".codex", "config.toml"),
 			),
 		},
 	}
-	catalog, err := runnerCatalog()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, config := range configs {
 		t.Run(config.name, func(t *testing.T) {
-			assertManagedServeConfigRoundTrip(
-				t,
-				root,
-				config,
-				modeArgs,
-				wantSelections,
-				catalog,
-			)
+			if !slices.Equal(config.args, wantArgs) {
+				t.Fatalf("managed serve args = %#v, want %#v", config.args, wantArgs)
+			}
 		})
 	}
-}
-
-type managedServeConfig struct {
-	name string
-	root string
-	args []string
-}
-
-func assertManagedServeConfigRoundTrip(
-	t *testing.T,
-	projectRoot string,
-	config managedServeConfig,
-	modeArgs []string,
-	wantSelections []runner.Selection,
-	catalog *runner.Catalog,
-) {
-	t.Helper()
-	wantArgs := append([]string{"serve", "--root", config.root}, modeArgs...)
-	if !slices.Equal(config.args, wantArgs) {
-		t.Fatalf("managed serve args = %#v, want %#v", config.args, wantArgs)
-	}
-	options, err := parseServeOptions(config.args[1:])
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	registry, err := runnerRegistry(root, logger)
 	if err != nil {
-		t.Fatalf("parse persisted serve args: %v", err)
-	}
-	if options.Root != config.root || !slices.Equal(options.RunnerModes, wantSelections) {
-		t.Fatalf("parsed persisted serve options = %#v", options)
-	}
-	registry, err := catalog.Resolve(options.RunnerModes)
-	if err != nil {
-		t.Fatalf("resolve persisted runner modes: %v", err)
+		t.Fatalf("resolve workspace runner policy: %v", err)
 	}
 	if _, found := registry.Get("docker"); found {
 		t.Fatal("persisted disabled Docker runner was constructed")
@@ -129,7 +99,7 @@ func assertManagedServeConfigRoundTrip(
 	if !found {
 		t.Fatal("persisted all-mode Go runner is absent")
 	}
-	tasks, err := goRunner.ListTasks(context.Background(), projectRoot)
+	tasks, err := goRunner.ListTasks(context.Background(), root)
 	if err != nil {
 		t.Fatal(err)
 	}
