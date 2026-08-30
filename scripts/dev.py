@@ -86,7 +86,10 @@ def smoke(_: argparse.Namespace) -> None:
     if shutil.which("just") is None:
         print("smoke: skipped (just is not installed)")
         return
-    with tempfile.TemporaryDirectory(prefix="just-mcp-work-smoke-") as temporary:
+    with (
+        tempfile.TemporaryDirectory(prefix="just-mcp-work-smoke-") as temporary,
+        tempfile.TemporaryDirectory(prefix="just-mcp-work-smoke-bin-") as binary_home,
+    ):
         root = Path(temporary)
         (root / "justfile").write_text(
             "hello:\n    @echo hello\nlong:\n    @go run wait.go\n_hidden:\n    @echo hidden\n",
@@ -96,8 +99,26 @@ def smoke(_: argparse.Namespace) -> None:
             "package main\n\nimport \"time\"\n\nfunc main() { time.Sleep(10 * time.Second) }\n",
             encoding="utf-8",
         )
+        # The workspace needs the runner policy that init writes: without it every
+        # runner stays disabled and the server reports no project at all. The
+        # binary is built once and used for both commands, because the managed
+        # MCP entries record the path of the executable that wrote them and serve
+        # verifies that record at startup. It is built outside the workspace so
+        # the smoke project keeps holding nothing but the justfile.
+        binary = Path(binary_home) / BINARY
+        run(["go", "build", "-o", str(binary), "./cmd/just-mcp-work"])
+        subprocess.run(
+            [
+                str(binary), "init",
+                "--dir", str(root),
+                "--agents", "claude",
+                "--claude-permissions", "no",
+                "--runner-mode", "just=all",
+            ],
+            cwd=ROOT, check=True, text=True, input="\n" * 8,
+        )
         process = subprocess.Popen(
-            ["go", "run", "./cmd/just-mcp-work", "serve", "--root", str(root)],
+            [str(binary), "serve", "--root", str(root)],
             cwd=ROOT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
         )
         try:
