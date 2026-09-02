@@ -37,7 +37,7 @@ func TestRunPrintsVersionWithFlagAlias(t *testing.T) {
 }
 
 func TestHelpFlagsReturnSuccess(t *testing.T) {
-	for _, command := range []string{"init", "serve"} {
+	for _, command := range []string{"init", "init-beta-test", "serve"} {
 		if runErr := run([]string{command, "--help"}); runErr != nil {
 			t.Errorf("%s --help: %v", command, runErr)
 		}
@@ -47,9 +47,10 @@ func TestHelpFlagsReturnSuccess(t *testing.T) {
 func TestPrintUsageAndRunHelpReturnSuccess(t *testing.T) {
 	const expected = "Usage: just-mcp-work <command> [options]\n" +
 		"\nCommands:\n" +
-		"  serve    Start the local STDIO MCP server\n" +
-		"  init     Add managed task-server instructions for coding agents\n" +
-		"  version  Print version and commit\n"
+		"  serve           Start the local STDIO MCP server\n" +
+		"  init            Add managed task-server instructions for coding agents\n" +
+		"  init-beta-test  Add managed instructions with JMW beta feedback guidance\n" +
+		"  version         Print version and commit\n"
 
 	var output bytes.Buffer
 	if err := printUsage(&output); err != nil {
@@ -87,6 +88,64 @@ func defaultRunnerInput() *strings.Reader {
 	return strings.NewReader(strings.Repeat("\n", 5))
 }
 
+func initArgsWithoutQuestions(dir string) []string {
+	return []string{
+		"--dir", dir,
+		"--agents", "codex",
+		"--write-mcp-config=false",
+		"--runner-mode", "just=all",
+		"--runner-mode", "cmake=all",
+		"--runner-mode", "docker=all",
+		"--runner-mode", "go=safe",
+		"--runner-mode", "make=all",
+	}
+}
+
+func initializeWorkspaceMode(t *testing.T, dir string, betaTest bool) {
+	t.Helper()
+	if err := initCommandWithIO(
+		betaTest,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertWorkspaceBetaTest(t *testing.T, dir string, want bool) {
+	t.Helper()
+	if _, err := os.ReadFile(filepath.Join(dir, ".just-mcp-work", "managed.json")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := agentinit.VerifyManagedSurfaces(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("workspace beta_test = %t, want %t", got, want)
+	}
+}
+
+func editManagedInstructions(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "AGENTS.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const endMarker = "<!-- END just-mcp-work (managed) -->"
+	edited := strings.Replace(string(data), endMarker, "hand edit\n"+endMarker, 1)
+	if edited == string(data) {
+		t.Fatal("managed end marker not found")
+	}
+	//nolint:gosec // The test path is a fixed filename below t.TempDir().
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (w erroringWriter) Write([]byte) (int, error) {
 	return 0, w.err
 }
@@ -118,6 +177,7 @@ func TestServerRunErrorAcceptsContextCancellation(t *testing.T) {
 func TestInitWritesMCPConfigByDefault(t *testing.T) {
 	dir := t.TempDir()
 	if initErr := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -166,6 +226,7 @@ func TestInitSnippetPinsSelectedLinkedWorktreeWhenCWDIsDifferent(t *testing.T) {
 
 	var output bytes.Buffer
 	if initErr := initCommandWithIO(
+		false,
 		[]string{
 			"--dir", selectedDir,
 			"--agents", "codex",
@@ -200,6 +261,7 @@ func TestInitQuestionsUseDefaultsAndPersistCanonicalSelections(t *testing.T) {
 	dir := t.TempDir()
 	var output bytes.Buffer
 	err := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -242,6 +304,7 @@ func TestInitRunnerOverrideSkipsQuestionAndCanDisable(t *testing.T) {
 	dir := t.TempDir()
 	var output bytes.Buffer
 	err := initCommandWithIO(
+		false,
 		[]string{
 			"--dir", dir,
 			"--agents", "codex",
@@ -276,6 +339,7 @@ func TestInitRunnerQuestionRepromptsAndSharesInputWithClaudeConfirmation(t *test
 	// question, the other runner questions, and the Claude confirmation.
 	input := strings.NewReader("safe\nall\nall\nall\nSAFE\nsafe\nall\ny\n")
 	err := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "claude"},
 		input,
 		io.Discard,
@@ -300,6 +364,7 @@ func TestInitEOFRejectsUnansweredRunnerQuestion(t *testing.T) {
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
 	err := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		strings.NewReader(""),
 		&result,
@@ -327,6 +392,7 @@ func TestInitEOFRejectsUnansweredRunnerQuestion(t *testing.T) {
 func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 	dir := t.TempDir()
 	if err := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -342,6 +408,7 @@ func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
 	err = initCommandWithIO(
+		false,
 		[]string{
 			"--dir", dir,
 			"--agents", "windsurf",
@@ -372,6 +439,7 @@ func TestInitDryRunReportsPolicyWithoutWritingIt(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
 	if err := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex", "--dry-run"},
 		defaultRunnerInput(),
 		&result,
@@ -412,6 +480,7 @@ func TestInitOffersExistingRunnerModesAsCurrent(t *testing.T) {
 	}
 	var diagnostics bytes.Buffer
 	if initErr := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -439,6 +508,7 @@ func TestInitReplacesMalformedPolicyAndAnnouncesDefaultFallback(t *testing.T) {
 	}
 	var diagnostics bytes.Buffer
 	if initErr := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -467,6 +537,7 @@ func TestInitReconcilesChangedRunnerSet(t *testing.T) {
 	}
 	var diagnostics bytes.Buffer
 	if initErr := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -517,7 +588,7 @@ func TestInitRejectsPolicySymlinkWithoutExposingTarget(t *testing.T) {
 			}
 			var result bytes.Buffer
 			var diagnostics bytes.Buffer
-			err := initCommandWithIO(args, defaultRunnerInput(), &result, &diagnostics)
+			err := initCommandWithIO(false, args, defaultRunnerInput(), &result, &diagnostics)
 			if err == nil || !strings.Contains(err.Error(), path) ||
 				!strings.Contains(err.Error(), "symbolic link") {
 				t.Fatalf("init error = %v, want policy path and symbolic-link type", err)
@@ -525,6 +596,352 @@ func TestInitRejectsPolicySymlinkWithoutExposingTarget(t *testing.T) {
 			output := result.String() + diagnostics.String()
 			if strings.Contains(output, targetContents) {
 				t.Fatalf("init exposed symlink target contents: %q", output)
+			}
+		})
+	}
+}
+
+func TestInitBetaTestCommandUsesInitFlagsAndOwnName(t *testing.T) {
+	dir := t.TempDir()
+	if err := initCommandWithIO(
+		true,
+		[]string{
+			"--dir", dir,
+			"--agents", "codex",
+			"--write-mcp-config=false",
+			"--runner-mode", "go=safe",
+		},
+		defaultRunnerInput(),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "This workspace beta-tests just-mcp-work (JMW) itself.") {
+		t.Fatal("init-beta-test did not write the beta paragraph")
+	}
+
+	var result bytes.Buffer
+	var diagnostics bytes.Buffer
+	err = initCommandWithIO(
+		true,
+		[]string{"unexpected"},
+		defaultRunnerInput(),
+		&result,
+		&diagnostics,
+	)
+	if err == nil || !strings.Contains(err.Error(), "init-beta-test accepts no positional arguments") {
+		t.Fatalf("positional error = %v", err)
+	}
+	if result.Len() != 0 || diagnostics.Len() != 0 {
+		t.Fatalf("positional output = %q, %q", result.String(), diagnostics.String())
+	}
+
+	err = initCommandWithIO(
+		true,
+		[]string{"--help"},
+		defaultRunnerInput(),
+		&result,
+		&diagnostics,
+	)
+	if err != nil || !strings.Contains(diagnostics.String(), "Usage: just-mcp-work init-beta-test") {
+		t.Fatalf("help error = %v, output = %q", err, diagnostics.String())
+	}
+}
+
+func TestInitLeavesRecordedBetaWorkspaceWhenConfirmed(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, true)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader("yes\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Thank you for volunteering to help improve JMW.",
+		"Leave beta testing and continue with plain init?",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("leave-beta-test question does not contain %q: %q", want, diagnostics.String())
+		}
+	}
+	assertWorkspaceBetaTest(t, dir, false)
+}
+
+func TestInitAsksWhenRecordedBetaModeCannotBeRead(t *testing.T) {
+	for _, name := range []string{"malformed", "unsupported schema"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			initializeWorkspaceMode(t, dir, true)
+			manifestPath := filepath.Join(dir, ".just-mcp-work", "managed.json")
+			before, err := os.ReadFile(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after := []byte(strings.Replace(
+				string(before),
+				`"schema_version": 1`,
+				`"schema_version": 2`,
+				1,
+			))
+			if name == "malformed" {
+				after = []byte("{not json")
+			}
+			if bytes.Equal(after, before) {
+				t.Fatal("manifest rewrite did not change the document")
+			}
+			// #nosec G703 -- manifestPath is inside this test's temporary directory.
+			if err := os.WriteFile(manifestPath, after, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			var diagnostics bytes.Buffer
+			if err := initCommandWithIO(
+				false,
+				initArgsWithoutQuestions(dir),
+				strings.NewReader("yes\n"),
+				io.Discard,
+				&diagnostics,
+			); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"beta-test mode could not be read",
+				"Plain init may remove beta feedback guidance.",
+			} {
+				if !strings.Contains(diagnostics.String(), want) {
+					t.Fatalf("unknown-mode question does not contain %q: %q", want, diagnostics.String())
+				}
+			}
+			assertWorkspaceBetaTest(t, dir, false)
+		})
+	}
+}
+
+func TestInitKeepsRecordedBetaWorkspaceWhenDeclined(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, true)
+	paths := []string{
+		filepath.Join(dir, "AGENTS.md"),
+		filepath.Join(dir, ".just-mcp-work", "managed.json"),
+		policy.Path(dir),
+	}
+	before := make(map[string][]byte, len(paths))
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = data
+	}
+
+	err := initCommandWithIO(
+		false,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader("no\n"),
+		io.Discard,
+		io.Discard,
+	)
+	const wantGuidance = "re-run the same command with init-beta-test in place of init"
+	if err == nil || !strings.Contains(err.Error(), wantGuidance) {
+		t.Fatalf("declined leave-beta-test error = %v, want %q", err, wantGuidance)
+	}
+	for path, want := range before {
+		got, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("declined leave-beta-test confirmation changed %s", path)
+		}
+	}
+}
+
+func TestInitLeavesRecordedBetaWorkspaceAtEndOfInput(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, true)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"No answer was given",
+		"the workspace is leaving beta testing",
+		"same command with init-beta-test in place of init",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("end-of-input notice does not contain %q: %q", want, diagnostics.String())
+		}
+	}
+	assertWorkspaceBetaTest(t, dir, false)
+}
+
+func TestInitDryRunDoesNotAskToLeaveBeta(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, true)
+	args := append(initArgsWithoutQuestions(dir), "--dry-run")
+	var result, diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		erroringReader{err: errors.New("dry-run read input")},
+		&result,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diagnostics.String(), "Leave beta testing") {
+		t.Fatalf("dry-run asked to leave beta testing: %q", diagnostics.String())
+	}
+	if !strings.Contains(result.String(), "This workspace beta-tests just-mcp-work") {
+		t.Fatalf("dry-run diff does not show removed beta guidance: %q", result.String())
+	}
+	assertWorkspaceBetaTest(t, dir, true)
+}
+
+func TestInitPlainWorkspaceDoesNotAskToLeaveBeta(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, false)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader("no\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diagnostics.String(), "Leave beta testing") {
+		t.Fatalf("plain init asked to leave beta testing: %q", diagnostics.String())
+	}
+	assertWorkspaceBetaTest(t, dir, false)
+}
+
+func TestInitBetaTestWorkspaceDoesNotAskToLeaveBeta(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, true)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		true,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader("no\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diagnostics.String(), "Leave beta testing") {
+		t.Fatalf("init-beta-test asked to leave beta testing: %q", diagnostics.String())
+	}
+	assertWorkspaceBetaTest(t, dir, true)
+}
+
+func TestInitRepairsEditedManagedBlockInPlainWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, false)
+	editManagedInstructions(t, dir)
+
+	if err := initCommandWithIO(
+		false,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatalf("init edited plain workspace: %v", err)
+	}
+	assertWorkspaceBetaTest(t, dir, false)
+}
+
+func TestInitRepairsEditedManagedBlockInRecordedBetaWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	initializeWorkspaceMode(t, dir, true)
+	editManagedInstructions(t, dir)
+	var diagnostics bytes.Buffer
+
+	if err := initCommandWithIO(
+		false,
+		initArgsWithoutQuestions(dir),
+		strings.NewReader("yes\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatalf("init edited beta workspace: %v", err)
+	}
+	if !strings.Contains(diagnostics.String(), "Leave beta testing and continue with plain init?") {
+		t.Fatalf("edited beta workspace question missing: %q", diagnostics.String())
+	}
+	assertWorkspaceBetaTest(t, dir, false)
+}
+
+func TestRunSelectsTheRequestedManagedBlock(t *testing.T) {
+	tests := []struct {
+		command      string
+		name         string
+		wantBetaText bool
+	}{
+		{
+			command:      "init-beta-test",
+			name:         "beta",
+			wantBetaText: true,
+		},
+		{
+			command:      "init",
+			name:         "plain",
+			wantBetaText: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			// run reads os.Stdin, so every declared runner must be answered by
+			// flag or the console question is left unanswered at end of input.
+			if err := run([]string{
+				test.command,
+				"--dir",
+				dir,
+				"--agents",
+				"codex",
+				"--write-mcp-config=false",
+				"--runner-mode",
+				"just=all",
+				"--runner-mode",
+				"cmake=all",
+				"--runner-mode",
+				"docker=all",
+				"--runner-mode",
+				"go=safe",
+				"--runner-mode",
+				"make=all",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotBetaText := strings.Contains(
+				string(data),
+				"This workspace beta-tests just-mcp-work (JMW) itself.",
+			)
+			if gotBetaText != test.wantBetaText {
+				t.Fatalf("beta text = %t, want %t", gotBetaText, test.wantBetaText)
 			}
 		})
 	}
@@ -543,6 +960,7 @@ func TestInitHelpAndFlagErrorsUseDiagnosticOutput(t *testing.T) {
 			var result bytes.Buffer
 			var diagnostics bytes.Buffer
 			err := initCommandWithIO(
+				false,
 				testCase.args,
 				defaultRunnerInput(),
 				&result,
@@ -574,7 +992,7 @@ func TestInitRejectsRunnerOverridesBeforeWritingFiles(t *testing.T) {
 		t.Run(strings.Join(extra, "_"), func(t *testing.T) {
 			dir := t.TempDir()
 			args := append([]string{"--dir", dir, "--agents", "codex"}, extra...)
-			err := initCommandWithIO(args, defaultRunnerInput(), io.Discard, io.Discard)
+			err := initCommandWithIO(false, args, defaultRunnerInput(), io.Discard, io.Discard)
 			if err == nil {
 				t.Fatalf("init accepted invalid runner override %v", extra)
 			}
@@ -742,6 +1160,7 @@ func TestServeRejectsRetiredRunnerModeWithMigrationMessage(t *testing.T) {
 func TestServeVerifiesManagedSurfacesBeforeRunnerRegistry(t *testing.T) {
 	root := t.TempDir()
 	if err := initCommandWithIO(
+		false,
 		[]string{"--dir", root, "--agents", "codex"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -1010,6 +1429,7 @@ func TestRunnerRegistryWarnsOnceWhenPolicyIsAbsent(t *testing.T) {
 func TestInitWritesClaudePermissionsWithFlag(t *testing.T) {
 	dir := t.TempDir()
 	initErr := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "yes"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -1037,6 +1457,7 @@ func TestInitWritesClaudePermissionsWithFlag(t *testing.T) {
 func TestInitKeepsClaudePermissionsWhenDeclinedByFlag(t *testing.T) {
 	dir := t.TempDir()
 	initErr := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "no"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -1056,6 +1477,7 @@ func TestInitClaudeConfirmationReportsAccurateOutcomeOnFreshWorkspace(t *testing
 	// Closed stdin gives an empty answer at the Claude confirmation prompt on a
 	// workspace that never had a settings file, so nothing is actually removed.
 	initErr := initCommandWithIO(
+		false,
 		[]string{"--dir", dir, "--agents", "claude"},
 		defaultRunnerInput(),
 		io.Discard,
@@ -1087,6 +1509,7 @@ func TestInitClaudeConfirmationAbortsOnNonEOFReadFailure(t *testing.T) {
 	// Every runner is answered by flag so the only console read left is the
 	// Claude confirmation, isolating the failure to that read.
 	initErr := initCommandWithIO(
+		false,
 		[]string{
 			"--dir", dir,
 			"--agents", "claude",

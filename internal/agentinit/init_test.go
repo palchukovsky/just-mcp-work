@@ -5,6 +5,7 @@
 package agentinit
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -136,6 +137,231 @@ func TestApplyCodexConfigRoundTripPreservesTerminatedForeignContent(t *testing.T
 	}
 }
 
+func TestApplyBetaTestSelectsTheManagedBlock(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		betaTest  bool
+		wantCount int
+	}{
+		{name: "beta", betaTest: true, wantCount: 1},
+		{name: "plain", wantCount: 0},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if _, err := Apply(Options{
+				Dir:         dir,
+				Agents:      []string{"codex"},
+				BetaTest:    testCase.betaTest,
+				RunnerModes: testRunnerModes(t),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if count := strings.Count(string(data), betaTestManagedBlockText); count != testCase.wantCount {
+				t.Fatalf("beta paragraph count = %d, want %d", count, testCase.wantCount)
+			}
+		})
+	}
+}
+
+func TestApplyBetaTestAndPlainModesAreIdempotent(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		betaTest bool
+	}{
+		{name: "beta", betaTest: true},
+		{name: "plain"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			options := Options{
+				Dir:         dir,
+				Agents:      []string{"claude", "codex"},
+				BetaTest:    testCase.betaTest,
+				RunnerModes: testRunnerModes(t),
+			}
+			first, err := Apply(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := make(map[string][]byte, len(first.Paths))
+			for _, path := range first.Paths {
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				before[path] = data
+			}
+			second, err := Apply(options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(second.Paths) != 0 {
+				t.Fatalf("second apply changed paths: %#v", second.Paths)
+			}
+			for path, want := range before {
+				got, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("second apply changed %s", path)
+				}
+			}
+			if count := strings.Count(
+				string(before[filepath.Join(dir, "AGENTS.md")]),
+				betaTestManagedBlockText,
+			); count > 1 {
+				t.Fatalf("beta paragraph count = %d, want at most one", count)
+			}
+		})
+	}
+}
+
+func TestApplySwitchesBetaTestBlockCleanly(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		initial    bool
+		targetMode bool
+	}{
+		{name: "plain to beta", targetMode: true},
+		{name: "beta to plain", initial: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fresh := t.TempDir()
+			initial := Options{
+				Dir:         dir,
+				Agents:      []string{"codex"},
+				BetaTest:    testCase.initial,
+				RunnerModes: testRunnerModes(t),
+			}
+			if _, err := Apply(initial); err != nil {
+				t.Fatal(err)
+			}
+			initial.Dir = fresh
+			initial.BetaTest = testCase.targetMode
+			if _, err := Apply(initial); err != nil {
+				t.Fatal(err)
+			}
+			initial.Dir = dir
+			if _, err := Apply(initial); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want, err := os.ReadFile(filepath.Join(fresh, "AGENTS.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("switched block differs from fresh target block:\n%s", got)
+			}
+		})
+	}
+}
+
+func TestApplyBetaTestPreservesOperatorTextOutsideManagedBlocks(t *testing.T) {
+	dir := t.TempDir()
+	targets := []struct {
+		agent  string
+		path   string
+		header string
+	}{
+		{agent: "claude", path: "CLAUDE.md", header: "# Workspace instructions\n\n"},
+		{agent: "codex", path: "AGENTS.md", header: "# Workspace instructions\n\n"},
+		{
+			agent:  "cursor",
+			path:   ".cursor/rules/just-mcp-work.mdc",
+			header: "---\ndescription: Use workspace tasks through just-mcp-work\n---\n\n",
+		},
+	}
+	want := make(map[string][]byte, len(targets))
+	for _, target := range targets {
+		path := filepath.Join(dir, target.path)
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		prefix := target.header + "Operator text before the managed block for " + target.agent + ".\n\n"
+		suffix := "\nOperator text after the managed block for " + target.agent + ".\n"
+		if err := os.WriteFile(path, []byte(prefix+canonicalBlock(false)+suffix), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		want[path] = []byte(prefix + canonicalBlock(true) + suffix)
+	}
+	if _, err := Apply(Options{
+		Dir:               dir,
+		Agents:            []string{"claude", "codex", "cursor"},
+		BetaTest:          true,
+		RunnerModes:       testRunnerModes(t),
+		ClaudePermissions: ClaudePermissionsNo,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for path, expected := range want {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(data, expected) {
+			t.Fatalf("beta apply changed operator text outside managed markers in %s\ngot:  %q\nwant: %q", path, data, expected)
+		}
+	}
+}
+
+func TestApplyBetaTestPreservesForeignConfigurations(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(dir, mcpConfig),
+		[]byte(`{"mcpServers":{"foreign":{"command":"keep"}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(dir, codexConfig)
+	if err := os.MkdirAll(filepath.Dir(codexPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(codexPath, []byte("# foreign Codex configuration\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := filepath.Join(dir, claudeSettings)
+	if err := os.MkdirAll(filepath.Dir(claudePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(claudePath, []byte(`{"foreign":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(Options{
+		Dir:               dir,
+		Agents:            []string{"claude", "codex"},
+		BetaTest:          true,
+		WriteMCPConfig:    true,
+		RunnerModes:       testRunnerModes(t),
+		ClaudePermissions: ClaudePermissionsYes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for path, foreign := range map[string]string{
+		filepath.Join(dir, mcpConfig): `"foreign"`,
+		codexPath:                     "# foreign Codex configuration",
+		claudePath:                    `"foreign"`,
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), foreign) {
+			t.Fatalf("%s lost foreign content %q", path, foreign)
+		}
+	}
+}
+
 // TestApplyCodexConfigCleanupKeepsLegacyTextValid covers a foreign file that had
 // no final line break before init appended its managed block. Both states are
 // identical after the append, so cleanup leaves valid text with one final line
@@ -215,7 +441,7 @@ func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
 				path := filepath.Join(dir, named.target.path)
 				// #nosec G304 -- path is created in this test's temporary directory.
 				data, readErr := os.ReadFile(path)
-				if readErr != nil || !strings.Contains(string(data), canonicalBlock()) {
+				if readErr != nil || !strings.Contains(string(data), canonicalBlock(false)) {
 					t.Fatalf("%s instructions = %q, %v", named.name, data, readErr)
 				}
 			}
@@ -223,6 +449,67 @@ func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
 			settingsAfter, err := os.ReadFile(settings)
 			if err != nil || !slices.Equal(settingsAfter, settingsBefore) {
 				t.Fatalf("deselected Claude settings changed: %q, %v", settingsAfter, err)
+			}
+		})
+	}
+}
+
+func TestApplyModeChangeRejectsDeselectedManagedInstructions(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		initial    bool
+		targetMode bool
+	}{
+		{name: "plain to beta", targetMode: true},
+		{name: "beta to plain", initial: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			first, err := Apply(Options{
+				Dir:         dir,
+				Agents:      []string{"claude", "codex", "cursor"},
+				BetaTest:    testCase.initial,
+				RunnerModes: testRunnerModes(t),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := make(map[string][]byte, len(first.Paths))
+			for _, path := range first.Paths {
+				data, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				before[path] = data
+			}
+
+			_, err = Apply(Options{
+				Dir:         dir,
+				Agents:      []string{"codex"},
+				BetaTest:    testCase.targetMode,
+				RunnerModes: testRunnerModes(t),
+			})
+			if err == nil {
+				t.Fatal("narrow mode-changing Apply() error = nil")
+			}
+			for _, want := range []string{
+				"--agents codex",
+				"CLAUDE.md",
+				".cursor/rules/just-mcp-work.mdc",
+				"--agents claude,codex,cursor",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("mode-change refusal does not contain %q: %v", want, err)
+				}
+			}
+			for path, want := range before {
+				got, readErr := os.ReadFile(path)
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				if !bytes.Equal(got, want) {
+					t.Fatalf("refused mode change modified %s", path)
+				}
 			}
 		})
 	}
@@ -275,7 +562,7 @@ func TestApplyKeepsAliasedInstructionOfDeselectedAgent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(after), canonicalBlock()) {
+			if !strings.Contains(string(after), canonicalBlock(false)) {
 				t.Fatalf("narrow selection destroyed the aliased managed block:\n%s", after)
 			}
 			if strings.Count(string(after), beginMarker) != 1 {
@@ -986,7 +1273,7 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"Never recreate or run such a task",
 		"genuinely ad-hoc commands",
 	} {
-		if !strings.Contains(Prompt(), expected) {
+		if !strings.Contains(Prompt(false), expected) {
 			t.Errorf("Prompt does not mention %q", expected)
 		}
 	}
@@ -1011,6 +1298,21 @@ func TestManagedBlockCarriesTheSameContract(t *testing.T) {
 	}
 }
 
+func TestBetaTestManagedBlockCarriesTheFeedbackContract(t *testing.T) {
+	flat := strings.Join(strings.Fields(betaTestManagedBlockText), " ")
+	for _, expected := range []string{
+		"JMW bug, friction, missing capability, or improvement",
+		"relevant tool call, command, or error",
+		"separate from your findings about the project",
+		"Tell the user and stop there",
+		"do not open issues and do not send the report anywhere",
+	} {
+		if !strings.Contains(flat, expected) {
+			t.Errorf("beta test managed block does not mention %q: %s", expected, flat)
+		}
+	}
+}
+
 // TestPromptAndManagedBlockShareTheContract holds the served instructions and
 // the written block to one list of terms. The two texts are worded for
 // different readers, so nothing but a shared check keeps them from drifting
@@ -1025,7 +1327,8 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 		"start_task",
 	}
 	for name, text := range map[string]string{
-		"Prompt":        strings.Join(strings.Fields(Prompt()), " "),
+		"plain prompt":  strings.Join(strings.Fields(Prompt(false)), " "),
+		"beta prompt":   strings.Join(strings.Fields(Prompt(true)), " "),
 		"managed block": strings.Join(strings.Fields(managedBlockText), " "),
 	} {
 		for _, expected := range shared {
@@ -1033,6 +1336,29 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 				t.Errorf("%s does not carry the shared term %q", name, expected)
 			}
 		}
+	}
+}
+
+func TestPromptSelectsBetaTestContract(t *testing.T) {
+	plain := Prompt(false)
+	if plain != promptText {
+		t.Fatalf("plain prompt changed: got %q, want promptText", plain)
+	}
+
+	beta := Prompt(true)
+	if wantPrefix := promptText + "\n\nBETA TEST FEEDBACK\n"; !strings.HasPrefix(beta, wantPrefix) {
+		t.Fatalf("beta prompt does not start with promptText and its presentation header: %q", beta)
+	}
+	if servedCount, managedCount := strings.Count(beta, betaTestManagedBlockText),
+		strings.Count(canonicalBlock(true), betaTestManagedBlockText); servedCount != 1 || managedCount != 1 {
+		t.Fatalf(
+			"beta contract counts = served %d, managed %d, want one in both channels",
+			servedCount,
+			managedCount,
+		)
+	}
+	if strings.Contains(plain, betaTestManagedBlockText) {
+		t.Fatal("plain prompt contains the beta-test paragraph")
 	}
 }
 
@@ -1071,7 +1397,7 @@ func TestApplyReplacesModifiedManagedBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(data), "user edit") ||
-		strings.Count(string(data), canonicalBlock()) != 1 {
+		strings.Count(string(data), canonicalBlock(false)) != 1 {
 		t.Fatalf("managed block was not replaced:\n%s", data)
 	}
 }
@@ -1098,7 +1424,7 @@ func TestApplyUpdatesEarlierManagedPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != canonicalBlock() {
+	if string(data) != canonicalBlock(false) {
 		t.Fatalf("managed prompt was not upgraded:\n%s", data)
 	}
 }
@@ -1411,7 +1737,7 @@ func TestApplyRepairsLegacyLFBlocksInCRLFDocuments(t *testing.T) {
 		"\n",
 	)
 	files := map[string]string{
-		agentsPath: "# Notes\r\n\n" + canonicalBlock(),
+		agentsPath: "# Notes\r\n\n" + canonicalBlock(false),
 		codexPath:  "# notes\r\n\n" + legacyCodexBlock + "\n",
 		mcpPath:    "{\r\n  \"mcpServers\": {}\r\n}\r\n",
 	}
@@ -2340,7 +2666,7 @@ func TestApplyKeepsAgentInstructionsWithinResolvedScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), canonicalBlock()) {
+	if !strings.Contains(string(data), canonicalBlock(false)) {
 		t.Fatalf("agent instructions do not contain the managed block:\n%s", data)
 	}
 }
@@ -2371,7 +2697,7 @@ func TestApplyDoesNotSearchAboveResolvedWorkspaceScope(t *testing.T) {
 		t.Fatalf("ancestor target changed: %q, %v", ancestorAfter, err)
 	}
 	workspaceData, err := os.ReadFile(filepath.Join(workspace, "AGENTS.md"))
-	if err != nil || !strings.Contains(string(workspaceData), canonicalBlock()) {
+	if err != nil || !strings.Contains(string(workspaceData), canonicalBlock(false)) {
 		t.Fatalf("workspace target = %q, %v", workspaceData, err)
 	}
 }
@@ -2415,7 +2741,7 @@ func TestApplyUpdatesSafeSymlinkedAgentInstruction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), canonicalBlock()) {
+	if !strings.Contains(string(data), canonicalBlock(false)) {
 		t.Fatalf("symlink target does not contain the managed block:\n%s", data)
 	}
 }

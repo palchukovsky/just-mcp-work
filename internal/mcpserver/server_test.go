@@ -361,7 +361,7 @@ func TestGetRunLogsPreservesUTF8ByteOffsets(t *testing.T) {
 	}
 }
 
-func TestMCPServerHelperProcess(_ *testing.T) {
+func TestMCPServerHelperProcess(t *testing.T) {
 	switch os.Getenv("JMW_TEST_HELPER_PROCESS") {
 	case "1":
 		//nolint:errcheck // The helper exits immediately when test output is unavailable.
@@ -373,6 +373,95 @@ func TestMCPServerHelperProcess(_ *testing.T) {
 		for {
 			time.Sleep(time.Hour)
 		}
+	case "mcp":
+		root := t.TempDir()
+		runners, err := runner.NewRegistry()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		store, err := runstore.NewForWorktree(root, root)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		server, err := New(workspaceRegistry, runners, store, Config{
+			BetaTest: os.Getenv("JMW_TEST_BETA") == "true",
+			Grace:    20 * time.Millisecond,
+			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		if err := server.Run(context.Background()); err != nil && !strings.Contains(err.Error(), "broken pipe") {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+	}
+}
+
+func TestMCPServerInstructionsFollowBetaTestMode(t *testing.T) {
+	const (
+		betaClause = "JMW bug, friction, missing capability, or improvement"
+		usageRule  = "output itself is the answer"
+	)
+	for _, testCase := range []struct {
+		name      string
+		betaTest  bool
+		wantCount int
+	}{
+		{name: "beta", betaTest: true, wantCount: 1},
+		{name: "plain", wantCount: 0},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			//nolint:gosec // The test intentionally reexecutes the current test binary.
+			command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestMCPServerHelperProcess$")
+			command.Env = append(os.Environ(), "JMW_TEST_HELPER_PROCESS=mcp")
+			if testCase.betaTest {
+				command.Env = append(command.Env, "JMW_TEST_BETA=true")
+			}
+			stdin, err := command.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := command.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr strings.Builder
+			command.Stderr = &stderr
+			err = command.Start()
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v1"}, nil)
+			session, err := client.Connect(ctx, &mcp.IOTransport{Reader: stdout, Writer: stdin}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instructions := strings.Join(strings.Fields(session.InitializeResult().Instructions), " ")
+			if count := strings.Count(instructions, betaClause); count != testCase.wantCount {
+				t.Fatalf("beta clause count = %d, want %d: %s", count, testCase.wantCount, instructions)
+			}
+			if !strings.Contains(instructions, usageRule) {
+				t.Fatalf("served instructions do not contain usage rule %q: %s", usageRule, instructions)
+			}
+			if err := stdin.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Wait(); err != nil {
+				t.Fatalf("MCP helper failed: %v: %s", err, stderr.String())
+			}
+		})
 	}
 }
 

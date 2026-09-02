@@ -41,9 +41,13 @@ const (
 )
 
 // Prompt returns the canonical JMW usage guidance served as the MCP server's
-// instructions.
-func Prompt() string {
-	return promptText
+// instructions. When betaTest is true, it appends the beta feedback contract.
+func Prompt(betaTest bool) string {
+	if !betaTest {
+		return promptText
+	}
+	// This wrapper is presentation only; the managed-block text is the single contract.
+	return promptText + "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText
 }
 
 const promptText = `This workspace exposes its runnable project tasks through just-mcp-work (JMW).
@@ -111,6 +115,12 @@ operator withheld it through a runner mode; never recreate or run such a task
 through run_shell_command, start_shell_command, or another shell path. Shell
 tools remain available for genuinely ad-hoc commands outside the discovered or
 withheld task surfaces.`
+
+const betaTestManagedBlockText = `This workspace beta-tests just-mcp-work (JMW) itself. Report any JMW bug, friction,
+missing capability, or improvement that would help you work better. Include the
+relevant tool call, command, or error. Keep the report separate from your findings
+about the project. Tell the user and stop there - do not open issues and do not
+send the report anywhere.`
 
 // ClaudePermissions selects how init treats the Claude tool permission lists.
 type ClaudePermissions string
@@ -187,6 +197,7 @@ func claudeToolRules(tools ...string) []string {
 type Options struct {
 	Dir            string
 	Agents         []string
+	BetaTest       bool
 	DryRun         bool
 	WriteMCPConfig bool
 	// RunnerModes is the complete, catalog-ordered runner selection persisted in
@@ -253,7 +264,7 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	agentEdits, surfaces, err := planAgentInstructions(scope, selected)
+	agentEdits, surfaces, err := planAgentInstructions(scope, selected, options.BetaTest)
 	if err != nil {
 		return Result{}, err
 	}
@@ -280,7 +291,7 @@ func Apply(options Options) (Result, error) {
 		edits = appendEdit(edits, claudeEdit)
 		surfaces = appendManifestSurface(surfaces, claudeSurface)
 	}
-	manifestEdit, err := planManifest(scope, surfaces)
+	manifestEdit, err := planManifest(scope, surfaces, options.BetaTest, selected)
 	if err != nil {
 		return Result{}, err
 	}
@@ -307,6 +318,7 @@ func Apply(options Options) (Result, error) {
 func planAgentInstructions(
 	scope string,
 	selected map[string]struct{},
+	betaTest bool,
 ) ([]plannedEdit, []manifestSurface, error) {
 	edits := make([]plannedEdit, 0, len(selected))
 	surfaces := make([]manifestSurface, 0, len(selected))
@@ -322,7 +334,7 @@ func planAgentInstructions(
 		if err != nil {
 			return nil, nil, err
 		}
-		after, err := managedContent(before, named.target.header)
+		after, err := managedContent(before, named.target.header, betaTest)
 		if err != nil {
 			return nil, nil, fmt.Errorf("%s: %w", path, err)
 		}
@@ -971,11 +983,15 @@ func agentTarget(agent string) (target, bool) {
 	return target{}, false
 }
 
-func canonicalBlock() string {
-	return beginMarker + "\n" + managedBlockText + "\n" + endMarker + "\n"
+func canonicalBlock(betaTest bool) string {
+	block := beginMarker + "\n" + managedBlockText
+	if betaTest {
+		block += "\n\n" + betaTestManagedBlockText
+	}
+	return block + "\n" + endMarker + "\n"
 }
 
-func managedContent(before []byte, header string) ([]byte, error) {
+func managedContent(before []byte, header string, betaTest bool) ([]byte, error) {
 	text := string(before)
 	// The instruction file keeps the line ending it is written with, so the
 	// managed block does not turn a CRLF document into a mixed one.
@@ -984,7 +1000,7 @@ func managedContent(before []byte, header string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	block := withLineBreak(canonicalBlock(), lineBreak)
+	block := withLineBreak(canonicalBlock(betaTest), lineBreak)
 	if found {
 		prefix := normalizeTrailingLineBreak(text[:start], lineBreak)
 		return []byte(prefix + block + text[end:]), nil

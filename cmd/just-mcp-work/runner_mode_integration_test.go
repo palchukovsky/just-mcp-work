@@ -30,6 +30,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := initCommandWithIO(
+		false,
 		[]string{
 			"--dir", root,
 			"--agents", "codex",

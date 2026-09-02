@@ -105,6 +105,12 @@ Run this once in the workspace:
 just-mcp-work init
 ```
 
+or, if you want to be a JMW beta-tester:
+
+```console
+just-mcp-work init-beta-test
+```
+
 Each invocation is authoritative inside the workspace scope resolved from
 `--dir`, for the surfaces it manages. It adds the canonical instruction block
 for the selected agents - Claude Code, Codex, Cursor, Copilot, and Windsurf -
@@ -117,6 +123,10 @@ false, whether or not `codex` was selected. Two agent targets that resolve to
 one document - a `CLAUDE.md` symlinked to an `AGENTS.md`, say - are each
 written with their own header, so keep such a document under a single selected
 agent, or give it text of its own before the first `init`.
+
+Use `init-beta-test` for a workspace beta-testing JMW. It does everything
+`init` does and records beta-test mode, so the selected agents and every client
+connecting to the JMW server receive beta feedback guidance.
 
 A file left holding nothing but JMW state is removed, which can happen to
 `.mcp.json`, `.codex/config.toml`, and `.claude/settings.json`, except that a
@@ -149,8 +159,12 @@ non-interactively. `init` writes the complete canonical selection to
 Managed MCP and Codex server arguments are `serve --root <dir>`; to change the
 selection, run `init`, not `serve --runner-mode`.
 
-Run `init` again after an update. `init --help` and `serve --help` list the
-agent targets and the server options.
+Run `init` again after an update. In a beta-test workspace, use
+`init-beta-test` to stay in beta mode; plain `init` asks before it removes beta
+feedback guidance and leaves beta testing. Reaching end of input answers that
+question as yes, so plain `init` continues to its preflight and leaves the beta
+test when that preflight succeeds.
+`init --help` and `serve --help` list the agent targets and the server options.
 
 ## Configuration
 

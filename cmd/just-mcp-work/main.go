@@ -48,6 +48,8 @@ func run(args []string) error {
 		return serve(args[1:])
 	case "init":
 		return initCommand(args[1:])
+	case "init-beta-test":
+		return initBetaTestCommand(args[1:])
 	case "version", "--version", "-version":
 		fmt.Printf("just-mcp-work %s (%s)\n", version.Current().Display(), version.Commit)
 		return nil
@@ -193,7 +195,7 @@ func serve(args []string) error {
 			policy.Path(root),
 		)
 	}
-	verifyErr := agentinit.VerifyManagedSurfaces(root)
+	betaTest, verifyErr := agentinit.VerifyManagedSurfaces(root)
 	if verifyErr != nil {
 		return fmt.Errorf("verify managed surfaces: %w", verifyErr)
 	}
@@ -218,6 +220,7 @@ func serve(args []string) error {
 		registry,
 		store,
 		mcpserver.Config{
+			BetaTest:         betaTest,
 			Timeout:          options.Timeout,
 			TimeoutUnlimited: options.TimeoutUnlimited,
 			SyncDeadline:     options.SyncDeadline,
@@ -314,16 +317,25 @@ func serverRunError(ctx context.Context, err error) error {
 }
 
 func initCommand(args []string) error {
-	return initCommandWithIO(args, os.Stdin, os.Stdout, os.Stderr)
+	return initCommandWithIO(false, args, os.Stdin, os.Stdout, os.Stderr)
+}
+
+func initBetaTestCommand(args []string) error {
+	return initCommandWithIO(true, args, os.Stdin, os.Stdout, os.Stderr)
 }
 
 func initCommandWithIO(
+	betaTest bool,
 	args []string,
 	input io.Reader,
 	resultOutput io.Writer,
 	diagnosticOutput io.Writer,
 ) error {
-	flags := flag.NewFlagSet("init", flag.ContinueOnError)
+	command := "init"
+	if betaTest {
+		command = "init-beta-test"
+	}
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(diagnosticOutput)
 	dir := flags.String("dir", ".", "workspace directory")
 	agents := flags.String(
@@ -356,7 +368,7 @@ func initCommandWithIO(
 		// nosemgrep: discarded-error
 		_, _ = fmt.Fprintln(
 			flags.Output(),
-			"Usage: just-mcp-work init [--dir <dir>] [--agents <names>] [--dry-run] "+
+			"Usage: just-mcp-work "+command+" [--dir <dir>] [--agents <names>] [--dry-run] "+
 				"[--claude-permissions ask|yes|no] [--runner-mode <name>=<mode>]...",
 		)
 		flags.PrintDefaults()
@@ -365,14 +377,14 @@ func initCommandWithIO(
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return fmt.Errorf("parse init flags: %w", err)
+		return fmt.Errorf("parse %s flags: %w", command, err)
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("init accepts no positional arguments")
+		return fmt.Errorf("%s accepts no positional arguments", command)
 	}
 	permissions, err := agentinit.ParseClaudePermissions(*claudePermissions)
 	if err != nil {
-		return fmt.Errorf("parse init flags: %w", err)
+		return fmt.Errorf("parse %s flags: %w", command, err)
 	}
 	catalog, err := runnerCatalog()
 	if err != nil {
@@ -382,6 +394,11 @@ func initCommandWithIO(
 	scope, err := agentinit.ResolveScope(*dir)
 	if err != nil {
 		return fmt.Errorf("resolve init scope: %w", err)
+	}
+	if !betaTest && !*dryRun {
+		if confirmErr := console.confirmLeaveBetaTest(scope); confirmErr != nil {
+			return confirmErr
+		}
 	}
 	currentModes, err := console.currentRunnerModes(scope, catalog)
 	if err != nil {
@@ -395,6 +412,7 @@ func initCommandWithIO(
 		agentinit.Options{
 			Dir:               *dir,
 			Agents:            splitCSV(*agents),
+			BetaTest:          betaTest,
 			DryRun:            *dryRun,
 			WriteMCPConfig:    *writeMCPConfig,
 			RunnerModes:       canonicalModes,
@@ -462,6 +480,48 @@ func writeInitOutput(output io.Writer, format string, arguments ...any) error {
 		return fmt.Errorf("write init output: %w", err)
 	}
 	return nil
+}
+
+func (c *initConsole) confirmLeaveBetaTest(scope string) error {
+	currentBetaTest, modeKnown, readErr := agentinit.ReadRecordedBetaTest(scope)
+	if readErr != nil {
+		return fmt.Errorf("read current beta-test mode: %w", readErr)
+	}
+	if modeKnown && !currentBetaTest {
+		return nil
+	}
+
+	question := "This workspace is participating in the JMW beta test. Thank you for volunteering " +
+		"to help improve JMW.\nLeave beta testing and continue with plain init? [y/N]: "
+	if !modeKnown {
+		question = "This workspace has a managed manifest, but its beta-test mode could not be read.\n" +
+			"Plain init may remove beta feedback guidance. Continue with plain init? [y/N]: "
+	}
+	if err := writeInitOutput(c.output, "%s", question); err != nil {
+		return err
+	}
+	answer, err := c.input.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read leave-beta-test confirmation: %w", err)
+	}
+	trimmed := strings.TrimSpace(answer)
+	if errors.Is(err, io.EOF) && trimmed == "" {
+		if writeErr := writeInitOutput(
+			c.output,
+			"\nNo answer was given; the workspace is leaving beta testing. "+
+				"Re-run the same command with init-beta-test in place of init to keep it.\n",
+		); writeErr != nil {
+			return writeErr
+		}
+		return nil
+	}
+	if strings.EqualFold(trimmed, "y") || strings.EqualFold(trimmed, "yes") {
+		return nil
+	}
+	return fmt.Errorf(
+		"init stopped; re-run the same command with init-beta-test in place of init " +
+			"to keep this workspace in beta testing",
+	)
 }
 
 func (c *initConsole) currentRunnerModes(
@@ -772,16 +832,25 @@ func printUsage(output io.Writer) error {
 	if _, err := fmt.Fprintln(output, "\nCommands:"); err != nil {
 		return fmt.Errorf("write usage: %w", err)
 	}
-	if _, err := fmt.Fprintln(output, "  serve    Start the local STDIO MCP server"); err != nil {
+	if _, err := fmt.Fprintln(
+		output,
+		"  serve           Start the local STDIO MCP server",
+	); err != nil {
 		return fmt.Errorf("write usage: %w", err)
 	}
 	if _, err := fmt.Fprintln(
 		output,
-		"  init     Add managed task-server instructions for coding agents",
+		"  init            Add managed task-server instructions for coding agents",
 	); err != nil {
 		return fmt.Errorf("write usage: %w", err)
 	}
-	if _, err := fmt.Fprintln(output, "  version  Print version and commit"); err != nil {
+	if _, err := fmt.Fprintln(
+		output,
+		"  init-beta-test  Add managed instructions with JMW beta feedback guidance",
+	); err != nil {
+		return fmt.Errorf("write usage: %w", err)
+	}
+	if _, err := fmt.Fprintln(output, "  version         Print version and commit"); err != nil {
 		return fmt.Errorf("write usage: %w", err)
 	}
 	return nil

@@ -18,6 +18,10 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 )
 
+func wantManagedManifestRecovery(root string) string {
+	return `run just-mcp-work init --dir "` + root + `"`
+}
+
 //nolint:gocyclo // This test pins the manifest document, every surface, and idempotency together.
 func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
@@ -42,6 +46,12 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 		t.Fatalf("manifest and policy were not reported last in publication order: %#v", first.Paths)
 	}
 	manifest, manifestBytes := readManagedManifest(t, dir)
+	if bytes.Contains(manifestBytes, []byte("\"beta_test\"")) {
+		t.Fatalf("plain manifest contains beta_test key:\n%s", manifestBytes)
+	}
+	if manifest.BetaTest {
+		t.Fatal("plain manifest beta test = true, want false")
+	}
 	if manifest.SchemaVersion != manifestSchemaVersion {
 		t.Fatalf("schema version = %d, want %d", manifest.SchemaVersion, manifestSchemaVersion)
 	}
@@ -518,26 +528,280 @@ func TestApplyUsesResolvedManagedManifestPath(t *testing.T) {
 	}
 }
 
+func TestReadRecordedBetaTestTreatsNoManifestAsPlain(t *testing.T) {
+	got, known, err := ReadRecordedBetaTest(t.TempDir())
+	if err != nil {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
+	}
+	if got || !known {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, true)", got, known)
+	}
+}
+
+func TestReadRecordedBetaTestReportsMalformedManifestAsUnknown(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, manifestFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, known, err := ReadRecordedBetaTest(root)
+	if err != nil {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
+	}
+	if got || known {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, false)", got, known)
+	}
+}
+
+func TestReadRecordedBetaTestReportsUnsupportedSchemaAsUnknown(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, manifestFile)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(
+		t,
+		path,
+		managedManifest{
+			SchemaVersion: manifestSchemaVersion + 1,
+			BetaTest:      true,
+		},
+	)
+
+	got, known, err := ReadRecordedBetaTest(root)
+	if err != nil {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
+	}
+	if got || known {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, false)", got, known)
+	}
+}
+
+func TestReadRecordedBetaTestReturnsHealthyBetaMode(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Apply(Options{
+		Dir:         root,
+		Agents:      []string{"codex"},
+		BetaTest:    true,
+		RunnerModes: testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, known, err := ReadRecordedBetaTest(root)
+	if err != nil {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
+	}
+	if !got || !known {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (true, true)", got, known)
+	}
+}
+
+func TestReadRecordedBetaTestReturnsHealthyPlainMode(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+
+	got, known, err := ReadRecordedBetaTest(root)
+	if err != nil {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
+	}
+	if got || !known {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, true)", got, known)
+	}
+}
+
+func TestReadRecordedBetaTestReturnsManifestIOError(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, manifestFile)
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := ReadRecordedBetaTest(root); err == nil {
+		t.Fatal("ReadRecordedBetaTest() error = nil, want manifest I/O error")
+	}
+}
+
+func TestVerifyManagedSurfacesAcceptsAndRejectsBetaBlock(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Apply(Options{
+		Dir:         root,
+		Agents:      []string{"codex"},
+		BetaTest:    true,
+		RunnerModes: testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	betaTest, err := VerifyManagedSurfaces(root)
+	if err != nil {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
+	}
+	if !betaTest {
+		t.Fatal("VerifyManagedSurfaces() beta test = false, want true")
+	}
+	path := filepath.Join(root, "AGENTS.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(
+		string(data),
+		betaTestManagedBlockText,
+		betaTestManagedBlockText+"\nhand edit",
+		1,
+	)
+	//nolint:gosec // The test path is a fixed filename below t.TempDir().
+	if err := os.WriteFile(path, []byte(edited), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyManagedSurfaces(root); err == nil ||
+		!strings.Contains(err.Error(), "was edited") {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want edited beta block error", err)
+	}
+}
+
+func TestVerifyManagedSurfacesRejectsSwitchedCanonicalBlocks(t *testing.T) {
+	tests := []struct {
+		name     string
+		betaTest bool
+	}{
+		{
+			name:     "beta workspace with plain block",
+			betaTest: true,
+		},
+		{
+			name:     "plain workspace with beta block",
+			betaTest: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if _, err := Apply(Options{
+				Dir:         root,
+				Agents:      []string{"codex"},
+				BetaTest:    test.betaTest,
+				RunnerModes: testRunnerModes(t),
+			}); err != nil {
+				t.Fatal(err)
+			}
+			betaTest, err := VerifyManagedSurfaces(root)
+			if err != nil {
+				t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
+			}
+			if betaTest != test.betaTest {
+				t.Fatalf(
+					"VerifyManagedSurfaces() beta test = %t, want %t",
+					betaTest,
+					test.betaTest,
+				)
+			}
+			path := filepath.Join(root, "AGENTS.md")
+			if err := os.WriteFile(path, []byte(canonicalBlock(!test.betaTest)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := VerifyManagedSurfaces(root); err == nil ||
+				!strings.Contains(err.Error(), "was edited") {
+				t.Fatalf("VerifyManagedSurfaces() error = %v, want edited block error", err)
+			}
+		})
+	}
+}
+
 func TestVerifyManagedSurfacesAcceptsFreshWorkspaceAndNoManifest(t *testing.T) {
 	t.Run("fresh workspace", func(t *testing.T) {
 		root := applyVerificationWorkspace(t)
-		if err := VerifyManagedSurfaces(root); err != nil {
+		betaTest, err := VerifyManagedSurfaces(root)
+		if err != nil {
 			t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
+		}
+		if betaTest {
+			t.Fatal("VerifyManagedSurfaces() beta test = true, want false")
 		}
 	})
 	t.Run("managed block without manifest", func(t *testing.T) {
 		root := t.TempDir()
 		if err := os.WriteFile(
 			filepath.Join(root, "AGENTS.md"),
-			[]byte("# Local\n\n"+canonicalBlock()),
+			[]byte("# Local\n\n"+canonicalBlock(false)),
 			0o600,
 		); err != nil {
 			t.Fatal(err)
 		}
-		if err := VerifyManagedSurfaces(root); err != nil {
+		betaTest, err := VerifyManagedSurfaces(root)
+		if err != nil {
 			t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
 		}
+		if betaTest {
+			t.Fatal("VerifyManagedSurfaces() beta test = true without manifest, want false")
+		}
 	})
+}
+
+func TestVerifyManagedSurfacesTreatsManifestWithoutBetaTestAsPlain(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	legacyDocument := map[string]any{
+		"schema_version": manifest.SchemaVersion,
+		"release":        manifest.Release,
+		"surfaces":       manifest.Surfaces,
+	}
+	writeJSONFile(t, filepath.Join(root, manifestFile), legacyDocument)
+
+	betaTest, err := VerifyManagedSurfaces(root)
+	if err != nil {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
+	}
+	if betaTest {
+		t.Fatal("VerifyManagedSurfaces() beta test = true without beta_test field, want false")
+	}
+}
+
+func TestVerifyManagedSurfacesRejectsRecordedBetaModeWithPlainBlock(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Apply(Options{
+		Dir:         root,
+		Agents:      []string{"codex"},
+		BetaTest:    true,
+		RunnerModes: testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := readManagedManifest(t, root)
+	if !manifest.BetaTest {
+		t.Fatal("manifest beta test = false, want true")
+	}
+	plainBlock := []byte(canonicalBlock(false))
+	path := filepath.Join(root, "AGENTS.md")
+	if err := os.WriteFile(path, plainBlock, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for index := range manifest.Surfaces {
+		surface := &manifest.Surfaces[index]
+		if surface.Path == "AGENTS.md" {
+			surface.SHA256 = newManifestSurface(
+				surface.Path,
+				surface.Kind,
+				plainBlock,
+			).SHA256
+		}
+	}
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+
+	_, err := VerifyManagedSurfaces(root)
+	wantPath := resolvedTestPath(t, path)
+	if err == nil ||
+		!strings.Contains(err.Error(), "generated configuration changed since it was written") ||
+		!strings.Contains(err.Error(), wantPath) {
+		t.Fatalf(
+			"VerifyManagedSurfaces() error = %v, want generated-change refusal for %s",
+			err,
+			wantPath,
+		)
+	}
 }
 
 func TestVerifyManagedSurfacesRejectsUntrustedManifestPaths(t *testing.T) {
@@ -583,7 +847,7 @@ func TestVerifyManagedSurfacesRejectsUntrustedManifestPaths(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := applyVerificationWorkspace(t)
 			outside := filepath.Join(t.TempDir(), "outside.md")
-			if err := os.WriteFile(outside, []byte(canonicalBlock()), 0o600); err != nil {
+			if err := os.WriteFile(outside, []byte(canonicalBlock(false)), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			manifest, _ := readManagedManifest(t, root)
@@ -592,9 +856,9 @@ func TestVerifyManagedSurfacesRejectsUntrustedManifestPaths(t *testing.T) {
 			manifest.Surfaces = []manifestSurface{surface}
 			writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
 
-			err := VerifyManagedSurfaces(root)
+			_, err := VerifyManagedSurfaces(root)
 			manifestPath := filepath.Join(root, manifestFile)
-			wantRecovery := "run just-mcp-work init --dir \"" + root + "\""
+			wantRecovery := wantManagedManifestRecovery(root)
 			if err == nil ||
 				!strings.Contains(err.Error(), "managed manifest "+manifestPath+" is unusable") ||
 				!strings.Contains(err.Error(), wantRecovery) ||
@@ -751,12 +1015,12 @@ func TestVerifyManagedSurfacesRejectsEditedMissingAndDeletedContent(t *testing.T
 		t.Run(test.name, func(t *testing.T) {
 			root := applyVerificationWorkspace(t)
 			test.change(t, root)
-			err := VerifyManagedSurfaces(root)
+			_, err := VerifyManagedSurfaces(root)
 			wantPath := resolvedTestPath(
 				t,
 				filepath.Join(root, filepath.FromSlash(test.relativePath)),
 			)
-			wantRecovery := "run just-mcp-work init --dir \"" + root + "\""
+			wantRecovery := wantManagedManifestRecovery(root)
 			if err == nil ||
 				!strings.Contains(err.Error(), "managed configuration in "+wantPath) ||
 				!strings.Contains(err.Error(), test.wantText) ||
@@ -791,7 +1055,7 @@ func TestVerifyManagedSurfacesAcceptsManagedBlockWithoutFinalNewline(t *testing.
 	if writeErr := os.WriteFile(path, withoutFinalNewline, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
-	if verifyErr := VerifyManagedSurfaces(root); verifyErr != nil {
+	if _, verifyErr := VerifyManagedSurfaces(root); verifyErr != nil {
 		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", verifyErr)
 	}
 
@@ -863,7 +1127,7 @@ func TestVerifyManagedSurfacesRejectsChangesInsideOwnedJSONEntries(t *testing.T)
 				filepath.Join(root, filepath.FromSlash(test.relativePath)),
 			)
 			test.change(t, root, path)
-			err := VerifyManagedSurfaces(root)
+			_, err := VerifyManagedSurfaces(root)
 			if err == nil ||
 				!strings.Contains(err.Error(), "managed configuration in "+path+" was edited") ||
 				!strings.Contains(err.Error(), "keep your own entries separate") {
@@ -904,7 +1168,7 @@ func TestVerifyManagedSurfacesReportsMalformedManagedConfiguration(t *testing.T)
 				if err != nil {
 					t.Fatal(err)
 				}
-				data = append(data, []byte(canonicalBlock())...)
+				data = append(data, []byte(canonicalBlock(false))...)
 				// #nosec G703 -- path is a fixed config path under the test's temporary root.
 				if err := os.WriteFile(path, data, 0o600); err != nil {
 					t.Fatal(err)
@@ -921,8 +1185,8 @@ func TestVerifyManagedSurfacesReportsMalformedManagedConfiguration(t *testing.T)
 				filepath.Join(root, filepath.FromSlash(test.relativePath)),
 			)
 			test.change(t, path)
-			err := VerifyManagedSurfaces(root)
-			wantRecovery := "run just-mcp-work init --dir \"" + root + "\""
+			_, err := VerifyManagedSurfaces(root)
+			wantRecovery := wantManagedManifestRecovery(root)
 			if err == nil ||
 				!strings.Contains(err.Error(), "managed configuration in "+path+" is malformed") ||
 				!strings.Contains(err.Error(), test.wantCause) ||
@@ -944,7 +1208,7 @@ func TestVerifyManagedSurfacesRejectsChangedGeneratedConfigurationOnce(t *testin
 	manifest.Surfaces[0].SHA256 = strings.Repeat("0", 64)
 	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
 
-	err := VerifyManagedSurfaces(root)
+	_, err := VerifyManagedSurfaces(root)
 	wantPath := resolvedTestPath(
 		t,
 		filepath.Join(root, filepath.FromSlash(manifest.Surfaces[0].Path)),
@@ -982,7 +1246,7 @@ func TestVerifyManagedSurfacesAcceptsCRLFWorkspace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := VerifyManagedSurfaces(root); err != nil {
+	if _, err := VerifyManagedSurfaces(root); err != nil {
 		t.Fatalf("VerifyManagedSurfaces() CRLF error = %v, want nil", err)
 	}
 }
@@ -1012,8 +1276,8 @@ func TestVerifyManagedSurfacesRejectsUnreadableAndTooNewManifest(t *testing.T) {
 			if err := os.WriteFile(path, test.manifest, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			err := VerifyManagedSurfaces(root)
-			wantRecovery := "run just-mcp-work init --dir \"" + root + "\""
+			_, err := VerifyManagedSurfaces(root)
+			wantRecovery := wantManagedManifestRecovery(root)
 			if err == nil ||
 				!strings.Contains(err.Error(), path) ||
 				!strings.Contains(err.Error(), test.wantText) ||
@@ -1033,7 +1297,7 @@ func TestVerifyManagedSurfacesTreatsReleaseAsContextOnly(t *testing.T) {
 	manifest, _ := readManagedManifest(t, root)
 	manifest.Release = "a different release"
 	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
-	if err := VerifyManagedSurfaces(root); err != nil {
+	if _, err := VerifyManagedSurfaces(root); err != nil {
 		t.Fatalf("VerifyManagedSurfaces() compared releases: %v", err)
 	}
 }
@@ -1048,7 +1312,7 @@ func TestVerifyManagedSurfacesDoesNotSearchParent(t *testing.T) {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyManagedSurfaces(root); err != nil {
+	if _, err := VerifyManagedSurfaces(root); err != nil {
 		t.Fatalf("VerifyManagedSurfaces() searched above root: %v", err)
 	}
 }
@@ -1081,7 +1345,7 @@ func TestVerifyManagedSurfacesUsesOnlyProvidedRoot(t *testing.T) {
 	t.Cleanup(func() { os.Args = previousArgs })
 	t.Setenv("JMW_ROOT", ambientRoot)
 
-	if err := VerifyManagedSurfaces(root); err != nil {
+	if _, err := VerifyManagedSurfaces(root); err != nil {
 		t.Fatalf("VerifyManagedSurfaces() used process state instead of root: %v", err)
 	}
 }

@@ -461,6 +461,18 @@ delegated build that pours a full log into its own context defeats the purpose.
 
 ## Failure modes
 
+When a readable, schema-compatible managed manifest records beta mode, an
+`init` in the recovery commands below asks whether to leave beta testing. A
+missing manifest has no recorded mode to recover and is treated as plain, so it
+does not prompt. If the manifest is present but malformed or uses an unsupported
+schema, `init` cannot recover the mode and asks with that warning. Answering no
+stops before it writes; answering yes, or reaching end of input, lets plain
+`init` continue to preflight. If changing mode would leave managed instruction
+files outside the current `--agents` selection, preflight refuses and names the
+files and the widened selection. Otherwise, plain `init` removes beta feedback
+guidance. Use
+`just-mcp-work init-beta-test --dir "<root>"` to stay in the beta test.
+
 - `unknown project_path` - the path is not a discovered project, or is not
   workspace-relative. Re-run `list_projects` with a wider `path` or
   `max_depth`.

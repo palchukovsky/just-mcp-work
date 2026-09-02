@@ -74,6 +74,7 @@ func startShellCommandDescription() string {
 //
 //nolint:govet // Field order groups process settings before the logger dependency.
 type Config struct {
+	BetaTest         bool
 	Timeout          time.Duration
 	TimeoutUnlimited bool
 	SyncDeadline     time.Duration
@@ -189,7 +190,7 @@ func (s *Server) Run(ctx context.Context) error {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "just-mcp-work", Version: version.Current().Display()},
 		&mcp.ServerOptions{
-			Instructions: agentinit.Prompt(),
+			Instructions: agentinit.Prompt(s.config.BetaTest),
 			Logger:       s.config.Logger,
 		},
 	)
