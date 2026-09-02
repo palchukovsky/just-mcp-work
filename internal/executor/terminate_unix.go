@@ -28,14 +28,14 @@ func terminate(cmd *exec.Cmd, grace time.Duration, killTree func() error) error 
 		return killTree()
 	}
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+		if processGroupGone(err) {
 			return nil
 		}
 		return fmt.Errorf("send SIGTERM to process group: %w", err)
 	}
 	time.Sleep(grace)
 	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
+		if processGroupGone(err) {
 			return nil
 		}
 		return fmt.Errorf("send SIGKILL to process group: %w", err)
@@ -43,7 +43,7 @@ func terminate(cmd *exec.Cmd, grace time.Duration, killTree func() error) error 
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(-cmd.Process.Pid, 0); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
+			if processGroupGone(err) {
 				return nil
 			}
 			return fmt.Errorf("probe process group after SIGKILL: %w", err)
@@ -51,4 +51,14 @@ func terminate(cmd *exec.Cmd, grace time.Duration, killTree func() error) error 
 		time.Sleep(10 * time.Millisecond)
 	}
 	return fmt.Errorf("process group did not exit after SIGKILL")
+}
+
+// processGroupGone reports whether a signal or probe failure means the group
+// this executor started no longer exists. ESRCH says so directly. EPERM says it
+// too: every process in our own group runs as this user, so the only way the
+// kernel can refuse the signal is that the group number was recycled by a
+// process belonging to somebody else, which the system does readily under a
+// load that starts many processes.
+func processGroupGone(err error) bool {
+	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.EPERM)
 }

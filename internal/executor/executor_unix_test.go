@@ -9,6 +9,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strconv"
 	"syscall"
@@ -34,6 +35,26 @@ func TestExecuteCancellationKillsProcessGroup(t *testing.T) {
 	result := executeTree(ctx, t, time.Second)
 	if result.Status != runstore.StatusCancelled {
 		t.Fatalf("result = %#v, want cancelled", result)
+	}
+}
+
+func TestProcessGroupGoneAcceptsRecycledGroupNumber(t *testing.T) {
+	for _, test := range []struct {
+		err  error
+		name string
+		want bool
+	}{
+		{name: "no such process", err: syscall.ESRCH, want: true},
+		{name: "recycled group number", err: syscall.EPERM, want: true},
+		{name: "wrapped recycled group number", err: fmt.Errorf("probe: %w", syscall.EPERM), want: true},
+		{name: "invalid argument", err: syscall.EINVAL, want: false},
+		{name: "unrelated failure", err: errors.New("failed"), want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := processGroupGone(test.err); got != test.want {
+				t.Fatalf("processGroupGone(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
 	}
 }
 
