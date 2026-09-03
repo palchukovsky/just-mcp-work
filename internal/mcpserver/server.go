@@ -55,11 +55,13 @@ func listTasksDescription() string {
 // runShellCommandDescription describes the ad-hoc escape hatch of this server.
 func runShellCommandDescription() string {
 	return "Run a genuinely ad-hoc shell command outside the discovered or withheld task " +
-		"surfaces, and only when a compact receipt is worth more than the full output. A task " +
+		"surfaces whenever a receipt or tail answers the question. A task " +
 		"may be absent because the operator withheld it through a runner mode; never recreate " +
 		"or run that task through this or another shell path. Prefer run_task/start_task for a " +
-		"discovered task, and a normal shell when an ad-hoc command's own output is the answer. " +
-		"A running receipt with promoted: true is normal: follow its run_id instead of retrying " +
+		"discovered task; use a normal shell only when its output is too large for a tail. " +
+		"A short tail can be requested in the same call with tail_bytes; it returns the last N " +
+		"bytes of each stream rather than the whole log, which is read with get_run_logs. A " +
+		"running receipt with promoted: true is normal: follow its run_id instead of retrying " +
 		"the command."
 }
 
@@ -220,9 +222,11 @@ func (s *Server) Run(ctx context.Context) error {
 		&mcp.Tool{
 			Name: "run_task",
 			Description: "Run one discovered task. Arguments are positional values; for a task with " +
-				"declared parameters, name=value arguments are rejected. A running receipt with " +
-				"promoted: true is normal: use its run_id with wait_run or get_run_status, never " +
-				"start the task again.",
+				"declared parameters, name=value arguments are rejected. A short tail can be requested " +
+				"in the same call with tail_bytes; it returns the last N bytes of each stream rather " +
+				"than the whole log, which is read with get_run_logs. A running receipt with promoted: " +
+				"true is normal: use its run_id with wait_run or get_run_status, never start the task " +
+				"again.",
 		},
 		recoverTool(withUpdateNotification(s, s.runTask)),
 	)
@@ -918,6 +922,7 @@ type runTaskInput struct {
 	TaskID      string   `json:"task_id" jsonschema:"task ID returned by list_tasks"`
 	Arguments   []string `json:"arguments,omitempty" jsonschema:"positional task values; tasks with declared parameters reject name=value forms"`
 	MaxWaitMS   *int64   `json:"max_wait_ms,omitempty" jsonschema:"wait up to this many milliseconds; 0 starts immediately, -1 waits for completion"`
+	TailBytes   *int64   `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail; omit to leave a completed receipt unchanged, zero disables tails"`
 }
 
 //nolint:govet // Embedded result precedes the structured MCP error by contract.
@@ -965,11 +970,14 @@ func (s *Server) runTask(
 	if err != nil {
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
+	if err := validateTailBytes(input.TailBytes); err != nil {
+		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+	}
 	run, stats, output := s.startTaskRun(ctx, input)
 	if run == nil {
 		return mcpErrorFor(output), output, nil
 	}
-	return nil, s.waitForSyncReceipt(ctx, request, run, stats, wait), nil
+	return nil, s.waitForSyncReceipt(ctx, request, run, stats, wait, input.TailBytes), nil
 }
 
 type startTaskInput struct {
@@ -1111,6 +1119,7 @@ type runShellCommandInput struct {
 	Command          string `json:"command" jsonschema:"command text interpreted by the operating system shell"`
 	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"workspace-relative directory, default root"`
 	MaxWaitMS        *int64 `json:"max_wait_ms,omitempty" jsonschema:"wait up to this many milliseconds; 0 starts immediately, -1 waits for completion"`
+	TailBytes        *int64 `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail; omit to leave a completed receipt unchanged, zero disables tails"`
 }
 
 func (s *Server) runShellCommand(
@@ -1122,11 +1131,14 @@ func (s *Server) runShellCommand(
 	if err != nil {
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
+	if err := validateTailBytes(input.TailBytes); err != nil {
+		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+	}
 	run, stats, output := s.startShellRun(ctx, input)
 	if run == nil {
 		return mcpErrorFor(output), output, nil
 	}
-	return nil, s.waitForSyncReceipt(ctx, request, run, stats, wait), nil
+	return nil, s.waitForSyncReceipt(ctx, request, run, stats, wait, input.TailBytes), nil
 }
 
 type startShellCommandInput struct {
@@ -1281,6 +1293,7 @@ func (s *Server) waitForSyncReceipt(
 	run *executor.Run,
 	stats *runstats.Stats,
 	wait syncWait,
+	tailBytes *int64,
 ) runTaskOutput {
 	stopProgress := s.progressReporter(ctx, request, run, stats)
 	defer stopProgress()
@@ -1300,27 +1313,60 @@ func (s *Server) waitForSyncReceipt(
 			s.config.Logger.Error("task ledger finalization failed", "run_id", run.Snapshot().RunID, "error", err)
 		}
 		s.stats.Invalidate()
-		return finishedReceipt(run.Snapshot(), s.store.WorktreeRoot(), stats)
+		return s.finishedReceipt(run.Snapshot(), stats, tailBytes)
 	case <-ctx.Done():
 		if err := run.Stop(); err != nil {
 			s.config.Logger.Error("cancel task run failed", "run_id", run.Snapshot().RunID, "error", err)
 		}
 		s.stats.Invalidate()
-		return finishedReceipt(run.Snapshot(), s.store.WorktreeRoot(), stats)
+		return s.finishedReceipt(run.Snapshot(), stats, tailBytes)
 	case <-timeout:
 		return s.runningReceipt(run, stats, true)
 	}
 }
 
 // finishedReceipt keeps the completed synchronous receipt bound to its ledger identity.
-func finishedReceipt(
+func (s *Server) finishedReceipt(
 	result executor.Result,
-	worktreeRoot string,
 	stats *runstats.Stats,
+	tailBytes *int64,
 ) runTaskOutput {
+	if tailBytes != nil {
+		s.attachTails(&result, *tailBytes)
+	}
 	return runTaskOutput{
 		Result:     result,
-		runDetails: receiptDetails(worktreeRoot, stats),
+		runDetails: receiptDetails(s.store.WorktreeRoot(), stats),
+	}
+}
+
+func (s *Server) attachTails(result *executor.Result, tailBytes int64) {
+	result.StdoutTail = ""
+	result.StderrTail = ""
+	if tailBytes <= 0 {
+		return
+	}
+	stdout, err := s.store.ReadLogTail(result.RunID, "stdout", tailBytes)
+	if err != nil {
+		s.config.Logger.Warn(
+			"read task log tail failed",
+			"run_id", result.RunID,
+			"stream", "stdout",
+			"error", err,
+		)
+	} else {
+		result.StdoutTail = string(stdout)
+	}
+	stderr, err := s.store.ReadLogTail(result.RunID, "stderr", tailBytes)
+	if err != nil {
+		s.config.Logger.Warn(
+			"read task log tail failed",
+			"run_id", result.RunID,
+			"stream", "stderr",
+			"error", err,
+		)
+	} else {
+		result.StderrTail = string(stderr)
 	}
 }
 
@@ -1853,16 +1899,7 @@ func (s *Server) statusOutput(
 	if run != nil {
 		result = run.Snapshot()
 	}
-	result.StdoutTail = ""
-	result.StderrTail = ""
-	if tailBytes > 0 {
-		if stdout, tailErr := s.store.ReadLogTail(runID, "stdout", tailBytes); tailErr == nil {
-			result.StdoutTail = string(stdout)
-		}
-		if stderr, tailErr := s.store.ReadLogTail(runID, "stderr", tailBytes); tailErr == nil {
-			result.StderrTail = string(stderr)
-		}
-	}
+	s.attachTails(&result, tailBytes)
 	details, err := s.runDetails(meta, predicted)
 	if err != nil {
 		return runStatusOutput{}, err
@@ -2034,12 +2071,22 @@ func statusMessage(status runstore.Status) string {
 	}
 }
 
+func validateTailBytes(value *int64) error {
+	if value == nil {
+		return nil
+	}
+	if *value < 0 || *value > 65536 {
+		return fmt.Errorf("tail_bytes must be between 0 and 65536")
+	}
+	return nil
+}
+
 func statusTailBytes(value *int64) (int64, error) {
 	if value == nil {
 		return 4096, nil
 	}
-	if *value < 0 || *value > 65536 {
-		return 0, fmt.Errorf("tail_bytes must be between 0 and 65536")
+	if err := validateTailBytes(value); err != nil {
+		return 0, err
 	}
 	return *value, nil
 }

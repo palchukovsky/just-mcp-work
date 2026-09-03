@@ -52,24 +52,26 @@ func Prompt(betaTest bool) string {
 
 const promptText = `This workspace exposes its runnable project tasks through just-mcp-work (JMW).
 
-JMW exists to save tokens, not to wrap every command. Route work through it when
-the full output is not what you need, and run the command directly when it is.
+JMW exists to save tokens, not to wrap every command. Route work through it
+whenever a receipt or a tail answers the question, and run directly only when
+the output you need is too large for a tail.
 
 USE JMW WHEN
 - You only need to know whether something worked - build, test, lint, format,
-  check/verify gates. The receipt carries status, exit code, and short output
-  tails instead of the whole log.
-- You only need a slice of the output: the failing tail, or a byte range of a
-  large log.
+  check/verify gates. The receipt carries status and exit code; it may add
+  short output tails on failure or a nonzero tail request.
+- You need trailing output: set tail_bytes (1..65536) on run_task or
+  run_shell_command; use get_run_logs for an arbitrary byte range of a large log.
 - The command is long or should not block: start_task returns a run_id at once,
   wait_run and get_run_status follow it, stop_run ends it.
 - You delegate. Give sub-agents, workflow stages, and other executors the same
   rule, so a delegated build does not pour a full log into their context either.
 
 RUN IT DIRECTLY WHEN
-- The output itself is the answer: git diff, search results, source excerpts,
-  generated reports, or anything the user asked to see in full. Sending that
-  through JMW pays for the same text twice and buys nothing.
+- The output itself is the answer and is too large for a tail: git diff, search
+  results, source excerpts, generated reports, or anything the user asked to
+  see in full. Sending that through JMW pays for the same text twice and buys
+  nothing.
 
 SPEND AS FEW TOKENS AS THE WORK ALLOWS
 - On success, trust the receipt. ok: true with exit code 0 is the answer; do not
@@ -77,7 +79,8 @@ SPEND AS FEW TOKENS AS THE WORK ALLOWS
   output.
 - On failure, start with stdout_tail and stderr_tail. Reach for get_run_logs only
   when the tails do not explain the failure.
-- Use tail_bytes: 0 on status tools when even the tails are noise.
+- Use tail_bytes: 0 to clear both tails. Omitted tail_bytes means 4096 bytes on
+  status tools, but leaves run_task and run_shell_command receipts unchanged.
 - A receipt with status: running and a run_id is normal, not a failure: follow it
   with wait_run or get_run_status, and never launch the same task twice.
 
@@ -106,15 +109,16 @@ HOW TO DRIVE IT
 // the server is attached, so the two must not drift apart.
 const managedBlockText = `This workspace uses just-mcp-work (JMW) for its runnable tasks; the JMW MCP
 server itself carries the full usage rules. Core rule: JMW is there to save
-tokens. Run a task through it (list_tasks -> run_task/start_task) whenever you do
-not need the full output - build, test, lint, format, check/verify gates - and
-trust its receipt instead of re-reading the log of a successful run. Run a
-command directly when its full output is the thing you actually need. Pass the
-same rule on to sub-agents and other executors. A task may be absent because the
-operator withheld it through a runner mode; never recreate or run such a task
-through run_shell_command, start_shell_command, or another shell path. Shell
-tools remain available for genuinely ad-hoc commands outside the discovered or
-withheld task surfaces.`
+tokens. Run a task through it (list_tasks -> run_task/start_task) whenever a
+receipt or short tail is enough for a build, test, lint, format, or check/verify
+gate, and trust its receipt instead of re-reading the log of a successful run.
+Request a short output slice in the same call with tail_bytes on run_task or
+run_shell_command. Run a command directly only when the full output you need is
+too large for a tail. Pass the same rule on to sub-agents and other executors. A
+task may be absent because the operator withheld it through a runner mode; never
+recreate or run such a task through run_shell_command, start_shell_command, or
+another shell path. Shell tools remain available for genuinely ad-hoc commands
+outside the discovered or withheld task surfaces.`
 
 const betaTestManagedBlockText = `This workspace beta-tests just-mcp-work (JMW) itself. Report any JMW bug, friction,
 missing capability, or improvement that would help you work better. Include the

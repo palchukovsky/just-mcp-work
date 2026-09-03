@@ -28,16 +28,15 @@ JMW removes both costs.
   Compose manifests, and `go.mod` files are parsed when asked. The agent
   requests one project or one task and gets that, not a catalog.
 - **A receipt instead of a log.** A finished run answers with status, exit
-  code, and duration. Output tails are attached only when the run failed. The
-  full `stdout` and `stderr` stay on disk, one call away.
+  code, and duration; by default, tails appear only on failure. `tail_bytes`
+  can request them on success. The full `stdout` and `stderr` stay on disk.
 - **Background runs.** A slow run is promoted to the background with a `run_id`
   that can be polled, waited on, or stopped, so a check gate never blocks the
   turn.
 
-The rule that follows: route a command through JMW when you need to know
-*whether* it worked, and use a normal shell when its output *is* the answer -
-`git diff`, a search, a generated report. Sending text you must read in full
-through JMW pays for it twice.
+Route a command through JMW whenever a receipt or tail answers the question;
+use a normal shell only when the output you need is too large for a tail.
+Sending text you must read in full through JMW pays twice.
 
 ## The object model
 
@@ -302,16 +301,22 @@ normal receipt with an explanation in `message`, not as a tool error.
 
 ### What a receipt actually contains
 
-- **Success.** `ok: true`, `exit_code: 0`, `duration_ms`, `status: ok` - and no
-  output tails at all. Trust it; do not fetch logs to re-check a green run.
+- **Success.** `ok: true`, `exit_code: 0`, `duration_ms`, `status: ok` - no
+  tails by default; `tail_bytes` can request them. Trust it; do not fetch logs.
 - **Failure.** The same fields plus `stdout_tail` and `stderr_tail`. On a run
   that finished synchronously each tail holds up to the last 64 KiB of that
   stream.
+- **Requested synchronous tails.** `run_task` and `run_shell_command` accept
+  `tail_bytes`. Omit it to leave the receipt above unchanged. `0` clears both
+  tails; `1..65536` replaces both with up to the last N bytes from the ledger,
+  and a read failure leaves that stream's tail empty. A value outside that
+  range fails before the run begins with
+  `tail_bytes must be between 0 and 65536`.
 - **Promotion.** `status: running`, `promoted: true`, `run_id`, and up to 4096
   bytes of each tail so far.
 - **Status calls.** `get_run_status`, `wait_run`, and `stop_run` read tails
-  from disk, `tail_bytes` per stream: default 4096, maximum 65536, `0` disables
-  them.
+  from disk: `tail_bytes` per stream, default 4096 unlike the run tools above,
+  maximum 65536, `0` disables them.
 
 Receipts for a live or finished run also carry lifecycle detail worth reading
 before you act: `completed`, `process_alive`, `owned_by_this_server`,
@@ -351,12 +356,12 @@ Discovery:
 Execution:
 
 - **`run_task`** - run a discovered task and wait a bounded time. Inputs:
-  `project_path`, `task_id`, `arguments`, `max_wait_ms`.
-- **`start_task`** - start it in the background and return a `run_id`. Same
-  inputs without the wait.
+  `project_path`, `task_id`, `arguments`, `max_wait_ms`, `tail_bytes`.
+- **`start_task`** - background; returns a `run_id`. Inputs: `project_path`,
+  `task_id`, `arguments`.
 - **`run_shell_command`** - an ad-hoc command with a receipt. Inputs:
-  `command`, `working_directory`, `max_wait_ms`.
-- **`start_shell_command`** - the same, in the background.
+  `command`, `working_directory`, `max_wait_ms`, `tail_bytes`.
+- **`start_shell_command`** - background; inputs: `command`, `working_directory`.
 
 Observation:
 
@@ -448,13 +453,13 @@ usually waiting on something, not hung.
 
 **Run something that has no task.** Use `run_shell_command` with a
 workspace-relative `working_directory`, default `.`, and only when a compact
-receipt is worth more than the full output. Shell runs land in the same ledger
-under the task ID `shell:command`, so `list_runs` and `get_run_logs` work on
-them too.
+receipt or a `tail_bytes` output slice is worth more than the full output. Shell
+runs land in the same ledger under the task ID `shell:command`, so `list_runs`
+and `get_run_logs` work on them too.
 
-**Do not route through JMW** anything whose full output you must read or
-quote: `git diff`, `git log`, searches, source excerpts, generated reports, or
-output the user asked to see. Use a normal shell or a read tool for those.
+**Do not route through JMW** output you must read or quote when it is too large
+for a tail: `git diff`, `git log`, searches, source excerpts, generated reports,
+or output the user asked to see. Use a normal shell or a read tool for those.
 
 **When you delegate**, carry these rules into the sub-agent's prompt. A
 delegated build that pours a full log into its own context defeats the purpose.

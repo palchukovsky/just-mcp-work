@@ -1242,14 +1242,25 @@ func resolvedTestPath(t *testing.T, path string) string {
 
 // TestPromptDescribesTheTokenSavingContract keeps the two halves of the contract
 // in the served instructions: when a compact receipt replaces the output, and
-// when the output itself is the reason not to use this server at all.
+// when output too large for a tail is the reason not to use this server at all.
 func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
+	const qualifiedRoutingRule = "Route work through it whenever a receipt or a tail answers the " +
+		"question, and run directly only when the output you need is too large for a tail."
+	const unqualifiedRoutingRule = "Route work through it when the full output is not what you " +
+		"need, and run the command directly when it is."
+	flat := strings.Join(strings.Fields(Prompt(false)), " ")
+	if !strings.Contains(flat, qualifiedRoutingRule) {
+		t.Errorf("Prompt does not state the qualified routing rule: %s", flat)
+	}
+	if strings.Contains(flat, unqualifiedRoutingRule) {
+		t.Error("Prompt retains the unqualified routing rule")
+	}
 	for _, expected := range []string{
 		"just-mcp-work (JMW)",
 		"save tokens",
 		"USE JMW WHEN",
 		"RUN IT DIRECTLY WHEN",
-		"output itself is the answer",
+		"too large for a tail",
 		"delegate",
 		"run_shell_command",
 		"working_directory",
@@ -1264,6 +1275,8 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"stderr_tail",
 		"get_run_logs",
 		"tail_bytes: 0",
+		"Omitted tail_bytes means 4096 bytes on status tools",
+		"leaves run_task and run_shell_command receipts unchanged",
 		"first 160 runes",
 		"first description line",
 		"names, name_prefix, and query are mutually exclusive",
@@ -1273,7 +1286,7 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"Never recreate or run such a task",
 		"genuinely ad-hoc commands",
 	} {
-		if !strings.Contains(Prompt(false), expected) {
+		if !strings.Contains(flat, expected) {
 			t.Errorf("Prompt does not mention %q", expected)
 		}
 	}
@@ -1286,8 +1299,9 @@ func TestManagedBlockCarriesTheSameContract(t *testing.T) {
 	flat := strings.Join(strings.Fields(managedBlockText), " ")
 	for _, expected := range []string{
 		"list_tasks -> run_task/start_task",
-		"do not need the full output",
-		"directly when its full output",
+		"receipt or short tail is enough",
+		"tail_bytes on run_task or run_shell_command",
+		"too large for a tail",
 		"sub-agents",
 		"withheld it through a runner mode",
 		"another shell path",
@@ -1321,10 +1335,11 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 	shared := []string{
 		serverName + " (JMW)",
 		"save tokens",
-		"full output",
 		"list_tasks",
 		"run_task",
 		"start_task",
+		"tail_bytes",
+		"too large for a tail",
 	}
 	for name, text := range map[string]string{
 		"plain prompt":  strings.Join(strings.Fields(Prompt(false)), " "),

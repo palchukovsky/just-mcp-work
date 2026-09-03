@@ -138,6 +138,7 @@ func TestDirectHandlerFlow(t *testing.T) {
 		t.Fatalf("listProjects = %#v, %v", projects, err)
 	}
 	projectPath := projects.Projects[0].RelPath
+	tailBytes := int64(4096)
 	_, tasks, err := server.listTasks(context.Background(), nil, listTasksInput{ProjectPath: projectPath})
 	if err != nil || len(tasks.Tasks) != 1 || tasks.Tasks[0].ID != "fake:echo" {
 		t.Fatalf("listTasks = %#v, %v", tasks, err)
@@ -147,9 +148,13 @@ func TestDirectHandlerFlow(t *testing.T) {
 		ProjectPath: projectPath,
 		TaskID:      "fake:echo",
 		Arguments:   []string{"one", "two"},
+		TailBytes:   &tailBytes,
 	})
 	if err != nil || !receipt.OK || receipt.RunID == "" || receipt.Status != runstore.StatusOK {
 		t.Fatalf("runTask = %#v, %v", receipt, err)
+	}
+	if receipt.StdoutTail != "helper stdout" || receipt.StderrTail != "helper stderr" {
+		t.Fatalf("runTask tails = %q/%q, want helper output", receipt.StdoutTail, receipt.StderrTail)
 	}
 	_, run, err := server.getRun(context.Background(), nil, getRunInput{RunID: receipt.RunID})
 	if err != nil {

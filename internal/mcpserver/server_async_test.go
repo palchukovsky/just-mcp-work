@@ -57,6 +57,139 @@ func TestSyncReceiptCarriesStatisticsWithoutRunningFields(t *testing.T) {
 	}
 }
 
+func TestSyncShellReceiptTails(t *testing.T) {
+	requested := int64(4096)
+	small := int64(3)
+	zero := int64(0)
+	failingCommand := "printf stdout; printf stderr >&2; exit 1"
+	smallTailCommand := "printf 0123456789; printf abcdefghij >&2"
+	successTails := receiptTails{stdout: "shell-output"}
+	failingTails := receiptTails{stdout: "stdout", stderr: "stderr"}
+	smallTails := receiptTails{stdout: "789", stderr: "hij"}
+	if runtime.GOOS == "windows" {
+		failingCommand = "echo stdout & echo stderr 1>&2 & exit /b 1"
+		smallTailCommand = "echo 0123456789 & echo abcdefghij 1>&2"
+		successTails = receiptTails{stdout: "shell-output\r\n"}
+		failingTails = receiptTails{stdout: "stdout\r\n", stderr: "stderr\r\n"}
+		smallTails = receiptTails{stdout: "9\r\n", stderr: "j\r\n"}
+	}
+	for _, test := range []struct {
+		name        string
+		command     string
+		tailBytes   *int64
+		status      runstore.Status
+		wantTails   receiptTails
+		wantTailLen int
+	}{
+		{
+			name:      "requested success",
+			command:   shellOutputCommand(),
+			tailBytes: &requested,
+			status:    runstore.StatusOK,
+			wantTails: successTails,
+		},
+		{
+			name:      "omitted success",
+			command:   shellOutputCommand(),
+			status:    runstore.StatusOK,
+			wantTails: receiptTails{},
+		},
+		{
+			name:      "omitted failing preserves compact tails",
+			command:   failingCommand,
+			status:    runstore.StatusNonzero,
+			wantTails: failingTails,
+		},
+		{
+			name:      "zero failing",
+			command:   failingCommand,
+			tailBytes: &zero,
+			status:    runstore.StatusNonzero,
+			wantTails: receiptTails{},
+		},
+		{
+			name:        "requested small tail",
+			command:     smallTailCommand,
+			tailBytes:   &small,
+			status:      runstore.StatusOK,
+			wantTails:   smallTails,
+			wantTailLen: int(small),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := newShellTestServer(t, t.TempDir())
+			_, receipt, err := server.runShellCommand(
+				context.Background(),
+				nil,
+				runShellCommandInput{Command: test.command, TailBytes: test.tailBytes},
+			)
+			if err != nil || receipt.Status != test.status {
+				t.Fatalf("runShellCommand = %#v, %v", receipt, err)
+			}
+			gotTails := receiptTails{stdout: receipt.StdoutTail, stderr: receipt.StderrTail}
+			if gotTails != test.wantTails {
+				t.Fatalf("receipt tails = %#v, want %#v", gotTails, test.wantTails)
+			}
+			if test.wantTailLen > 0 &&
+				(len(receipt.StdoutTail) != test.wantTailLen || len(receipt.StderrTail) != test.wantTailLen) {
+				t.Fatalf(
+					"tail lengths = %d/%d, want %d",
+					len(receipt.StdoutTail),
+					len(receipt.StderrTail),
+					test.wantTailLen,
+				)
+			}
+		})
+	}
+}
+
+type receiptTails struct {
+	stdout string
+	stderr string
+}
+
+func TestSyncShellTailBytesRejectBeforeRunStart(t *testing.T) {
+	for _, tailBytes := range []int64{-1, 65537} {
+		t.Run(strconv.FormatInt(tailBytes, 10), func(t *testing.T) {
+			root := t.TempDir()
+			server := newShellTestServer(t, root)
+			marker := filepath.Join(root, "tail-bytes-marker")
+			result, receipt, err := server.runShellCommand(
+				context.Background(),
+				nil,
+				runShellCommandInput{
+					Command:   shellMarkerCommand(marker),
+					TailBytes: &tailBytes,
+				},
+			)
+			if err != nil || result == nil || !result.IsError ||
+				receipt.Error == nil || receipt.Error.Message != "tail_bytes must be between 0 and 65536" {
+				t.Fatalf("invalid tail_bytes result = %#v, %#v, %v", result, receipt, err)
+			}
+			page, listErr := server.store.ListRecent(1)
+			if listErr != nil || len(page.Runs) != 0 {
+				t.Fatalf("runs after invalid tail_bytes = %#v, %v", page, listErr)
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Fatalf("invalid tail_bytes started command: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestSyncShellTailBytesAcceptsUpperBound(t *testing.T) {
+	tailBytes := int64(65536)
+	server := newShellTestServer(t, t.TempDir())
+	result, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: shellOutputCommand(), TailBytes: &tailBytes},
+	)
+	if err != nil || result != nil || receipt.Status != runstore.StatusOK {
+		t.Fatalf("tail_bytes=65536 = %#v, %#v, %v, want a completed run", result, receipt, err)
+	}
+}
+
 func TestSyncWaitBounds(t *testing.T) {
 	server := newShellTestServer(t, t.TempDir())
 	immediate := int64(0)
