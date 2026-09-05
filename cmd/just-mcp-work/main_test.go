@@ -5,6 +5,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -85,10 +86,10 @@ type erroringWriter struct {
 }
 
 func defaultRunnerInput() *strings.Reader {
-	return strings.NewReader(strings.Repeat("\n", 6))
+	return strings.NewReader(strings.Repeat("\n", 7))
 }
 
-func initArgsWithoutQuestions(dir string) []string {
+func initArgsWithRunnerModes(dir string) []string {
 	return []string{
 		"--dir", dir,
 		"--agents", "codex",
@@ -100,6 +101,18 @@ func initArgsWithoutQuestions(dir string) []string {
 		"--runner-mode", "go=safe",
 		"--runner-mode", "make=all",
 	}
+}
+
+func initArgsWithoutQuestions(dir string) []string {
+	return initArgsWithRunnerModes(dir)
+}
+
+func initArgsWithClaudeShellQuestion(dir string) []string {
+	return append(
+		initArgsWithRunnerModes(dir),
+		"--agents", "claude",
+		"--claude-permissions", "yes",
+	)
 }
 
 func initializeWorkspaceMode(t *testing.T, dir string, betaTest bool) {
@@ -339,7 +352,7 @@ func TestInitRunnerQuestionRepromptsAndSharesInputWithClaudeConfirmation(t *test
 	// typed in the wrong case, which must be rejected literally rather than
 	// silently lowercased. The remaining lines answer the repeated Just
 	// question, the other runner questions, and the Claude confirmation.
-	input := strings.NewReader("safe\nall\nsafe\nall\nall\nSAFE\nsafe\nall\ny\n")
+	input := strings.NewReader("safe\nall\nsafe\nall\nall\nSAFE\nsafe\nall\n\ny\n")
 	err := initCommandWithIO(
 		false,
 		[]string{"--dir", dir, "--agents", "claude"},
@@ -1452,7 +1465,12 @@ func TestInitWritesClaudePermissionsWithFlag(t *testing.T) {
 	dir := t.TempDir()
 	initErr := initCommandWithIO(
 		false,
-		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "yes"},
+		[]string{
+			"--dir", dir,
+			"--agents", "claude",
+			"--claude-permissions", "yes",
+			"--shell-permission", "allow",
+		},
 		defaultRunnerInput(),
 		io.Discard,
 		io.Discard,
@@ -1480,7 +1498,12 @@ func TestInitKeepsClaudePermissionsWhenDeclinedByFlag(t *testing.T) {
 	dir := t.TempDir()
 	initErr := initCommandWithIO(
 		false,
-		[]string{"--dir", dir, "--agents", "claude", "--claude-permissions", "no"},
+		[]string{
+			"--dir", dir,
+			"--agents", "claude",
+			"--claude-permissions", "no",
+			"--shell-permission", "ask",
+		},
 		defaultRunnerInput(),
 		io.Discard,
 		io.Discard,
@@ -1541,6 +1564,7 @@ func TestInitClaudeConfirmationAbortsOnNonEOFReadFailure(t *testing.T) {
 			"--runner-mode", "docker=all",
 			"--runner-mode", "go=safe",
 			"--runner-mode", "make=all",
+			"--shell-permission", "ask",
 		},
 		erroringReader{err: readErr},
 		io.Discard,
@@ -1560,6 +1584,434 @@ func TestInitClaudeConfirmationAbortsOnNonEOFReadFailure(t *testing.T) {
 func TestInitRejectsUnsupportedClaudePermissionsMode(t *testing.T) {
 	err := initCommand([]string{"--dir", t.TempDir(), "--claude-permissions", "maybe"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported Claude permission mode") {
+		t.Fatalf("initCommand error = %v", err)
+	}
+}
+
+func TestInitShellPermissionFlagSkipsPrompt(t *testing.T) {
+	for _, testCase := range []struct {
+		args func(string) []string
+		name string
+	}{
+		{
+			name: "Claude settings surface",
+			args: initArgsWithClaudeShellQuestion,
+		},
+		{
+			name: "Codex config surface",
+			args: func(dir string) []string {
+				return append(initArgsWithRunnerModes(dir), "--write-mcp-config=true")
+			},
+		},
+		{
+			name: "no permission surface",
+			args: initArgsWithRunnerModes,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var diagnostics bytes.Buffer
+			args := append(testCase.args(dir), "--shell-permission", "ask")
+			err := initCommandWithIO(
+				false,
+				args,
+				erroringReader{err: errors.New("input must not be read")},
+				io.Discard,
+				&diagnostics,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(diagnostics.String(), "How should the Claude permission lists") {
+				t.Fatalf("--shell-permission path prompted:\n%s", diagnostics.String())
+			}
+		})
+	}
+}
+
+func TestInitRunnerChoiceLineMatchesPermissionRequest(t *testing.T) {
+	catalog, err := runnerCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := catalog.PermissionRequests()[1]
+	choice := request.Choices[0]
+	offer := enumeratedOffer{value: string(choice.Mode), current: true}
+	var output bytes.Buffer
+	console := initConsole{
+		input:  bufio.NewReader(strings.NewReader("\n")),
+		output: &output,
+	}
+	mode, err := console.askRunnerMode(request, offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != choice.Mode {
+		t.Fatalf("selected runner mode = %q, want %q", mode, choice.Mode)
+	}
+	wantLine := fmt.Sprintf(
+		"  %s%s - %s: %s\n",
+		choice.Mode,
+		enumeratedChoiceLabel(string(choice.Mode), string(request.Default), offer),
+		choice.Label,
+		choice.Description,
+	)
+	if !strings.Contains(output.String(), wantLine) {
+		t.Fatalf("runner choice line missing %q:\n%s", wantLine, output.String())
+	}
+}
+
+func TestInitNormalizesAgentsBeforeAskingShellPermission(t *testing.T) {
+	dir := t.TempDir()
+	args := append(
+		initArgsWithRunnerModes(dir),
+		"--agents", "Claude",
+		"--claude-permissions", "yes",
+	)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatalf("mixed-case Claude init error = %v, want nil", err)
+	}
+	if !strings.Contains(diagnostics.String(), "Shell permission") {
+		t.Fatalf("mixed-case Claude init did not ask for shell permission:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitEmptyAgentSelectionOffersCurrentShellPermission(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	runRule := agentinit.ClaudeToolPrefix + "run_shell_command"
+	startRule := agentinit.ClaudeToolPrefix + "start_shell_command"
+	settings := `{"permissions":{"allow":["` + runRule + `","` + startRule + `"]}}`
+	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := append(
+		initArgsWithRunnerModes(dir),
+		"--agents", "",
+		"--claude-permissions", "yes",
+	)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"allow (current)", "Shell permission [allow, current]:"} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("empty agent selection prompt lacks %q:\n%s", want, diagnostics.String())
+		}
+	}
+}
+
+func TestInitClaudePermissionNoWithoutMCPConfigDoesNotAskShellPermission(t *testing.T) {
+	dir := t.TempDir()
+	args := append(
+		initArgsWithRunnerModes(dir),
+		"--agents", "claude",
+		"--claude-permissions", "no",
+	)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		erroringReader{err: errors.New("input must not be read")},
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diagnostics.String(), "How should the Claude permission lists") {
+		t.Fatalf("Claude permission cleanup asked for shell permission:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitClaudeConfirmationShowsResolvedShellPermission(t *testing.T) {
+	dir := t.TempDir()
+	args := append(
+		initArgsWithRunnerModes(dir),
+		"--agents",
+		"claude",
+		"--shell-permission",
+		"allow",
+	)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("yes\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	shellRule := agentinit.ClaudeToolPrefix + "run_shell_command"
+	allowStart := strings.Index(diagnostics.String(), "  allow: ")
+	if allowStart < 0 || !strings.Contains(diagnostics.String()[allowStart:], shellRule) {
+		t.Fatalf(
+			"Claude confirmation does not show the shell rule under allow:\n%s",
+			diagnostics.String(),
+		)
+	}
+	if strings.Contains(diagnostics.String(), "\n  ask:   \n") ||
+		strings.Contains(diagnostics.String(), "\n  ask:") {
+		t.Fatalf("Claude confirmation shows an empty ask list:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitInteractiveShellPermissionTakesDefaultAndReprompts(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		input      string
+		want       agentinit.ShellPermission
+		wantOutput string
+	}{
+		{
+			name:  "empty answer takes ask default",
+			input: "\n",
+			want:  agentinit.ShellPermissionAsk,
+		},
+		{
+			name:       "garbage is rejected before allow",
+			input:      "garbage\nallow\n",
+			want:       agentinit.ShellPermissionAllow,
+			wantOutput: `Unsupported shell permission "garbage"; choose one of allow, ask.`,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			var diagnostics bytes.Buffer
+			if err := initCommandWithIO(
+				false,
+				initArgsWithClaudeShellQuestion(dir),
+				strings.NewReader(testCase.input),
+				io.Discard,
+				&diagnostics,
+			); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, ".just-mcp-work", "managed.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantField := `"shell_permission": "` + string(testCase.want) + `"`
+			if !bytes.Contains(data, []byte(wantField)) {
+				t.Fatalf("manifest does not contain %s:\n%s", wantField, data)
+			}
+			if !strings.Contains(diagnostics.String(), "ask (default)") ||
+				!strings.Contains(diagnostics.String(), testCase.wantOutput) {
+				t.Fatalf("shell permission prompt = %q", diagnostics.String())
+			}
+		})
+	}
+}
+
+func TestInitInteractiveShellPermissionErrorsAtEndOfInput(t *testing.T) {
+	dir := t.TempDir()
+	err := initCommandWithIO(
+		false,
+		initArgsWithClaudeShellQuestion(dir),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "--shell-permission") {
+		t.Fatalf("init error = %v, want --shell-permission end-of-input guidance", err)
+	}
+	if _, statErr := os.Stat(policy.Path(dir)); !os.IsNotExist(statErr) {
+		t.Fatalf("unanswered shell permission wrote policy: %v", statErr)
+	}
+}
+
+func TestInitInteractiveShellPermissionOffersCurrentChoice(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	runRule := agentinit.ClaudeToolPrefix + "run_shell_command"
+	startRule := agentinit.ClaudeToolPrefix + "start_shell_command"
+	settings := `{"permissions":{"allow":["` + runRule + `","` + startRule + `"],"ask":[]}}`
+	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		initArgsWithClaudeShellQuestion(dir),
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"allow (current)",
+		"ask (default)",
+		"Shell permission [allow, current]:",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("current shell permission prompt lacks %q:\n%s", want, diagnostics.String())
+		}
+	}
+}
+
+func TestInitCodexOnlyShellPermissionRoundTripKeepsRecordedAllow(t *testing.T) {
+	dir := t.TempDir()
+	firstArgs := append(
+		initArgsWithRunnerModes(dir),
+		"--write-mcp-config=true",
+		"--shell-permission", "allow",
+	)
+	if err := initCommandWithIO(
+		false,
+		firstArgs,
+		erroringReader{err: errors.New("input must not be read")},
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	secondArgs := append(initArgsWithRunnerModes(dir), "--write-mcp-config=true")
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		secondArgs,
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"How should the Claude permission lists and Codex approval modes handle",
+		"use the Claude allow list and Codex approve mode",
+		"use the Claude ask list and Codex prompt mode",
+		"allow (current)",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("Codex-only shell permission prompt lacks %q:\n%s", want, diagnostics.String())
+		}
+	}
+	configPath := filepath.Join(dir, ".codex", "config.toml")
+	// #nosec G304 -- path is created in this test's temporary directory.
+	config, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(
+		config,
+		[]byte(`tools.run_shell_command.approval_mode = "approve"`),
+	) {
+		t.Fatalf("Codex shell approval was not kept at allow:\n%s", config)
+	}
+}
+
+func TestInitCodexOnlyIgnoresOutOfScopeMalformedClaudeSettings(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := append(initArgsWithRunnerModes(dir), "--write-mcp-config=true")
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("\n"),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatalf("Codex-only init read out-of-scope Claude settings: %v", err)
+	}
+}
+
+func TestInitInteractiveShellPermissionDoesNotOfferSplitChoiceAsCurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	runRule := agentinit.ClaudeToolPrefix + "run_shell_command"
+	startRule := agentinit.ClaudeToolPrefix + "start_shell_command"
+	settings := `{"permissions":{"allow":["` + runRule + `"],"ask":["` + startRule + `"]}}`
+	if err := os.WriteFile(path, []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		initArgsWithClaudeShellQuestion(dir),
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diagnostics.String(), "current") ||
+		!strings.Contains(diagnostics.String(), "Shell permission [ask, default]:") {
+		t.Fatalf("split shell permissions were offered as current:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitCodexOnlyWithoutMCPConfigDoesNotAskShellPermission(t *testing.T) {
+	dir := t.TempDir()
+	settingsPath := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		initArgsWithRunnerModes(dir),
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatalf("Codex-only config-free init error = %v, want nil", err)
+	}
+	if strings.Contains(diagnostics.String(), "How should the Claude permission lists") {
+		t.Fatalf("Codex-only init asked for a shell permission:\n%s", diagnostics.String())
+	}
+	manifest, err := os.ReadFile(filepath.Join(dir, ".just-mcp-work", "managed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(manifest, []byte("shell_permission")) {
+		t.Fatalf("Codex-only manifest records a shell permission:\n%s", manifest)
+	}
+}
+
+func TestInitRejectsUnsupportedShellPermission(t *testing.T) {
+	err := initCommand([]string{"--dir", t.TempDir(), "--shell-permission", "maybe"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported shell permission") {
 		t.Fatalf("initCommand error = %v", err)
 	}
 }

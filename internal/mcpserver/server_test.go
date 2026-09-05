@@ -1526,7 +1526,7 @@ func testRegistration(candidate runner.Runner) runner.Registration {
 }
 
 // TestClaudePermissionsCoverEveryRegisteredTool guards the managed Claude
-// permission list against a tool added to the server but not to the list.
+// permission lists against a tool added to the server but not to the lists.
 func TestClaudePermissionsCoverEveryRegisteredTool(t *testing.T) {
 	source, err := os.ReadFile("server.go")
 	if err != nil {
@@ -1537,20 +1537,32 @@ func TestClaudePermissionsCoverEveryRegisteredTool(t *testing.T) {
 	if len(registered) == 0 {
 		t.Fatal("no registered tools were found in server.go")
 	}
-	managed := map[string]struct{}{}
-	for _, rule := range slices.Concat(
-		agentinit.ClaudeManagedTools().Allow,
-		agentinit.ClaudeManagedTools().Ask,
-	) {
-		managed[strings.TrimPrefix(rule, agentinit.ClaudeToolPrefix)] = struct{}{}
-	}
-	for _, match := range registered {
-		if _, exists := managed[match[1]]; !exists {
-			t.Errorf("tool %q has no managed Claude permission entry", match[1])
-		}
-		delete(managed, match[1])
-	}
-	for tool := range managed {
-		t.Errorf("managed Claude permission entry %q has no registered tool", tool)
+	for _, shellPermission := range []agentinit.ShellPermission{
+		agentinit.ShellPermissionAsk,
+		agentinit.ShellPermissionAllow,
+	} {
+		t.Run(string(shellPermission), func(t *testing.T) {
+			permissions, err := agentinit.ClaudeManagedTools(shellPermission)
+			if err != nil {
+				t.Fatal(err)
+			}
+			managed := map[string]int{}
+			for _, rule := range slices.Concat(permissions.Allow, permissions.Ask) {
+				managed[strings.TrimPrefix(rule, agentinit.ClaudeToolPrefix)]++
+			}
+			for _, match := range registered {
+				if count := managed[match[1]]; count != 1 {
+					t.Errorf(
+						"tool %q has %d managed Claude permission entries, want 1",
+						match[1],
+						count,
+					)
+				}
+				delete(managed, match[1])
+			}
+			for tool := range managed {
+				t.Errorf("managed Claude permission entry %q has no registered tool", tool)
+			}
+		})
 	}
 }

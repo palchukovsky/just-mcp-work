@@ -26,6 +26,7 @@ func wantManagedManifestRecovery(root string) string {
 func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) {
 	dir := t.TempDir()
 	options := Options{
+		ShellPermission:   ShellPermissionAsk,
 		Dir:               dir,
 		Agents:            []string{"claude", "codex", "cursor", "copilot", "windsurf"},
 		WriteMCPConfig:    true,
@@ -51,6 +52,13 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 	}
 	if manifest.BetaTest {
 		t.Fatal("plain manifest beta test = true, want false")
+	}
+	if manifest.ShellPermission != string(ShellPermissionAsk) {
+		t.Fatalf(
+			"manifest shell permission = %q, want %q",
+			manifest.ShellPermission,
+			ShellPermissionAsk,
+		)
 	}
 	if manifest.SchemaVersion != manifestSchemaVersion {
 		t.Fatalf("schema version = %d, want %d", manifest.SchemaVersion, manifestSchemaVersion)
@@ -103,6 +111,7 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 func TestApplyDryRunPlansManifestWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
 	result, err := Apply(Options{
+		ShellPermission:   ShellPermissionAsk,
 		Dir:               dir,
 		Agents:            []string{"claude", "codex"},
 		DryRun:            true,
@@ -133,6 +142,7 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 	dir := t.TempDir()
 	allAgents := []string{"claude", "codex", "cursor", "copilot", "windsurf"}
 	if _, err := Apply(Options{
+		ShellPermission:   ShellPermissionAsk,
 		Dir:               dir,
 		Agents:            allAgents,
 		WriteMCPConfig:    true,
@@ -141,9 +151,14 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	result, err := Apply(Options{
-		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: testRunnerModes(t),
-	})
+	narrowOptions := Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		WriteMCPConfig:  true,
+		RunnerModes:     testRunnerModes(t),
+	}
+	result, err := Apply(narrowOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +166,14 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 	if len(result.Paths) != 1 || result.Paths[0] != manifestPath {
 		t.Fatalf("narrowed apply paths = %#v, want only manifest", result.Paths)
 	}
-	manifest, _ := readManagedManifest(t, dir)
+	manifest, manifestBeforeRepeat := readManagedManifest(t, dir)
+	if manifest.ShellPermission != string(ShellPermissionAsk) {
+		t.Fatalf(
+			"narrowed manifest shell permission = %q, want %q",
+			manifest.ShellPermission,
+			ShellPermissionAsk,
+		)
+	}
 	want := []struct {
 		path string
 		kind string
@@ -159,8 +181,28 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 		{path: "AGENTS.md", kind: manifestKindAgentInstructions},
 		{path: mcpConfig, kind: manifestKindMCPConfig},
 		{path: codexConfig, kind: manifestKindCodexConfig},
+		{path: claudeSettings, kind: manifestKindClaudeSettings},
 	}
 	assertManifestSurfaces(t, manifest.Surfaces, want)
+	if _, verifyErr := VerifyManagedSurfaces(dir); verifyErr != nil {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", verifyErr)
+	}
+
+	repeated, err := Apply(narrowOptions)
+	if err != nil {
+		t.Fatalf("repeated narrowed Apply() error = %v, want nil", err)
+	}
+	if len(repeated.Paths) != 0 {
+		t.Fatalf("repeated narrowed Apply() paths = %#v, want none", repeated.Paths)
+	}
+	_, manifestAfterRepeat := readManagedManifest(t, dir)
+	if !bytes.Equal(manifestAfterRepeat, manifestBeforeRepeat) {
+		t.Fatalf(
+			"repeated narrowed Apply() changed manifest bytes:\n%s\n%s",
+			manifestBeforeRepeat,
+			manifestAfterRepeat,
+		)
+	}
 	for _, agent := range allAgents {
 		named, _ := agentTarget(agent)
 		if _, statErr := os.Stat(filepath.Join(dir, named.path)); statErr != nil {
@@ -172,11 +214,317 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsShellPermissionChangeWithExcludedRecordedSurface(t *testing.T) {
+	for _, testCase := range []struct {
+		name       string
+		target     ShellPermission
+		wantReject bool
+	}{
+		{name: "changed choice", target: ShellPermissionAsk, wantReject: true},
+		{name: "unchanged choice", target: ShellPermissionAllow},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			modes := testRunnerModes(t)
+			if _, err := Apply(Options{
+				ShellPermission:   ShellPermissionAllow,
+				Dir:               dir,
+				Agents:            []string{"claude"},
+				WriteMCPConfig:    true,
+				RunnerModes:       modes,
+				ClaudePermissions: ClaudePermissionsYes,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := filepath.Join(dir, manifestFile)
+			_, manifestBefore := readManagedManifest(t, dir)
+			settingsPath := filepath.Join(dir, claudeSettings)
+			settingsBefore, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = Apply(Options{
+				ShellPermission: testCase.target,
+				Dir:             dir,
+				Agents:          []string{"codex"},
+				WriteMCPConfig:  true,
+				RunnerModes:     modes,
+			})
+			if !testCase.wantReject {
+				if err != nil {
+					t.Fatalf("unchanged narrow Apply() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("shell-permission-changing narrow Apply() error = nil")
+			}
+			for _, want := range []string{
+				"--agents codex",
+				claudeSettings,
+				"--agents claude,codex",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("shell-permission refusal does not contain %q: %v", want, err)
+				}
+			}
+			if strings.Contains(err.Error(), "--write-mcp-config") {
+				t.Fatalf("shell-permission refusal has obsolete MCP-config suffix: %v", err)
+			}
+			manifestAfter, readErr := os.ReadFile(manifestPath)
+			if readErr != nil || !bytes.Equal(manifestAfter, manifestBefore) {
+				t.Fatalf("refused shell permission changed manifest: %v", readErr)
+			}
+			settingsAfter, readErr := os.ReadFile(settingsPath)
+			if readErr != nil || !bytes.Equal(settingsAfter, settingsBefore) {
+				t.Fatalf("refused shell permission changed Claude settings: %v", readErr)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(statErr) {
+				t.Fatalf("refused shell permission wrote AGENTS.md: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestApplyRejectsShellPermissionChangeAfterNarrowCarryForward(t *testing.T) {
+	dir := t.TempDir()
+	modes := testRunnerModes(t)
+	confirmed := false
+	if _, err := Apply(Options{
+		ShellPermission: ShellPermissionAllow,
+		Dir:             dir,
+		WriteMCPConfig:  true,
+		RunnerModes:     modes,
+		Confirm: func(
+			permission ShellPermission,
+			_ string,
+			_ string,
+		) (bool, error) {
+			confirmed = true
+			if permission != ShellPermissionAllow {
+				t.Fatalf(
+					"confirmation shell permission = %q, want %q",
+					permission,
+					ShellPermissionAllow,
+				)
+			}
+			return true, nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !confirmed {
+		t.Fatal("initial Apply() did not confirm default Claude permissions")
+	}
+
+	if _, err := Apply(Options{
+		ShellPermission: ShellPermissionAllow,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		WriteMCPConfig:  true,
+		RunnerModes:     modes,
+	}); err != nil {
+		t.Fatalf("unchanged narrow Apply() error = %v, want nil", err)
+	}
+	_, manifestBeforeRefusal := readManagedManifest(t, dir)
+	settingsPath := filepath.Join(dir, claudeSettings)
+	settingsBeforeRefusal, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	codexPath := filepath.Join(dir, codexConfig)
+	codexBeforeRefusal, err := os.ReadFile(codexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Apply(Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		WriteMCPConfig:  true,
+		RunnerModes:     modes,
+	})
+	wantError := "cannot change shell permission with --agents codex: managed permission " +
+		"files outside the selection: " + claudeSettings +
+		"; re-run with --agents claude,codex"
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("third Apply() error = %v, want %q", err, wantError)
+	}
+
+	manifestAfterRefusal, readErr := os.ReadFile(filepath.Join(dir, manifestFile))
+	if readErr != nil || !bytes.Equal(manifestAfterRefusal, manifestBeforeRefusal) {
+		t.Fatalf("refused shell permission changed manifest: %v", readErr)
+	}
+	settingsAfterRefusal, readErr := os.ReadFile(settingsPath)
+	if readErr != nil || !bytes.Equal(settingsAfterRefusal, settingsBeforeRefusal) {
+		t.Fatalf("refused shell permission changed Claude settings: %v", readErr)
+	}
+	codexAfterRefusal, readErr := os.ReadFile(codexPath)
+	if readErr != nil || !bytes.Equal(codexAfterRefusal, codexBeforeRefusal) {
+		t.Fatalf("refused shell permission changed Codex config: %v", readErr)
+	}
+}
+
+func TestApplyShellPermissionGuardTreatsMissingRecordedValueAsAsk(t *testing.T) {
+	dir := t.TempDir()
+	modes := testRunnerModes(t)
+	if _, err := Apply(Options{
+		ShellPermission:   ShellPermissionAsk,
+		Dir:               dir,
+		Agents:            []string{"claude"},
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsYes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := readManagedManifest(t, dir)
+	manifest.ShellPermission = ""
+	writeJSONFile(t, filepath.Join(dir, manifestFile), manifest)
+
+	_, err := Apply(Options{
+		ShellPermission: ShellPermissionAllow,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		WriteMCPConfig:  true,
+		RunnerModes:     modes,
+	})
+	if err == nil || !strings.Contains(err.Error(), claudeSettings) {
+		t.Fatalf("legacy shell-permission change error = %v, want excluded %s", err, claudeSettings)
+	}
+}
+
+func TestApplyChangesShellPermissionWhileRemovingCodexConfig(t *testing.T) {
+	dir := t.TempDir()
+	modes := testRunnerModes(t)
+	if _, err := Apply(Options{
+		ShellPermission:   ShellPermissionAllow,
+		Dir:               dir,
+		Agents:            []string{"claude", "codex"},
+		WriteMCPConfig:    true,
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsYes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(Options{
+		ShellPermission:   ShellPermissionAsk,
+		Dir:               dir,
+		Agents:            []string{"claude"},
+		WriteMCPConfig:    false,
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsYes,
+	})
+	if err != nil {
+		t.Fatalf("shell-permission-changing cleanup Apply() error = %v, want nil", err)
+	}
+	manifest, _ := readManagedManifest(t, dir)
+	if manifest.ShellPermission != string(ShellPermissionAsk) {
+		t.Fatalf(
+			"cleanup manifest shell permission = %q, want %q",
+			manifest.ShellPermission,
+			ShellPermissionAsk,
+		)
+	}
+	codexPath := filepath.Join(dir, codexConfig)
+	if _, statErr := os.Stat(codexPath); !os.IsNotExist(statErr) {
+		t.Fatalf("removed Codex config still exists: %v", statErr)
+	}
+	if !containsPath(result.Paths, resolvedTestPath(t, codexPath)) {
+		t.Fatalf("cleanup paths = %#v, missing %s", result.Paths, codexPath)
+	}
+}
+
+func TestApplyCarriesShellPermissionAcrossSurfaceFreeRun(t *testing.T) {
+	dir := t.TempDir()
+	modes := testRunnerModes(t)
+	if _, err := Apply(Options{
+		ShellPermission:   ShellPermissionAllow,
+		Dir:               dir,
+		Agents:            []string{"claude"},
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsYes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, claudeSettings)
+	settingsBefore, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	surfaceFreeOptions := Options{
+		Dir:               dir,
+		Agents:            []string{"codex"},
+		WriteMCPConfig:    false,
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsNo,
+	}
+	if _, applyErr := Apply(surfaceFreeOptions); applyErr != nil {
+		t.Fatalf("permission-surface-free Apply() error = %v, want nil", applyErr)
+	}
+	manifest, manifestBeforeRepeat := readManagedManifest(t, dir)
+	if manifest.ShellPermission != string(ShellPermissionAllow) {
+		t.Fatalf(
+			"carried shell permission = %q, want %q",
+			manifest.ShellPermission,
+			ShellPermissionAllow,
+		)
+	}
+	assertManifestSurfaces(t, manifest.Surfaces, []struct {
+		path string
+		kind string
+	}{
+		{path: "AGENTS.md", kind: manifestKindAgentInstructions},
+		{path: claudeSettings, kind: manifestKindClaudeSettings},
+	})
+
+	repeated, err := Apply(surfaceFreeOptions)
+	if err != nil {
+		t.Fatalf("repeated permission-surface-free Apply() error = %v, want nil", err)
+	}
+	if len(repeated.Paths) != 0 {
+		t.Fatalf("repeated permission-surface-free Apply() paths = %#v, want none", repeated.Paths)
+	}
+	_, manifestAfterRepeat := readManagedManifest(t, dir)
+	if !bytes.Equal(manifestAfterRepeat, manifestBeforeRepeat) {
+		t.Fatalf(
+			"repeated permission-surface-free Apply() changed manifest bytes:\n%s\n%s",
+			manifestBeforeRepeat,
+			manifestAfterRepeat,
+		)
+	}
+
+	_, err = Apply(Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		WriteMCPConfig:  true,
+		RunnerModes:     modes,
+	})
+	if err == nil || !strings.Contains(err.Error(), claudeSettings) {
+		t.Fatalf("later shell-permission change error = %v, want excluded %s", err, claudeSettings)
+	}
+	manifestAfterRefusal, readErr := os.ReadFile(filepath.Join(dir, manifestFile))
+	if readErr != nil || !bytes.Equal(manifestAfterRefusal, manifestBeforeRepeat) {
+		t.Fatalf("refused shell permission changed carried manifest: %v", readErr)
+	}
+	settingsAfterRefusal, readErr := os.ReadFile(settingsPath)
+	if readErr != nil || !bytes.Equal(settingsAfterRefusal, settingsBefore) {
+		t.Fatalf("refused shell permission changed Claude settings: %v", readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, codexConfig)); !os.IsNotExist(statErr) {
+		t.Fatalf("refused shell permission wrote Codex config: %v", statErr)
+	}
+}
+
 func TestApplyWriteMCPConfigFalseOmitsConfigSurfaces(t *testing.T) {
 	dir := t.TempDir()
 	modes := testRunnerModes(t)
 	if _, err := Apply(Options{
-		Dir: dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +534,9 @@ func TestApplyWriteMCPConfigFalseOmitsConfigSurfaces(t *testing.T) {
 		t.Fatal(err)
 	}
 	manifest, _ := readManagedManifest(t, dir)
+	if manifest.ShellPermission != "" {
+		t.Fatalf("manifest shell permission = %q, want omitted", manifest.ShellPermission)
+	}
 	assertManifestSurfaces(t, manifest.Surfaces, []struct {
 		path string
 		kind string
@@ -200,6 +551,7 @@ func TestApplyWriteMCPConfigFalseOmitsConfigSurfaces(t *testing.T) {
 func TestManifestHashesIgnoreForeignJSONContent(t *testing.T) {
 	dir := t.TempDir()
 	options := Options{
+		ShellPermission:   ShellPermissionAsk,
 		Dir:               dir,
 		Agents:            []string{"claude", "codex"},
 		WriteMCPConfig:    true,
@@ -264,7 +616,8 @@ func TestManifestHashNormalizesCRLFManagedBlock(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := Apply(Options{
-			Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+			ShellPermission: ShellPermissionAsk,
+			Dir:             dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		}); err != nil {
 			t.Fatal(err)
 		}
@@ -278,7 +631,7 @@ func TestManifestHashNormalizesCRLFManagedBlock(t *testing.T) {
 
 func TestManifestOmitsRemovedOrDeclinedClaudePermissions(t *testing.T) {
 	for _, testCase := range []struct {
-		confirm     func(string, string) (bool, error)
+		confirm     func(ShellPermission, string, string) (bool, error)
 		name        string
 		permissions ClaudePermissions
 	}{
@@ -286,25 +639,35 @@ func TestManifestOmitsRemovedOrDeclinedClaudePermissions(t *testing.T) {
 		{
 			name:        "declined",
 			permissions: ClaudePermissionsAsk,
-			confirm:     func(string, string) (bool, error) { return false, nil },
+			confirm: func(ShellPermission, string, string) (bool, error) {
+				return false, nil
+			},
 		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			modes := testRunnerModes(t)
 			if _, err := Apply(Options{
-				Dir: dir, Agents: []string{"claude"}, RunnerModes: modes,
+				ShellPermission: ShellPermissionAsk,
+				Dir:             dir, Agents: []string{"claude"}, RunnerModes: modes,
 				ClaudePermissions: ClaudePermissionsYes,
 			}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := Apply(Options{
-				Dir: dir, Agents: []string{"claude"}, RunnerModes: modes,
+				ShellPermission: ShellPermissionAsk,
+				Dir:             dir, Agents: []string{"claude"}, RunnerModes: modes,
 				ClaudePermissions: testCase.permissions, Confirm: testCase.confirm,
 			}); err != nil {
 				t.Fatal(err)
 			}
 			manifest, _ := readManagedManifest(t, dir)
+			if manifest.ShellPermission != "" {
+				t.Fatalf(
+					"manifest shell permission = %q without Claude settings",
+					manifest.ShellPermission,
+				)
+			}
 			assertManifestSurfaces(t, manifest.Surfaces, []struct {
 				path string
 				kind string
@@ -320,7 +683,8 @@ func TestManifestReleaseIsContextOnly(t *testing.T) {
 
 	dir := t.TempDir()
 	if _, err := Apply(Options{
-		Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 	}); err != nil {
 		t.Fatalf("Apply rejected release context: %v", err)
 	}
@@ -474,7 +838,8 @@ func writeJSONFile(t *testing.T, path string, value any) {
 func TestManifestPrecedesPolicyInResultOrder(t *testing.T) {
 	dir := t.TempDir()
 	result, err := Apply(Options{
-		Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -502,7 +867,8 @@ func TestApplyUsesResolvedManagedManifestPath(t *testing.T) {
 	}
 
 	options := Options{
-		Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 	}
 	result, err := Apply(options)
 	if err != nil {
@@ -584,10 +950,11 @@ func TestReadRecordedBetaTestReportsUnsupportedSchemaAsUnknown(t *testing.T) {
 func TestReadRecordedBetaTestReturnsHealthyBetaMode(t *testing.T) {
 	root := t.TempDir()
 	if _, err := Apply(Options{
-		Dir:         root,
-		Agents:      []string{"codex"},
-		BetaTest:    true,
-		RunnerModes: testRunnerModes(t),
+		ShellPermission: ShellPermissionAsk,
+		Dir:             root,
+		Agents:          []string{"codex"},
+		BetaTest:        true,
+		RunnerModes:     testRunnerModes(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -628,10 +995,11 @@ func TestReadRecordedBetaTestReturnsManifestIOError(t *testing.T) {
 func TestVerifyManagedSurfacesAcceptsAndRejectsBetaBlock(t *testing.T) {
 	root := t.TempDir()
 	if _, err := Apply(Options{
-		Dir:         root,
-		Agents:      []string{"codex"},
-		BetaTest:    true,
-		RunnerModes: testRunnerModes(t),
+		ShellPermission: ShellPermissionAsk,
+		Dir:             root,
+		Agents:          []string{"codex"},
+		BetaTest:        true,
+		RunnerModes:     testRunnerModes(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -681,10 +1049,11 @@ func TestVerifyManagedSurfacesRejectsSwitchedCanonicalBlocks(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
 			if _, err := Apply(Options{
-				Dir:         root,
-				Agents:      []string{"codex"},
-				BetaTest:    test.betaTest,
-				RunnerModes: testRunnerModes(t),
+				ShellPermission: ShellPermissionAsk,
+				Dir:             root,
+				Agents:          []string{"codex"},
+				BetaTest:        test.betaTest,
+				RunnerModes:     testRunnerModes(t),
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -760,13 +1129,136 @@ func TestVerifyManagedSurfacesTreatsManifestWithoutBetaTestAsPlain(t *testing.T)
 	}
 }
 
+func TestVerifyManagedSurfacesUsesRecordedShellPermission(t *testing.T) {
+	for _, surface := range []string{"claude", "codex"} {
+		for _, shellPermission := range []ShellPermission{
+			ShellPermissionAsk,
+			ShellPermissionAllow,
+		} {
+			t.Run(surface+"/"+string(shellPermission), func(t *testing.T) {
+				root := t.TempDir()
+				options := Options{
+					ShellPermission: shellPermission,
+					Dir:             root,
+					Agents:          []string{surface},
+					RunnerModes:     testRunnerModes(t),
+				}
+				if surface == "claude" {
+					options.ClaudePermissions = ClaudePermissionsYes
+				} else {
+					options.WriteMCPConfig = true
+				}
+				if _, err := Apply(options); err != nil {
+					t.Fatal(err)
+				}
+				manifest, _ := readManagedManifest(t, root)
+				if manifest.ShellPermission != string(shellPermission) {
+					t.Fatalf(
+						"manifest shell permission = %q, want %q",
+						manifest.ShellPermission,
+						shellPermission,
+					)
+				}
+				if _, err := VerifyManagedSurfaces(root); err != nil {
+					t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
+				}
+			})
+		}
+	}
+}
+
+func TestVerifyManagedSurfacesTreatsManifestWithoutShellPermissionAsAsk(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	legacyDocument := map[string]any{
+		"schema_version": manifest.SchemaVersion,
+		"release":        manifest.Release,
+		"beta_test":      manifest.BetaTest,
+		"surfaces":       manifest.Surfaces,
+	}
+	writeJSONFile(t, filepath.Join(root, manifestFile), legacyDocument)
+
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() legacy ask error = %v, want nil", err)
+	}
+}
+
+func TestVerifyManagedSurfacesRejectsShellPermissionDisagreement(t *testing.T) {
+	for _, surface := range []string{"claude", "codex"} {
+		for _, shellPermission := range []ShellPermission{
+			ShellPermissionAsk,
+			ShellPermissionAllow,
+		} {
+			t.Run(surface+"/"+string(shellPermission), func(t *testing.T) {
+				root := t.TempDir()
+				options := Options{
+					ShellPermission: shellPermission,
+					Dir:             root,
+					Agents:          []string{surface},
+					RunnerModes:     testRunnerModes(t),
+				}
+				wantRelativePath := codexConfig
+				if surface == "claude" {
+					options.ClaudePermissions = ClaudePermissionsYes
+					wantRelativePath = claudeSettings
+				} else {
+					options.WriteMCPConfig = true
+				}
+				if _, err := Apply(options); err != nil {
+					t.Fatal(err)
+				}
+				manifest, _ := readManagedManifest(t, root)
+				if shellPermission == ShellPermissionAsk {
+					manifest.ShellPermission = string(ShellPermissionAllow)
+				} else {
+					manifest.ShellPermission = string(ShellPermissionAsk)
+				}
+				writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+
+				_, err := VerifyManagedSurfaces(root)
+				wantPath := resolvedTestPath(t, filepath.Join(root, wantRelativePath))
+				if err == nil ||
+					!strings.Contains(
+						err.Error(),
+						"generated configuration changed since it was written",
+					) ||
+					!strings.Contains(err.Error(), wantPath) {
+					t.Fatalf(
+						"VerifyManagedSurfaces() error = %v, want shell-choice refusal for %s",
+						err,
+						wantPath,
+					)
+				}
+			})
+		}
+	}
+}
+
+func TestVerifyManagedSurfacesRejectsUnknownShellPermission(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	manifest.ShellPermission = "sometimes"
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+
+	_, err := VerifyManagedSurfaces(root)
+	if err == nil ||
+		!strings.Contains(err.Error(), "unsupported shell permission") ||
+		!strings.Contains(err.Error(), wantManagedManifestRecovery(root)) {
+		t.Fatalf(
+			"VerifyManagedSurfaces() error = %v, want unknown shell permission and recovery",
+			err,
+		)
+	}
+}
+
 func TestVerifyManagedSurfacesRejectsRecordedBetaModeWithPlainBlock(t *testing.T) {
 	root := t.TempDir()
 	if _, err := Apply(Options{
-		Dir:         root,
-		Agents:      []string{"codex"},
-		BetaTest:    true,
-		RunnerModes: testRunnerModes(t),
+		ShellPermission: ShellPermissionAsk,
+		Dir:             root,
+		Agents:          []string{"codex"},
+		BetaTest:        true,
+		RunnerModes:     testRunnerModes(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1060,6 +1552,7 @@ func TestVerifyManagedSurfacesAcceptsManagedBlockWithoutFinalNewline(t *testing.
 	}
 
 	result, err := Apply(Options{
+		ShellPermission:   ShellPermissionAsk,
 		Dir:               root,
 		Agents:            []string{"claude", "codex"},
 		WriteMCPConfig:    true,
@@ -1110,7 +1603,7 @@ func TestVerifyManagedSurfacesRejectsChangesInsideOwnedJSONEntries(t *testing.T)
 				if !ok {
 					t.Fatalf("permissions = %#v, want object", document["permissions"])
 				}
-				managed := ClaudeManagedTools()
+				managed := testClaudeManagedTools(t, ShellPermissionAsk)
 				if len(managed.Allow) == 0 {
 					t.Fatal("ClaudeManagedTools().Allow is empty")
 				}
@@ -1354,6 +1847,7 @@ func applyVerificationWorkspace(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 	if _, err := Apply(Options{
+		ShellPermission:   ShellPermissionAsk,
 		Dir:               root,
 		Agents:            []string{"claude", "codex"},
 		WriteMCPConfig:    true,

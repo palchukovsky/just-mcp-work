@@ -29,10 +29,13 @@ const (
 
 //nolint:govet // Keep manifest metadata before surfaces in the stable JSON document.
 type managedManifest struct {
-	SchemaVersion int               `json:"schema_version"`
-	Release       string            `json:"release"`
-	BetaTest      bool              `json:"beta_test,omitempty"`
-	Surfaces      []manifestSurface `json:"surfaces"`
+	SchemaVersion int    `json:"schema_version"`
+	Release       string `json:"release"`
+	BetaTest      bool   `json:"beta_test,omitempty"`
+	// An omitted ShellPermission predates this field and means ask, the only
+	// shell permission those manifests could have recorded.
+	ShellPermission string            `json:"shell_permission,omitempty"`
+	Surfaces        []manifestSurface `json:"surfaces"`
 }
 
 type manifestSurface struct {
@@ -48,6 +51,7 @@ func planManifest(
 	scope string,
 	surfaces []manifestSurface,
 	betaTest bool,
+	shellPermission ShellPermission,
 	selected map[string]struct{},
 ) (*plannedEdit, error) {
 	path, err := findScopedConfig(
@@ -61,55 +65,119 @@ func planManifest(
 	if err != nil {
 		return nil, err
 	}
+	recordedShellPermission := ""
+	for _, surface := range surfaces {
+		if surface.Kind == manifestKindClaudeSettings ||
+			surface.Kind == manifestKindCodexConfig {
+			recordedShellPermission = string(shellPermission)
+			break
+		}
+	}
 	if beforeExists {
 		var recorded managedManifest
 		if decodeErr := json.Unmarshal(before, &recorded); decodeErr == nil &&
-			recorded.SchemaVersion == manifestSchemaVersion &&
-			recorded.BetaTest != betaTest {
-			var missingPaths []string
-			for _, surface := range recorded.Surfaces {
-				if surface.Kind != manifestKindAgentInstructions {
-					continue
-				}
-				for _, named := range agentTargets() {
-					if surface.Path != filepath.ToSlash(named.target.path) {
+			recorded.SchemaVersion == manifestSchemaVersion {
+			if recorded.BetaTest != betaTest {
+				var missingPaths []string
+				for _, surface := range recorded.Surfaces {
+					if surface.Kind != manifestKindAgentInstructions {
 						continue
 					}
-					if _, ok := selected[named.name]; !ok &&
-						!slices.Contains(missingPaths, surface.Path) {
-						missingPaths = append(missingPaths, surface.Path)
+					for _, named := range agentTargets() {
+						if surface.Path != filepath.ToSlash(named.target.path) {
+							continue
+						}
+						if _, ok := selected[named.name]; !ok &&
+							!slices.Contains(missingPaths, surface.Path) {
+							missingPaths = append(missingPaths, surface.Path)
+						}
+						break
 					}
-					break
+				}
+				if len(missingPaths) > 0 {
+					var selectedNames, requiredNames []string
+					for _, named := range agentTargets() {
+						_, isSelected := selected[named.name]
+						if isSelected {
+							selectedNames = append(selectedNames, named.name)
+						}
+						if isSelected ||
+							slices.Contains(missingPaths, filepath.ToSlash(named.target.path)) {
+							requiredNames = append(requiredNames, named.name)
+						}
+					}
+					return nil, fmt.Errorf(
+						"cannot change beta-test mode with --agents %s: managed agent-instruction "+
+							"files outside the selection: %s; re-run with --agents %s",
+						strings.Join(selectedNames, ","),
+						strings.Join(missingPaths, ", "),
+						strings.Join(requiredNames, ","),
+					)
 				}
 			}
-			if len(missingPaths) > 0 {
-				var selectedNames, requiredNames []string
-				for _, named := range agentTargets() {
-					_, isSelected := selected[named.name]
-					if isSelected {
-						selectedNames = append(selectedNames, named.name)
-					}
-					if isSelected ||
-						slices.Contains(missingPaths, filepath.ToSlash(named.target.path)) {
-						requiredNames = append(requiredNames, named.name)
+			if _, claudeSelected := selected["claude"]; !claudeSelected {
+				var carriedClaudeSurface *manifestSurface
+				for index := range recorded.Surfaces {
+					if recorded.Surfaces[index].Kind == manifestKindClaudeSettings {
+						carriedClaudeSurface = &recorded.Surfaces[index]
+						break
 					}
 				}
-				return nil, fmt.Errorf(
-					"cannot change beta-test mode with --agents %s: managed agent-instruction "+
-						"files outside the selection: %s; re-run with --agents %s",
-					strings.Join(selectedNames, ","),
-					strings.Join(missingPaths, ", "),
-					strings.Join(requiredNames, ","),
-				)
+				if carriedClaudeSurface != nil {
+					surfaces = append(surfaces, *carriedClaudeSurface)
+					if recordedShellPermission == "" {
+						recordedShellPermission = recorded.ShellPermission
+						if recordedShellPermission == "" {
+							recordedShellPermission = string(ShellPermissionAsk)
+						}
+					}
+				}
+			}
+			existingShellPermission := ShellPermission(recorded.ShellPermission)
+			if existingShellPermission == "" {
+				existingShellPermission = ShellPermissionAsk
+			}
+			_, claudeSelected := selected["claude"]
+			if recordedShellPermission != "" &&
+				existingShellPermission != ShellPermission(recordedShellPermission) &&
+				!claudeSelected {
+				var missingPaths []string
+				for _, recordedSurface := range recorded.Surfaces {
+					if recordedSurface.Kind != manifestKindClaudeSettings ||
+						slices.Contains(missingPaths, recordedSurface.Path) {
+						continue
+					}
+					missingPaths = append(missingPaths, recordedSurface.Path)
+				}
+				if len(missingPaths) > 0 {
+					var selectedNames, requiredNames []string
+					for _, named := range agentTargets() {
+						_, isSelected := selected[named.name]
+						if isSelected {
+							selectedNames = append(selectedNames, named.name)
+						}
+						if isSelected || named.name == "claude" {
+							requiredNames = append(requiredNames, named.name)
+						}
+					}
+					return nil, fmt.Errorf(
+						"cannot change shell permission with --agents %s: managed permission "+
+							"files outside the selection: %s; re-run with --agents %s",
+						strings.Join(selectedNames, ","),
+						strings.Join(missingPaths, ", "),
+						strings.Join(requiredNames, ","),
+					)
+				}
 			}
 		}
 	}
 	after, err := json.MarshalIndent(
 		managedManifest{
-			SchemaVersion: manifestSchemaVersion,
-			Release:       version.Current().Display(),
-			BetaTest:      betaTest,
-			Surfaces:      surfaces,
+			SchemaVersion:   manifestSchemaVersion,
+			Release:         version.Current().Display(),
+			BetaTest:        betaTest,
+			ShellPermission: recordedShellPermission,
+			Surfaces:        surfaces,
 		},
 		"",
 		"  ",
@@ -310,6 +378,37 @@ func ReadRecordedBetaTest(root string) (bool, bool, error) {
 	return manifest.BetaTest, true, nil
 }
 
+// ReadRecordedShellPermission reports the shell permission recorded in the
+// workspace manifest. A missing, legacy, malformed, or schema-incompatible
+// manifest has no recorded choice; filesystem and invalid-choice errors are
+// returned.
+func ReadRecordedShellPermission(root string) (ShellPermission, bool, error) {
+	manifestPath := filepath.Join(root, manifestFile)
+	data, exists, err := readOptionalFile(manifestPath)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, nil
+	}
+
+	var manifest managedManifest
+	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
+		manifest.SchemaVersion != manifestSchemaVersion || manifest.ShellPermission == "" {
+		//nolint:nilerr // Decode/schema failures mean no recorded shell permission; init repairs it.
+		return "", false, nil
+	}
+	permission, err := ParseShellPermission(manifest.ShellPermission)
+	if err != nil {
+		return "", false, fmt.Errorf(
+			"read shell permission from managed manifest %s: %w",
+			manifestPath,
+			err,
+		)
+	}
+	return permission, true, nil
+}
+
 // VerifyManagedSurfaces checks that the generated workspace configuration
 // recorded by the last init still matches this binary and the files on disk.
 // It returns the recorded beta-test mode after successful verification; a missing
@@ -351,6 +450,19 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			description,
 			managedManifestRecovery(root),
 		)
+	}
+	shellPermission := ShellPermissionAsk
+	if manifest.ShellPermission != "" {
+		parsed, parseErr := ParseShellPermission(manifest.ShellPermission)
+		if parseErr != nil {
+			return false, fmt.Errorf(
+				"managed manifest %s is unusable: %w; %s",
+				manifestPath,
+				parseErr,
+				managedManifestRecovery(root),
+			)
+		}
+		shellPermission = parsed
 	}
 
 	resolvedPaths := make([]string, len(manifest.Surfaces))
@@ -399,7 +511,12 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 	}
 
 	for index, recorded := range manifest.Surfaces {
-		generated, err := generatedManifestSurface(root, manifest.BetaTest, recorded)
+		generated, err := generatedManifestSurface(
+			root,
+			manifest.BetaTest,
+			shellPermission,
+			recorded,
+		)
 		if err != nil {
 			return false, fmt.Errorf(
 				"managed manifest %s is unreadable: %w; %s",
@@ -475,6 +592,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 func generatedManifestSurface(
 	root string,
 	betaTest bool,
+	shellPermission ShellPermission,
 	recorded manifestSurface,
 ) (manifestSurface, error) {
 	switch recorded.Kind {
@@ -485,7 +603,7 @@ func generatedManifestSurface(
 			[]byte(canonicalBlock(betaTest)),
 		), nil
 	case manifestKindCodexConfig:
-		content, err := mergeCodexConfig(nil, root)
+		content, err := mergeCodexConfig(nil, root, shellPermission)
 		if err != nil {
 			return manifestSurface{}, err
 		}
@@ -509,11 +627,15 @@ func generatedManifestSurface(
 		}
 		return newManifestSurface(recorded.Path, recorded.Kind, fragment), nil
 	case manifestKindClaudeSettings:
-		permissions := ClaudeManagedTools()
-		fragment, err := marshalClaudeManagedFragment(map[string][]string{
-			"allow": permissions.Allow,
-			"ask":   permissions.Ask,
-		})
+		permissions, err := ClaudeManagedTools(shellPermission)
+		if err != nil {
+			return manifestSurface{}, err
+		}
+		managed := map[string][]string{"allow": permissions.Allow}
+		if len(permissions.Ask) > 0 {
+			managed["ask"] = permissions.Ask
+		}
+		fragment, err := marshalClaudeManagedFragment(managed)
 		if err != nil {
 			return manifestSurface{}, fmt.Errorf("encode managed permissions: %w", err)
 		}

@@ -172,6 +172,12 @@ root, next to `.mcp.json`. Managed MCP and Codex server arguments are
 `serve --root <dir>`; to change the selection, run `init`, not
 `serve --runner-mode`.
 
+`init` also asks whether the shell tools may run without a client confirmation.
+`ask` is the answer offered in a workspace that has none recorded; a later `init`
+offers the recorded one instead. The answer goes to `.claude/settings.json` and
+the managed block in `.codex/config.toml` when they are managed. Pass
+`--shell-permission allow|ask` to answer it up front in a scripted run.
+
 Run `init` again after an update. In a beta-test workspace, use
 `init-beta-test` to stay in beta mode; plain `init` asks before it removes beta
 feedback guidance and leaves beta testing. Reaching end of input answers that

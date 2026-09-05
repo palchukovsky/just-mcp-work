@@ -326,6 +326,28 @@ func initBetaTestCommand(args []string) error {
 	return initCommandWithIO(true, args, os.Stdin, os.Stdout, os.Stderr)
 }
 
+func parseInitPermissions(
+	claudePermissionsFlag string,
+	shellPermissionFlag string,
+) (
+	agentinit.ClaudePermissions,
+	agentinit.ShellPermission,
+	error,
+) {
+	permissions, err := agentinit.ParseClaudePermissions(claudePermissionsFlag)
+	if err != nil {
+		return "", "", fmt.Errorf("parse Claude permissions: %w", err)
+	}
+	if shellPermissionFlag == "" {
+		return permissions, "", nil
+	}
+	shellPermission, err := agentinit.ParseShellPermission(shellPermissionFlag)
+	if err != nil {
+		return "", "", fmt.Errorf("parse shell permission: %w", err)
+	}
+	return permissions, shellPermission, nil
+}
+
 func initCommandWithIO(
 	betaTest bool,
 	args []string,
@@ -358,6 +380,12 @@ func initCommandWithIO(
 		"managed tool permissions in .claude/settings.json, applied only when claude "+
 			"is a selected agent: ask, yes to apply them, or no to remove them",
 	)
+	shellPermission := flags.String(
+		"shell-permission",
+		"",
+		"shell tool handling in Claude permission lists and Codex approval modes: "+
+			"allow or ask; empty asks on the console",
+	)
 	var runnerModes runnerModeFlag
 	flags.Var(
 		&runnerModes,
@@ -371,7 +399,8 @@ func initCommandWithIO(
 		_, _ = fmt.Fprintln(
 			flags.Output(),
 			"Usage: just-mcp-work "+command+" [--dir <dir>] [--agents <names>] [--dry-run] "+
-				"[--claude-permissions ask|yes|no] [--runner-mode <name>=<mode>]...",
+				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
+				"[--runner-mode <name>=<mode>]...",
 		)
 		flags.PrintDefaults()
 	}
@@ -384,7 +413,10 @@ func initCommandWithIO(
 	if flags.NArg() != 0 {
 		return fmt.Errorf("%s accepts no positional arguments", command)
 	}
-	permissions, err := agentinit.ParseClaudePermissions(*claudePermissions)
+	permissions, parsedShellPermission, err := parseInitPermissions(
+		*claudePermissions,
+		*shellPermission,
+	)
 	if err != nil {
 		return fmt.Errorf("parse %s flags: %w", command, err)
 	}
@@ -410,16 +442,26 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("select runner modes: %w", err)
 	}
+	selectedAgents := splitCSV(*agents)
 	result, err := agentinit.Apply(
 		agentinit.Options{
 			Dir:               *dir,
-			Agents:            splitCSV(*agents),
+			Agents:            selectedAgents,
 			BetaTest:          betaTest,
 			DryRun:            *dryRun,
 			WriteMCPConfig:    *writeMCPConfig,
 			RunnerModes:       canonicalModes,
 			ClaudePermissions: permissions,
-			Confirm:           console.confirmClaudePermissions,
+			ShellPermission:   parsedShellPermission,
+			AskShellPermission: func(
+				offer agentinit.ShellPermission,
+				current bool,
+			) (agentinit.ShellPermission, error) {
+				return console.askShellPermission(
+					enumeratedOffer{value: string(offer), current: current},
+				)
+			},
+			Confirm: console.confirmClaudePermissions,
 		},
 	)
 	if err != nil {
@@ -628,9 +670,9 @@ func (c *initConsole) selectRunnerModes(
 		if _, found := overridden[request.Name]; found {
 			continue
 		}
-		offer := runnerModeOffer{mode: request.Default}
+		offer := enumeratedOffer{value: string(request.Default)}
 		if currentMode, found := currentModes[request.Name]; found {
-			offer = runnerModeOffer{mode: currentMode, current: true}
+			offer = enumeratedOffer{value: string(currentMode), current: true}
 		}
 		mode, askErr := c.askRunnerMode(request, offer)
 		if askErr != nil {
@@ -645,69 +687,115 @@ func (c *initConsole) selectRunnerModes(
 	return canonical, nil
 }
 
-type runnerModeOffer struct {
-	mode    runner.Mode
+type enumeratedChoice struct {
+	value       string
+	description string
+	warning     string
+}
+
+type enumeratedQuestion struct {
+	introduction          string
+	defaultValue          string
+	promptLabel           string
+	readDescription       string
+	unansweredDescription string
+	flagName              string
+	parse                 func(string) (string, bool)
+	unsupported           func(string) error
+	unsupportedPrompt     func(string) string
+	choices               []enumeratedChoice
+}
+
+type enumeratedOffer struct {
+	value   string
 	current bool
 }
 
 func (c *initConsole) askRunnerMode(
 	request runner.PermissionRequest,
-	offer runnerModeOffer,
+	offer enumeratedOffer,
 ) (runner.Mode, error) {
-	if err := c.writeRunnerModeRequest(request, offer); err != nil {
-		return "", err
-	}
-	return c.readRunnerMode(request, offer)
-}
-
-func (c *initConsole) writeRunnerModeRequest(
-	request runner.PermissionRequest,
-	offer runnerModeOffer,
-) error {
 	review := "reviewed"
 	if !request.Reviewed {
 		review = "unreviewed"
 	}
-	if err := writeInitOutput(
-		c.output,
-		"\n%s runner (%s): %s\n%s\n",
-		request.Name,
-		review,
-		request.Question,
-		request.Context,
-	); err != nil {
-		return err
-	}
+	choices := make([]enumeratedChoice, 0, len(request.Choices))
 	for _, choice := range request.Choices {
+		choices = append(choices, enumeratedChoice{
+			value:       string(choice.Mode),
+			description: choice.Label + ": " + choice.Description,
+			warning:     choice.Warning,
+		})
+	}
+	question := enumeratedQuestion{
+		introduction: fmt.Sprintf(
+			"\n%s runner (%s): %s\n%s\n",
+			request.Name,
+			review,
+			request.Question,
+			request.Context,
+		),
+		choices:               choices,
+		defaultValue:          string(request.Default),
+		promptLabel:           "Mode",
+		readDescription:       request.Name + " runner mode",
+		unansweredDescription: fmt.Sprintf("runner %q mode", request.Name),
+		flagName:              fmt.Sprintf("--runner-mode %s=<mode>", request.Name),
+		parse: func(value string) (string, bool) {
+			mode, found := findRequestedMode(request, value)
+			return string(mode), found
+		},
+		unsupported: func(value string) error {
+			return fmt.Errorf("unsupported mode %q for runner %q", value, request.Name)
+		},
+		unsupportedPrompt: func(value string) string {
+			return fmt.Sprintf(
+				"Unsupported mode %q; choose one of %s.\n",
+				value,
+				requestModeNames(request),
+			)
+		},
+	}
+	value, err := c.askEnumeratedChoice(question, offer)
+	return runner.Mode(value), err
+}
+
+func (c *initConsole) askEnumeratedChoice(
+	question enumeratedQuestion,
+	offer enumeratedOffer,
+) (string, error) {
+	if err := writeInitOutput(c.output, "%s", question.introduction); err != nil {
+		return "", err
+	}
+	for _, choice := range question.choices {
 		if err := writeInitOutput(
 			c.output,
-			"  %s%s - %s: %s\n",
-			choice.Mode,
-			runnerModeChoiceLabel(choice.Mode, request.Default, offer),
-			choice.Label,
-			choice.Description,
+			"  %s%s - %s\n",
+			choice.value,
+			enumeratedChoiceLabel(choice.value, question.defaultValue, offer),
+			choice.description,
 		); err != nil {
-			return err
+			return "", err
 		}
-		if choice.Warning != "" {
-			if err := writeInitOutput(c.output, "    WARNING: %s\n", choice.Warning); err != nil {
-				return err
+		if choice.warning != "" {
+			if err := writeInitOutput(c.output, "    WARNING: %s\n", choice.warning); err != nil {
+				return "", err
 			}
 		}
 	}
-	return nil
+	return c.readEnumeratedChoice(question, offer)
 }
 
-func runnerModeChoiceLabel(
-	mode runner.Mode,
-	declaredDefault runner.Mode,
-	offer runnerModeOffer,
+func enumeratedChoiceLabel(
+	value string,
+	declaredDefault string,
+	offer enumeratedOffer,
 ) string {
 	labels := make([]string, 0, 2)
-	if offer.current && mode == offer.mode {
+	if offer.current && value == offer.value {
 		labels = append(labels, "current")
 	}
-	if mode == declaredDefault {
+	if value == declaredDefault {
 		labels = append(labels, "default")
 	}
 	if len(labels) == 0 {
@@ -716,22 +804,28 @@ func runnerModeChoiceLabel(
 	return " (" + strings.Join(labels, ", ") + ")"
 }
 
-func (c *initConsole) readRunnerMode(
-	request runner.PermissionRequest,
-	offer runnerModeOffer,
-) (runner.Mode, error) {
+func (c *initConsole) readEnumeratedChoice(
+	question enumeratedQuestion,
+	offer enumeratedOffer,
+) (string, error) {
 	source := "default"
 	if offer.current {
 		source = "current"
 	}
 	for {
-		if err := writeInitOutput(c.output, "Mode [%s, %s]: ", offer.mode, source); err != nil {
+		if err := writeInitOutput(
+			c.output,
+			"%s [%s, %s]: ",
+			question.promptLabel,
+			offer.value,
+			source,
+		); err != nil {
 			return "", err
 		}
 		answer, err := c.input.ReadString('\n')
 		trimmed := strings.TrimSpace(answer)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("read %s runner mode: %w", request.Name, err)
+			return "", fmt.Errorf("read %s: %w", question.readDescription, err)
 		}
 		if trimmed == "" {
 			if errors.Is(err, io.EOF) {
@@ -739,25 +833,23 @@ func (c *initConsole) readRunnerMode(
 					return "", writeErr
 				}
 				return "", fmt.Errorf(
-					"runner %q mode was unanswered at end of input; use "+
-						"--runner-mode %s=<mode> for non-interactive init",
-					request.Name,
-					request.Name,
+					"%s was unanswered at end of input; use %s for non-interactive init",
+					question.unansweredDescription,
+					question.flagName,
 				)
 			}
-			return offer.mode, nil
+			return offer.value, nil
 		}
-		if mode, found := findRequestedMode(request, trimmed); found {
-			return mode, nil
+		if value, found := question.parse(trimmed); found {
+			return value, nil
 		}
 		if errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("unsupported mode %q for runner %q", trimmed, request.Name)
+			return "", question.unsupported(trimmed)
 		}
 		if writeErr := writeInitOutput(
 			c.output,
-			"Unsupported mode %q; choose one of %s.\n",
-			trimmed,
-			requestModeNames(request),
+			"%s",
+			question.unsupportedPrompt(trimmed),
 		); writeErr != nil {
 			return "", writeErr
 		}
@@ -781,26 +873,75 @@ func requestModeNames(request runner.PermissionRequest) string {
 	return strings.Join(names, ", ")
 }
 
+func (c *initConsole) askShellPermission(
+	offer enumeratedOffer,
+) (agentinit.ShellPermission, error) {
+	question := enumeratedQuestion{
+		introduction: "\nHow should the Claude permission lists and Codex approval modes " +
+			"handle the just-mcp-work shell tools?\n",
+		choices: []enumeratedChoice{
+			{
+				value:       string(agentinit.ShellPermissionAllow),
+				description: "use the Claude allow list and Codex approve mode",
+			},
+			{
+				value:       string(agentinit.ShellPermissionAsk),
+				description: "use the Claude ask list and Codex prompt mode",
+			},
+		},
+		defaultValue:          string(agentinit.ShellPermissionAsk),
+		promptLabel:           "Shell permission",
+		readDescription:       "shell permission",
+		unansweredDescription: "shell permission",
+		flagName:              "--shell-permission allow|ask",
+		parse: func(value string) (string, bool) {
+			permission, err := agentinit.ParseShellPermission(value)
+			return string(permission), err == nil
+		},
+		unsupported: func(value string) error {
+			return fmt.Errorf("unsupported shell permission %q", value)
+		},
+		unsupportedPrompt: func(value string) string {
+			return fmt.Sprintf(
+				"Unsupported shell permission %q; choose one of allow, ask.\n",
+				value,
+			)
+		},
+	}
+	value, err := c.askEnumeratedChoice(question, offer)
+	return agentinit.ShellPermission(value), err
+}
+
 // confirmClaudePermissions asks the operator on the same buffered console used
 // for runner choices. Declining, an empty answer, or a closed console without an
 // answer removes this server's managed permission entries and does not add them
 // back; when nothing else was left in the settings file, the file itself is
 // removed. A read failure that is not a plain end of input aborts instead.
-func (c *initConsole) confirmClaudePermissions(path string, _ string) (bool, error) {
-	managed := agentinit.ClaudeManagedTools()
-	if err := writeInitOutput(
+func (c *initConsole) confirmClaudePermissions(
+	shellPermission agentinit.ShellPermission,
+	path string,
+	_ string,
+) (bool, error) {
+	managed, err := agentinit.ClaudeManagedTools(shellPermission)
+	if err != nil {
+		return false, fmt.Errorf("resolve managed Claude tools: %w", err)
+	}
+	managedLists := "  allow: " + strings.Join(managed.Allow, ", ") + "\n"
+	if len(managed.Ask) > 0 {
+		managedLists += "  ask:   " + strings.Join(managed.Ask, ", ") + "\n"
+	}
+	if writeErr := writeInitOutput(
 		c.output,
 		"\n%s: apply the managed just-mcp-work tool permissions?\n"+
-			"  allow: %s\n  ask:   %s\n"+
+			"%s"+
 			"Existing %s* entries are removed first; declining or leaving this empty\n"+
 			"removes them, deleting the file if nothing else remains in it.\n"+
 			"Apply? [y/N]: ",
 		path,
-		strings.Join(managed.Allow, ", "),
-		strings.Join(managed.Ask, ", "),
+		managedLists,
 		agentinit.ClaudeToolPrefix,
-	); err != nil {
-		return false, err
+	); writeErr != nil {
+		return false, writeErr
 	}
 	answer, err := c.input.ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {

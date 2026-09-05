@@ -34,6 +34,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 		[]string{
 			"--dir", root,
 			"--agents", "codex",
+			"--shell-permission", "ask",
 			"--runner-mode", "just=all",
 			"--runner-mode", "agent=safe",
 			"--runner-mode", "cmake=all",

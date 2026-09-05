@@ -8,6 +8,7 @@ package agentinit
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -151,6 +152,27 @@ func ParseClaudePermissions(value string) (ClaudePermissions, error) {
 	}
 }
 
+// ShellPermission selects whether the two free-form shell tools need client
+// approval.
+type ShellPermission string
+
+const (
+	// ShellPermissionAsk keeps the shell tools behind a client confirmation.
+	ShellPermissionAsk ShellPermission = "ask"
+	// ShellPermissionAllow lets the shell tools run without a client confirmation.
+	ShellPermissionAllow ShellPermission = "allow"
+)
+
+// ParseShellPermission resolves a shell permission choice.
+func ParseShellPermission(value string) (ShellPermission, error) {
+	switch permission := ShellPermission(strings.ToLower(strings.TrimSpace(value))); permission {
+	case ShellPermissionAllow, ShellPermissionAsk:
+		return permission, nil
+	default:
+		return "", fmt.Errorf("unsupported shell permission %q: use allow or ask", value)
+	}
+}
+
 // ClaudeToolPrefix is the Claude permission entry prefix of this server's tools.
 const ClaudeToolPrefix = claudeServerRule + "__"
 
@@ -165,8 +187,8 @@ type ClaudeToolPermissions struct {
 
 // ClaudeManagedTools returns the managed Claude permission entries. The tool
 // names must stay in sync with the tools the MCP server registers.
-func ClaudeManagedTools() ClaudeToolPermissions {
-	return ClaudeToolPermissions{
+func ClaudeManagedTools(shell ShellPermission) (ClaudeToolPermissions, error) {
+	managed := ClaudeToolPermissions{
 		Allow: claudeToolRules(
 			"run_task",
 			"start_task",
@@ -180,11 +202,20 @@ func ClaudeManagedTools() ClaudeToolPermissions {
 			"list_tasks",
 			"version_status",
 		),
-		Ask: claudeToolRules(
-			"run_shell_command",
-			"start_shell_command",
-		),
 	}
+	shellRules := claudeToolRules("run_shell_command", "start_shell_command")
+	switch shell {
+	case ShellPermissionAsk:
+		managed.Ask = shellRules
+	case ShellPermissionAllow:
+		managed.Allow = append(managed.Allow, shellRules...)
+	default:
+		return ClaudeToolPermissions{}, fmt.Errorf(
+			"unsupported ShellPermission %q: use allow or ask",
+			shell,
+		)
+	}
+	return managed, nil
 }
 
 func claudeToolRules(tools ...string) []string {
@@ -210,10 +241,18 @@ type Options struct {
 	// ClaudePermissions selects how the Claude permission lists are treated. The
 	// zero value asks through Confirm.
 	ClaudePermissions ClaudePermissions
+	// ShellPermission selects whether the shell tools need client approval. The
+	// zero value is resolved through AskShellPermission when a permission surface is planned.
+	ShellPermission ShellPermission
+	// AskShellPermission resolves a pending shell permission choice. It receives the
+	// offered value and whether it is current, and is called only when ShellPermission
+	// is unset and a permission surface is planned. A nil AskShellPermission is an
+	// error in that case.
+	AskShellPermission func(offer ShellPermission, current bool) (ShellPermission, error)
 	// Confirm approves a pending Claude permission change. It receives the target
-	// path and the planned diff, and is called only in the ask mode. A nil Confirm
-	// declines the managed permissions and leaves only the cleanup plan.
-	Confirm func(path string, diff string) (bool, error)
+	// shell permission, path, and planned diff, and is called only in the ask mode.
+	// A nil Confirm declines the managed permissions and leaves only the cleanup plan.
+	Confirm func(shellPermission ShellPermission, path string, diff string) (bool, error)
 }
 
 // Result lists changed or would-change files.
@@ -264,6 +303,11 @@ func Apply(options Options) (Result, error) {
 		}
 		selected[agent] = struct{}{}
 	}
+	resolvedShellPermission, shellPermissionErr := resolveShellPermission(scope, agents, options)
+	if shellPermissionErr != nil {
+		return Result{}, shellPermissionErr
+	}
+	options.ShellPermission = resolvedShellPermission
 	policyEdit, err := planPolicy(scope, options.RunnerModes)
 	if err != nil {
 		return Result{}, err
@@ -285,17 +329,19 @@ func Apply(options Options) (Result, error) {
 	}
 	edits = appendEdit(edits, codexEdit)
 	surfaces = appendManifestSurface(surfaces, codexSurface)
-	// The Claude settings file belongs to the claude agent, so an invocation that
-	// does not select claude plans nothing for it, whatever ClaudePermissions says.
-	if _, claudeSelected := selected["claude"]; claudeSelected {
-		claudeEdit, claudeSurface, claudeErr := planClaudeSettings(scope, options)
-		if claudeErr != nil {
-			return Result{}, claudeErr
-		}
-		edits = appendEdit(edits, claudeEdit)
-		surfaces = appendManifestSurface(surfaces, claudeSurface)
+	claudeEdit, claudeSurface, err := planSelectedClaudeSettings(scope, selected, options)
+	if err != nil {
+		return Result{}, err
 	}
-	manifestEdit, err := planManifest(scope, surfaces, options.BetaTest, selected)
+	edits = appendEdit(edits, claudeEdit)
+	surfaces = appendManifestSurface(surfaces, claudeSurface)
+	manifestEdit, err := planManifest(
+		scope,
+		surfaces,
+		options.BetaTest,
+		options.ShellPermission,
+		selected,
+	)
 	if err != nil {
 		return Result{}, err
 	}
@@ -312,6 +358,72 @@ func Apply(options Options) (Result, error) {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+func planSelectedClaudeSettings(
+	scope string,
+	selected map[string]struct{},
+	options Options,
+) (*plannedEdit, *manifestSurface, error) {
+	// The Claude settings file belongs to the claude agent, so an invocation that
+	// does not select claude plans nothing for it, whatever ClaudePermissions says.
+	if _, claudeSelected := selected["claude"]; !claudeSelected {
+		return nil, nil, nil
+	}
+	return planClaudeSettings(scope, options)
+}
+
+func resolveShellPermission(
+	scope string,
+	agents []string,
+	options Options,
+) (ShellPermission, error) {
+	if !plansShellPermission(agents, options.ClaudePermissions, options.WriteMCPConfig) {
+		return options.ShellPermission, nil
+	}
+	shellPermission := options.ShellPermission
+	if shellPermission == "" {
+		if options.AskShellPermission == nil {
+			return "", errors.New(
+				"Options.AskShellPermission is required when Options.ShellPermission is unset",
+			)
+		}
+		offer := ShellPermissionAsk
+		current, found, readErr := ReadRecordedShellPermission(scope)
+		if readErr != nil {
+			return "", fmt.Errorf("read recorded shell permission: %w", readErr)
+		}
+		if !found && slices.Contains(agents, "claude") {
+			current, found, readErr = CurrentShellPermission(scope)
+			if readErr != nil {
+				return "", fmt.Errorf("read current shell permission: %w", readErr)
+			}
+		}
+		if found {
+			offer = current
+		}
+		selectedPermission, askErr := options.AskShellPermission(offer, found)
+		if askErr != nil {
+			return "", fmt.Errorf("ask shell permission: %w", askErr)
+		}
+		shellPermission = selectedPermission
+	}
+	parsedPermission, parseErr := ParseShellPermission(string(shellPermission))
+	if parseErr != nil {
+		return "", fmt.Errorf("validate Options.ShellPermission: %w", parseErr)
+	}
+	return parsedPermission, nil
+}
+
+// plansShellPermission reports whether Apply will plan a permission surface.
+func plansShellPermission(
+	agents []string,
+	permissions ClaudePermissions,
+	writeMCPConfig bool,
+) bool {
+	return writeMCPConfig ||
+		(permissions != ClaudePermissionsNo &&
+			slices.Contains(agents, "claude"))
 }
 
 // planAgentInstructions plans the managed block for the selected agents only. An
@@ -411,7 +523,7 @@ func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurf
 		return nil, nil, err
 	}
 	if options.WriteMCPConfig {
-		after, mergeErr := mergeCodexConfig(before, scope)
+		after, mergeErr := mergeCodexConfig(before, scope, options.ShellPermission)
 		if mergeErr != nil {
 			return nil, nil, fmt.Errorf("merge %s: %w", path, mergeErr)
 		}
@@ -459,7 +571,7 @@ func planClaudeSettings(scope string, options Options) (*plannedEdit, *manifestS
 		}
 		return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil, nil
 	}
-	after, err := mergeClaudeSettings(before)
+	after, err := mergeClaudeSettings(before, options.ShellPermission)
 	if err != nil {
 		return nil, nil, fmt.Errorf("merge %s: %w", path, err)
 	}
@@ -625,7 +737,7 @@ func confirmClaudePermissions(path string, diff string, options Options) (bool, 
 	if options.Confirm == nil {
 		return false, nil
 	}
-	confirmed, err := options.Confirm(path, diff)
+	confirmed, err := options.Confirm(options.ShellPermission, path, diff)
 	if err != nil {
 		return false, fmt.Errorf("confirm %s: %w", path, err)
 	}
@@ -755,6 +867,120 @@ func findClaudeSettings(scope string) (string, error) {
 		scope,
 		scopedConfig{relative: claudeSettings, name: "Claude settings", lower: "claude settings"},
 	)
+}
+
+// CurrentShellPermission reports the shell permission currently expressed by
+// the workspace Claude settings. Both shell rules must appear in exactly one
+// list and agree; partial, split, or contradictory placements are unrecorded.
+func CurrentShellPermission(scope string) (ShellPermission, bool, error) {
+	path, err := findClaudeSettings(scope)
+	if err != nil {
+		return "", false, err
+	}
+	data, exists, err := readOptionalFile(path)
+	if err != nil {
+		return "", false, fmt.Errorf("read current shell permission from %s: %w", path, err)
+	}
+	lists, found, listsErr := currentClaudePermissionLists(data, exists, path)
+	if listsErr != nil {
+		return "", false, listsErr
+	}
+	if !found {
+		return ShellPermissionAsk, false, nil
+	}
+	var current ShellPermission
+	for _, rule := range claudeToolRules("run_shell_command", "start_shell_command") {
+		inAllow := slices.Contains(lists["allow"], rule)
+		inAsk := slices.Contains(lists["ask"], rule)
+		if inAllow == inAsk {
+			return ShellPermissionAsk, false, nil
+		}
+		placement := ShellPermissionAsk
+		if inAllow {
+			placement = ShellPermissionAllow
+		}
+		if current != "" && placement != current {
+			return ShellPermissionAsk, false, nil
+		}
+		current = placement
+	}
+	return current, true, nil
+}
+
+func currentClaudePermissionLists(
+	data []byte,
+	exists bool,
+	path string,
+) (map[string][]string, bool, error) {
+	if !exists || len(bytes.TrimSpace(data)) == 0 {
+		return nil, false, nil
+	}
+	root, err := decodeJSONObject(data, claudeSettings)
+	if err != nil {
+		return nil, false, fmt.Errorf("read current shell permission from %s: %w", path, err)
+	}
+	members, err := jsonObjectMembers(data, root)
+	if err != nil {
+		return nil, false, fmt.Errorf("read current shell permission from %s: %w", path, err)
+	}
+	permissions, found := jsonFindMember(members, "permissions")
+	if !found || isJSONNull(data, permissions.value) {
+		return nil, false, nil
+	}
+	if data[permissions.value.start] != '{' {
+		return nil, false, fmt.Errorf(
+			"read current shell permission from %s: permissions is not an object",
+			path,
+		)
+	}
+	lists, err := decodeClaudePermissionLists(data, permissions.value, path)
+	if err != nil {
+		return nil, false, err
+	}
+	return lists, true, nil
+}
+
+func decodeClaudePermissionLists(
+	data []byte,
+	permissions jsonSpan,
+	path string,
+) (map[string][]string, error) {
+	permissionMembers, err := jsonObjectMembers(data, permissions)
+	if err != nil {
+		return nil, fmt.Errorf("read current shell permission from %s: %w", path, err)
+	}
+	keys := claudePermissionListKeys()
+	lists := make(map[string][]string, len(keys))
+	for _, key := range keys {
+		member, memberFound := jsonFindMember(permissionMembers, key)
+		if !memberFound || isJSONNull(data, member.value) {
+			continue
+		}
+		if data[member.value.start] != '[' {
+			return nil, fmt.Errorf(
+				"read current shell permission from %s: permissions.%s is not a list",
+				path,
+				key,
+			)
+		}
+		elements, elementsErr := jsonArrayElements(data, member.value)
+		if elementsErr != nil {
+			return nil, fmt.Errorf("read current shell permission from %s: %w", path, elementsErr)
+		}
+		for _, element := range elements {
+			var entry string
+			if decodeErr := json.Unmarshal(data[element.start:element.end], &entry); decodeErr != nil {
+				return nil, fmt.Errorf(
+					"read current shell permission from %s: permissions.%s: %w",
+					path,
+					key,
+					decodeErr,
+				)
+			}
+			lists[key] = append(lists[key], entry)
+		}
+	}
+	return lists, nil
 }
 
 func findScopedConfig(scope string, config scopedConfig) (string, error) {
@@ -1179,7 +1405,7 @@ func decodeJSONObject(data []byte, name string) (jsonSpan, error) {
 // and wildcards this version does not know, and the current entries are then
 // appended to the allow and ask lists. Foreign entries, unrelated settings, and
 // the file's own formatting are preserved byte for byte.
-func mergeClaudeSettings(before []byte) ([]byte, error) {
+func mergeClaudeSettings(before []byte, shell ShellPermission) ([]byte, error) {
 	data := emptyJSONObject(before)
 	root, err := decodeJSONObject(data, claudeSettings)
 	if err != nil {
@@ -1192,11 +1418,14 @@ func mergeClaudeSettings(before []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
 	}
-	owned := claudeOwnedLists()
+	refill, err := claudeRefillLists(shell)
+	if err != nil {
+		return nil, err
+	}
 	permissions, found := jsonFindMember(members, "permissions")
 	if !found || isJSONNull(data, permissions.value) {
-		lists := make(map[string]any, len(owned))
-		for _, list := range owned {
+		lists := make(map[string]any, len(refill))
+		for _, list := range refill {
 			lists[list.key] = list.tools
 		}
 		settings, setErr := jsonSetMember(data, root, "permissions", lists)
@@ -1208,8 +1437,8 @@ func mergeClaudeSettings(before []byte) ([]byte, error) {
 	// The owning lists lose the retired entries and gain the current ones in one
 	// rewrite each. Emptying them first and refilling them afterwards would
 	// destroy the layout in between and make a repeated init rewrite the file.
-	owning := make([]string, 0, len(owned))
-	for _, list := range owned {
+	owning := make([]string, 0, len(refill))
+	for _, list := range refill {
 		owning = append(owning, list.key)
 		data, err = appendClaudeTools(data, list.key, list.tools)
 		if err != nil {
@@ -1273,13 +1502,10 @@ func claudeSettingsAreToolOnly(
 	if err != nil {
 		return false, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
 	}
-	ownedKeys := make(map[string]struct{}, len(claudeOwnedLists()))
-	for _, list := range claudeOwnedLists() {
-		ownedKeys[list.key] = struct{}{}
-	}
 	foundManaged := false
+	keys := claudePermissionListKeys()
 	for _, member := range members {
-		if _, owned := ownedKeys[member.key]; !owned {
+		if !slices.Contains(keys[:], member.key) {
 			return false, nil
 		}
 		if data[member.value.start] != '[' {
@@ -1304,21 +1530,37 @@ func claudeSettingsAreToolOnly(
 	return foundManaged, nil
 }
 
-// claudeOwnedList is one permission list this server maintains.
-type claudeOwnedList struct {
+// claudeRefillList is one permission list populated by the current choice.
+type claudeRefillList struct {
 	key   string
 	tools []string
 }
 
-// claudeOwnedLists reports the permission lists this server owns. Validation,
-// the refill, and the exclusion from the sweep all read the keys from here, so
-// a list added to it cannot be validated by halves or stripped again.
-func claudeOwnedLists() []claudeOwnedList {
-	managed := ClaudeManagedTools()
-	return []claudeOwnedList{
-		{key: "allow", tools: managed.Allow},
-		{key: "ask", tools: managed.Ask},
+// claudePermissionListKeys is the single ordered list of permission keys used
+// for validation, tool-only recognition, refill order, and sweep exclusions.
+func claudePermissionListKeys() [2]string {
+	return [2]string{"allow", "ask"}
+}
+
+// claudeRefillLists reports only the permission lists populated by the current
+// choice. An omitted list remains eligible for the sweep and is never created.
+func claudeRefillLists(shell ShellPermission) ([]claudeRefillList, error) {
+	managed, err := ClaudeManagedTools(shell)
+	if err != nil {
+		return nil, err
 	}
+	toolsByKey := map[string][]string{
+		"allow": managed.Allow,
+		"ask":   managed.Ask,
+	}
+	keys := claudePermissionListKeys()
+	lists := make([]claudeRefillList, 0, len(keys))
+	for _, key := range keys {
+		if tools := toolsByKey[key]; len(tools) > 0 {
+			lists = append(lists, claudeRefillList{key: key, tools: tools})
+		}
+	}
+	return lists, nil
 }
 
 // validateClaudePermissions rejects a settings file whose permission lists this
@@ -1340,8 +1582,8 @@ func validateClaudePermissions(data []byte) error {
 			claudeSettings,
 		)
 	}
-	for _, list := range claudeOwnedLists() {
-		key := list.key
+	keys := claudePermissionListKeys()
+	for _, key := range keys {
 		value, exists := permissions[key]
 		if !exists || value == nil {
 			continue
@@ -1462,6 +1704,7 @@ func isManagedClaudeTool(entry string) bool {
 func mergeCodexConfig(
 	before []byte,
 	root string,
+	shellPermission ShellPermission,
 ) ([]byte, error) {
 	if _, _, _, err := codexBlockRange(string(before)); err != nil {
 		return nil, err
@@ -1486,20 +1729,23 @@ func mergeCodexConfig(
 	if err != nil {
 		return nil, fmt.Errorf("encode server arguments: %w", err)
 	}
+	approvalLines, err := codexApprovalLines(shellPermission)
+	if err != nil {
+		return nil, err
+	}
 	// The config keeps the line ending it is written with, the same way the
 	// instruction files and the JSON configs do.
 	lineBreak := documentLineBreak(before)
-	block := strings.Join(
-		[]string{
-			codexBegin,
-			codexTable,
-			"command = " + executableValue,
-			"args = " + argsValue,
-			"startup_timeout_sec = 120",
-			codexEnd,
-		},
-		lineBreak,
-	)
+	blockLines := []string{
+		codexBegin,
+		codexTable,
+		"command = " + executableValue,
+		"args = " + argsValue,
+		"startup_timeout_sec = 120",
+	}
+	blockLines = append(blockLines, approvalLines...)
+	blockLines = append(blockLines, codexEnd)
+	block := strings.Join(blockLines, lineBreak)
 	text := string(before)
 	// An existing managed block is replaced where it stands, so the operator's
 	// own ordering and spacing around it survive.
@@ -1517,7 +1763,7 @@ func mergeCodexConfig(
 		if rest, found := trimLeadingLineBreak(suffix); found {
 			suffix = lineBreak + rest
 		}
-		return []byte(prefix + block + suffix), nil
+		return validateMergedCodexConfig(prefix + block + suffix)
 	}
 	if err := rejectUnmanagedCodexServer(text); err != nil {
 		return nil, err
@@ -1527,7 +1773,43 @@ func mergeCodexConfig(
 	} else {
 		text = strings.TrimRight(text, "\r\n") + lineBreak + lineBreak
 	}
-	return []byte(text + block + lineBreak), nil
+	return validateMergedCodexConfig(text + block + lineBreak)
+}
+
+func codexApprovalLines(shellPermission ShellPermission) ([]string, error) {
+	managedTools, err := ClaudeManagedTools(shellPermission)
+	if err != nil {
+		return nil, err
+	}
+	approvalLines := []string{`default_tools_approval_mode = "prompt"`}
+	for _, rule := range managedTools.Allow {
+		approvalLines = append(
+			approvalLines,
+			`tools.`+strings.TrimPrefix(rule, ClaudeToolPrefix)+`.approval_mode = "approve"`,
+		)
+	}
+	for _, rule := range managedTools.Ask {
+		approvalLines = append(
+			approvalLines,
+			`tools.`+strings.TrimPrefix(rule, ClaudeToolPrefix)+`.approval_mode = "prompt"`,
+		)
+	}
+	sort.Strings(approvalLines[1:])
+	return approvalLines, nil
+}
+
+func validateMergedCodexConfig(text string) ([]byte, error) {
+	containsServer, err := containsCodexServerTable(text)
+	if err != nil {
+		return nil, fmt.Errorf("validate merged Codex config: %w", err)
+	}
+	if !containsServer {
+		return nil, fmt.Errorf(
+			"validate merged Codex config: managed server table %s is missing",
+			codexTable,
+		)
+	}
+	return []byte(text), nil
 }
 
 func removeCodexConfig(before []byte) ([]byte, bool, error) {
