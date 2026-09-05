@@ -332,19 +332,23 @@ normal receipt with an explanation in `message`, not as a tool error.
   tails; `1..65536` replaces both with up to the last N bytes from the ledger,
   and a read failure leaves that stream's tail empty. A value outside that
   range fails before the run begins with
-  `tail_bytes must be between 0 and 65536`.
+  `tail_bytes must be between 0 and 65536`. Completed receipts also report
+  `stdout_bytes` and `stderr_bytes` for nonempty streams. Compare a returned
+  tail's length with its stream's size; if it is smaller, use `get_run_logs`.
 - **Promotion.** `status: running`, `promoted: true`, `run_id`, and up to 4096
   bytes of each tail so far.
 - **Status calls.** `get_run_status`, `wait_run`, and `stop_run` read tails
   from disk: `tail_bytes` per stream, default 4096 unlike the run tools above,
   maximum 65536, `0` disables them.
 
-Receipts for a live or finished run also carry lifecycle detail worth reading
-before you act: `completed`, `process_alive`, `owned_by_this_server`,
+Live receipts and status calls carry lifecycle detail worth reading before you
+act: `completed`, `process_alive`, `owned_by_this_server`,
 `last_output_age_ms`, `no_output_yet`, `stdout_bytes`, `stderr_bytes`,
-`task_timeout_ms`, and `time_to_task_timeout_ms`. A gate that has printed
-nothing for minutes and a gate about to hit its timeout look identical in
-`status` alone.
+`task_timeout_ms`, and `time_to_task_timeout_ms`. A completed synchronous
+receipt carries none of those except `stdout_bytes` and `stderr_bytes`, and
+omits either for an empty stream. A gate
+that has printed nothing for minutes and a gate about to hit its timeout look
+identical in `status` alone.
 
 The `stats` block compares this invocation with its own history. `exact`
 aggregates runs of the same task with the same arguments, `task` aggregates the

@@ -1354,13 +1354,13 @@ func (s *Server) waitForSyncReceipt(
 			s.config.Logger.Error("task ledger finalization failed", "run_id", run.Snapshot().RunID, "error", err)
 		}
 		s.stats.Invalidate()
-		return s.finishedReceipt(run.Snapshot(), stats, tailBytes)
+		return s.finishedReceipt(run, stats, tailBytes)
 	case <-ctx.Done():
 		if err := run.Stop(); err != nil {
 			s.config.Logger.Error("cancel task run failed", "run_id", run.Snapshot().RunID, "error", err)
 		}
 		s.stats.Invalidate()
-		return s.finishedReceipt(run.Snapshot(), stats, tailBytes)
+		return s.finishedReceipt(run, stats, tailBytes)
 	case <-timeout:
 		return s.runningReceipt(run, stats, true)
 	}
@@ -1368,16 +1368,21 @@ func (s *Server) waitForSyncReceipt(
 
 // finishedReceipt keeps the completed synchronous receipt bound to its ledger identity.
 func (s *Server) finishedReceipt(
-	result executor.Result,
+	run *executor.Run,
 	stats *runstats.Stats,
 	tailBytes *int64,
 ) runTaskOutput {
+	result := run.Snapshot()
 	if tailBytes != nil {
 		s.attachTails(&result, *tailBytes)
 	}
+	meta := run.Meta()
+	details := receiptDetails(s.store.WorktreeRoot(), stats)
+	details.StdoutBytes = meta.StdoutBytes
+	details.StderrBytes = meta.StderrBytes
 	return runTaskOutput{
 		Result:     result,
-		runDetails: receiptDetails(s.store.WorktreeRoot(), stats),
+		runDetails: details,
 	}
 }
 

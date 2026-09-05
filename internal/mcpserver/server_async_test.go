@@ -62,58 +62,74 @@ func TestSyncShellReceiptTails(t *testing.T) {
 	small := int64(3)
 	zero := int64(0)
 	failingCommand := "printf stdout; printf stderr >&2; exit 1"
-	smallTailCommand := "printf 0123456789; printf abcdefghij >&2"
+	smallTailCommand := "printf 0123456789; printf abcdefghijklmnop >&2"
 	successTails := receiptTails{stdout: "shell-output"}
 	failingTails := receiptTails{stdout: "stdout", stderr: "stderr"}
-	smallTails := receiptTails{stdout: "789", stderr: "hij"}
+	smallTails := receiptTails{stdout: "789", stderr: "nop"}
+	successStdoutBytes := int64(12)
+	smallStdoutBytes := int64(10)
+	smallStderrBytes := int64(16)
 	if runtime.GOOS == "windows" {
 		failingCommand = "echo stdout & echo stderr 1>&2 & exit /b 1"
-		smallTailCommand = "echo 0123456789 & echo abcdefghij 1>&2"
+		smallTailCommand = "echo 0123456789 & echo abcdefghijklmnop 1>&2"
 		successTails = receiptTails{stdout: "shell-output\r\n"}
 		failingTails = receiptTails{stdout: "stdout\r\n", stderr: "stderr\r\n"}
-		smallTails = receiptTails{stdout: "9\r\n", stderr: "j\r\n"}
+		smallTails = receiptTails{stdout: "9\r\n", stderr: "p\r\n"}
+		successStdoutBytes += 2
+		smallStdoutBytes += 2
+		smallStderrBytes += 2
 	}
 	for _, test := range []struct {
-		name        string
-		command     string
-		tailBytes   *int64
-		status      runstore.Status
-		wantTails   receiptTails
-		wantTailLen int
+		name            string
+		command         string
+		tailBytes       *int64
+		status          runstore.Status
+		wantTails       receiptTails
+		wantTailLen     int
+		wantStdoutBytes int64
+		wantStderrBytes int64
 	}{
 		{
-			name:      "requested success",
-			command:   shellOutputCommand(),
-			tailBytes: &requested,
-			status:    runstore.StatusOK,
-			wantTails: successTails,
+			name:            "requested success",
+			command:         shellOutputCommand(),
+			tailBytes:       &requested,
+			status:          runstore.StatusOK,
+			wantTails:       successTails,
+			wantStdoutBytes: successStdoutBytes,
 		},
 		{
-			name:      "omitted success",
-			command:   shellOutputCommand(),
-			status:    runstore.StatusOK,
-			wantTails: receiptTails{},
+			name:            "omitted success",
+			command:         shellOutputCommand(),
+			status:          runstore.StatusOK,
+			wantTails:       receiptTails{},
+			wantStdoutBytes: successStdoutBytes,
 		},
 		{
-			name:      "omitted failing preserves compact tails",
-			command:   failingCommand,
-			status:    runstore.StatusNonzero,
-			wantTails: failingTails,
+			name:            "omitted failing preserves compact tails",
+			command:         failingCommand,
+			status:          runstore.StatusNonzero,
+			wantTails:       failingTails,
+			wantStdoutBytes: int64(len(failingTails.stdout)),
+			wantStderrBytes: int64(len(failingTails.stderr)),
 		},
 		{
-			name:      "zero failing",
-			command:   failingCommand,
-			tailBytes: &zero,
-			status:    runstore.StatusNonzero,
-			wantTails: receiptTails{},
+			name:            "zero failing",
+			command:         failingCommand,
+			tailBytes:       &zero,
+			status:          runstore.StatusNonzero,
+			wantTails:       receiptTails{},
+			wantStdoutBytes: int64(len(failingTails.stdout)),
+			wantStderrBytes: int64(len(failingTails.stderr)),
 		},
 		{
-			name:        "requested small tail",
-			command:     smallTailCommand,
-			tailBytes:   &small,
-			status:      runstore.StatusOK,
-			wantTails:   smallTails,
-			wantTailLen: int(small),
+			name:            "requested small tail",
+			command:         smallTailCommand,
+			tailBytes:       &small,
+			status:          runstore.StatusOK,
+			wantTails:       smallTails,
+			wantTailLen:     int(small),
+			wantStdoutBytes: smallStdoutBytes,
+			wantStderrBytes: smallStderrBytes,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -138,6 +154,12 @@ func TestSyncShellReceiptTails(t *testing.T) {
 					len(receipt.StderrTail),
 					test.wantTailLen,
 				)
+			}
+			if receipt.StdoutBytes != test.wantStdoutBytes {
+				t.Fatalf("stdout_bytes = %d, want %d", receipt.StdoutBytes, test.wantStdoutBytes)
+			}
+			if receipt.StderrBytes != test.wantStderrBytes {
+				t.Fatalf("stderr_bytes = %d, want %d", receipt.StderrBytes, test.wantStderrBytes)
 			}
 		})
 	}
