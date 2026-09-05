@@ -93,13 +93,16 @@ default or `disabled`; their command review is tracked separately.
 
 ### Shell escape hatch
 
-The `run_shell_command` and `start_shell_command` tools pass caller-provided
-command text to the operating system shell. They remain available for genuinely
-ad-hoc commands outside the discovered or withheld task surfaces. A task may be
-absent because its runner mode withheld it; agents must not recreate or run that
-task through either shell tool or another shell path. Runner selections do not
-implement a general shell authorization policy, so grant access to the shell
-tools only when arbitrary shell execution is acceptable.
+The `define_shell_block`, `run_shell_command`, and `start_shell_command` tools
+form the shell escape hatch. `define_shell_block` shares the execution tools'
+permission group, so its command text is shown to the operator once, at
+definition; a later `block_id` run presents only the identifier, not the text it
+stands for. They remain available for genuinely ad-hoc commands outside the
+discovered or withheld task surfaces. A task may be absent because its runner
+mode withheld it; agents must not recreate or run that task through any of these
+tools or another shell path. Runner selections do not implement a general shell
+authorization policy, so grant access to the shell tools only when arbitrary
+shell execution is acceptable.
 
 ### CMake
 
@@ -172,8 +175,8 @@ times out of ten is not a control you should rely on.
 
 Runner permission declarations and modes are jmw's server-side authorization
 mechanism. The explicit shell tools are an escape hatch: when enabled,
-`run_shell_command` and `start_shell_command` give the caller a general shell
-outside runner task filtering.
+`define_shell_block`, `run_shell_command`, and `start_shell_command` let the
+caller carry or execute general shell command text outside runner task filtering.
 
 ## Lifecycle controls
 

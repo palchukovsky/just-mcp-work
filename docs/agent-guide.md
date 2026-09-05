@@ -380,9 +380,16 @@ Execution:
   `project_path`, `task_id`, `arguments`, `max_wait_ms`, `tail_bytes`.
 - **`start_task`** - background; returns a `run_id`. Inputs: `project_path`,
   `task_id`, `arguments`.
+- **`define_shell_block`** - define an ad-hoc shell block for this session.
+  Inputs: `command`, `working_directory`.
 - **`run_shell_command`** - an ad-hoc command with a receipt. Inputs:
-  `command`, `working_directory`, `max_wait_ms`, `tail_bytes`.
-- **`start_shell_command`** - background; inputs: `command`, `working_directory`.
+  `command`, `block_id`, `working_directory`, `max_wait_ms`, `tail_bytes`.
+  Exactly one of `command` and `block_id` selects the command; `block_id` comes
+  from `define_shell_block`, and `working_directory` must not accompany it.
+- **`start_shell_command`** - background; inputs: `command`, `block_id`,
+  `working_directory`. Exactly one of `command` and `block_id` selects the
+  command; `block_id` comes from `define_shell_block`, and `working_directory`
+  must not accompany it.
 
 Observation:
 
@@ -477,6 +484,12 @@ workspace-relative `working_directory`, default `.`, and only when a compact
 receipt or a `tail_bytes` output slice is worth more than the full output. Shell
 runs land in the same ledger under the task ID `shell:command`, so `list_runs`
 and `get_run_logs` work on them too.
+
+For a long block you will run more than once in one server session, define it
+once with `define_shell_block` and repeat it by `block_id`; that keeps the
+command text out of each repeat in the transcript. Definition fixes the working
+directory. Blocks live only for that server session, and an unknown `block_id`
+is an error, not a fresh run.
 
 **Do not route through JMW** output you must read or quote when it is too large
 for a tail: `git diff`, `git log`, searches, source excerpts, generated reports,

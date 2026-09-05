@@ -62,14 +62,17 @@ func runShellCommandDescription() string {
 		"A short tail can be requested in the same call with tail_bytes; it returns the last N " +
 		"bytes of each stream rather than the whole log, which is read with get_run_logs. A " +
 		"running receipt with promoted: true is normal: follow its run_id instead of retrying " +
-		"the command."
+		"the command. Exactly one of command and block_id selects the command; block_id comes " +
+		"from define_shell_block, and working_directory must not accompany block_id."
 }
 
 func startShellCommandDescription() string {
 	return "Start a genuinely ad-hoc shell command outside the discovered or withheld task " +
 		"surfaces asynchronously and return its run_id immediately. A task may be absent because " +
 		"the operator withheld it through a runner mode; never recreate or run that task through " +
-		"this or another shell path."
+		"this or another shell path. Exactly one of command and block_id selects the command; " +
+		"block_id comes from define_shell_block, and working_directory must not accompany " +
+		"block_id."
 }
 
 // Config controls server-side execution defaults.
@@ -95,6 +98,9 @@ type Server struct {
 	stats     *runstats.Collector
 	updates   *updatecheck.Checker
 	config    Config
+
+	shellBlocks   map[string]shellBlock
+	shellBlocksMu sync.Mutex
 }
 
 // New creates an MCP server facade.
@@ -153,13 +159,14 @@ func New(
 	}
 	stats := runstats.New(store)
 	return &Server{
-		workspace: workspaceRegistry,
-		runners:   runners,
-		store:     store,
-		manager:   runmanager.New(stats.Invalidate, runmanager.MaxConcurrentRuns),
-		stats:     stats,
-		updates:   config.Updates,
-		config:    config,
+		workspace:   workspaceRegistry,
+		runners:     runners,
+		store:       store,
+		manager:     runmanager.New(stats.Invalidate, runmanager.MaxConcurrentRuns),
+		stats:       stats,
+		updates:     config.Updates,
+		config:      config,
+		shellBlocks: make(map[string]shellBlock),
 	}, nil
 }
 
@@ -240,6 +247,14 @@ func (s *Server) Run(ctx context.Context) error {
 				"run_id is active, never launch the task again.",
 		},
 		recoverTool(withUpdateNotification(s, s.startTask)),
+	)
+	mcp.AddTool(
+		server,
+		&mcp.Tool{
+			Name:        "define_shell_block",
+			Description: defineShellBlockDescription(),
+		},
+		recoverTool(withUpdateNotification(s, s.defineShellBlock)),
 	)
 	mcp.AddTool(
 		server,
@@ -1116,7 +1131,8 @@ func validatePositionalTaskArguments(task runner.Task, arguments []string) error
 
 //nolint:govet // Field order follows the MCP request shape.
 type runShellCommandInput struct {
-	Command          string `json:"command" jsonschema:"command text interpreted by the operating system shell"`
+	Command          string `json:"command,omitempty" jsonschema:"command text interpreted by the operating system shell"`
+	BlockID          string `json:"block_id,omitempty" jsonschema:"session shell block ID returned by define_shell_block"`
 	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"workspace-relative directory, default root"`
 	MaxWaitMS        *int64 `json:"max_wait_ms,omitempty" jsonschema:"wait up to this many milliseconds; 0 starts immediately, -1 waits for completion"`
 	TailBytes        *int64 `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail; omit to leave a completed receipt unchanged, zero disables tails"`
@@ -1131,9 +1147,22 @@ func (s *Server) runShellCommand(
 	if err != nil {
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
-	if err := validateTailBytes(input.TailBytes); err != nil {
+	if err = validateTailBytes(input.TailBytes); err != nil {
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
+	command, workingDirectory, err := s.resolveShellCommand(
+		input.Command,
+		input.BlockID,
+		input.WorkingDirectory,
+	)
+	if err != nil {
+		return toolErrorResult(err), runTaskOutput{
+			runDetails: receiptDetails(s.store.WorktreeRoot(), nil),
+			Error:      newToolError(err),
+		}, nil
+	}
+	input.Command = command
+	input.WorkingDirectory = workingDirectory
 	run, stats, output := s.startShellRun(ctx, input)
 	if run == nil {
 		return mcpErrorFor(output), output, nil
@@ -1142,7 +1171,8 @@ func (s *Server) runShellCommand(
 }
 
 type startShellCommandInput struct {
-	Command          string `json:"command" jsonschema:"command text interpreted by the operating system shell"`
+	Command          string `json:"command,omitempty" jsonschema:"command text interpreted by the operating system shell"`
+	BlockID          string `json:"block_id,omitempty" jsonschema:"session shell block ID returned by define_shell_block"`
 	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"workspace-relative directory, default root"`
 }
 
@@ -1151,9 +1181,20 @@ func (s *Server) startShellCommand(
 	_ *mcp.CallToolRequest,
 	input startShellCommandInput,
 ) (*mcp.CallToolResult, runTaskOutput, error) {
+	command, workingDirectory, err := s.resolveShellCommand(
+		input.Command,
+		input.BlockID,
+		input.WorkingDirectory,
+	)
+	if err != nil {
+		return toolErrorResult(err), runTaskOutput{
+			runDetails: receiptDetails(s.store.WorktreeRoot(), nil),
+			Error:      newToolError(err),
+		}, nil
+	}
 	run, stats, output := s.startShellRun(ctx, runShellCommandInput{
-		Command:          input.Command,
-		WorkingDirectory: input.WorkingDirectory,
+		Command:          command,
+		WorkingDirectory: workingDirectory,
 	})
 	if run == nil {
 		return mcpErrorFor(output), output, nil

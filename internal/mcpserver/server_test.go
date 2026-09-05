@@ -43,7 +43,15 @@ func TestRunShellCommandDescriptionNamesItsAlternatives(t *testing.T) {
 		"run_shell_command":   runShellCommandDescription(),
 		"start_shell_command": startShellCommandDescription(),
 	} {
-		for _, expected := range []string{"ad-hoc", "withheld", "runner mode", "another shell path"} {
+		for _, expected := range []string{
+			"ad-hoc",
+			"withheld",
+			"runner mode",
+			"another shell path",
+			"Exactly one of command and block_id",
+			"block_id comes from define_shell_block",
+			"working_directory must not accompany block_id",
+		} {
 			if !strings.Contains(description, expected) {
 				t.Errorf("%s description does not mention %q", name, expected)
 			}

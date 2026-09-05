@@ -1331,6 +1331,8 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"too large for a tail",
 		"delegate",
 		"run_shell_command",
+		"define_shell_block",
+		"block_id",
 		"working_directory",
 		"run_task",
 		"status: running",
@@ -3929,7 +3931,11 @@ func TestParseShellPermission(t *testing.T) {
 func TestClaudeManagedToolsPlacesShellRulesWithoutChangingTheUnion(t *testing.T) {
 	ask := testClaudeManagedTools(t, ShellPermissionAsk)
 	allow := testClaudeManagedTools(t, ShellPermissionAllow)
-	shellRules := claudeToolRules("run_shell_command", "start_shell_command")
+	shellRules := claudeToolRules(
+		"define_shell_block",
+		"run_shell_command",
+		"start_shell_command",
+	)
 	if !slices.Equal(ask.Ask, shellRules) {
 		t.Fatalf("ask choice shell rules = %#v, want %#v", ask.Ask, shellRules)
 	}
@@ -4088,6 +4094,7 @@ func TestValidateMergedCodexConfigRejectsMissingServerTable(t *testing.T) {
 }
 
 func TestCurrentShellPermission(t *testing.T) {
+	defineRule := ClaudeToolPrefix + "define_shell_block"
 	runRule := ClaudeToolPrefix + "run_shell_command"
 	startRule := ClaudeToolPrefix + "start_shell_command"
 	for _, testCase := range []struct {
@@ -4099,18 +4106,34 @@ func TestCurrentShellPermission(t *testing.T) {
 	}{
 		{name: "no file", want: ShellPermissionAsk},
 		{
-			name:     "allow",
+			name: "allow",
+			settings: `{"permissions":{"allow":["` + defineRule + `","` + runRule +
+				`","` + startRule + `"],"ask":[]}}`,
+			exists: true,
+			want:   ShellPermissionAllow,
+			found:  true,
+		},
+		{
+			name: "ask",
+			settings: `{"permissions":{"allow":[],"ask":["` + defineRule + `","` +
+				runRule + `","` + startRule + `"]}}`,
+			exists: true,
+			want:   ShellPermissionAsk,
+			found:  true,
+		},
+		{
+			name:     "legacy allow",
 			settings: `{"permissions":{"allow":["` + runRule + `","` + startRule + `"],"ask":[]}}`,
 			exists:   true,
 			want:     ShellPermissionAllow,
 			found:    true,
 		},
 		{
-			name:     "ask",
-			settings: `{"permissions":{"allow":[],"ask":["` + runRule + `","` + startRule + `"]}}`,
-			exists:   true,
-			want:     ShellPermissionAsk,
-			found:    true,
+			name: "define rule split from legacy rules",
+			settings: `{"permissions":{"allow":["` + runRule + `","` + startRule +
+				`"],"ask":["` + defineRule + `"]}}`,
+			exists: true,
+			want:   ShellPermissionAsk,
 		},
 		{
 			name: "contradictory",

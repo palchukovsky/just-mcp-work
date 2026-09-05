@@ -133,6 +133,7 @@ def smoke(_: argparse.Namespace) -> None:
                 "list_tasks",
                 "run_task",
                 "start_task",
+                "define_shell_block",
                 "run_shell_command",
                 "start_shell_command",
                 "get_run",
@@ -147,8 +148,8 @@ def smoke(_: argparse.Namespace) -> None:
                 raise RuntimeError(f"server did not expose the expected tools: {missing!r}")
             assert_input_schema(
                 tools_by_name["run_shell_command"],
-                properties={"command", "working_directory"},
-                required={"command"},
+                properties={"command", "block_id", "working_directory"},
+                required=set(),
             )
             assert_input_schema(
                 tools_by_name["start_task"],
@@ -268,13 +269,81 @@ def smoke(_: argparse.Namespace) -> None:
             if shell_logs["data"].strip() != shell_marker:
                 raise RuntimeError(f"unexpected shell output: {shell_logs['data']!r}")
 
+            block_marker = "just-mcp-work-shell-block-smoke"
+            defined_block = call_tool(
+                process,
+                responses,
+                11,
+                "define_shell_block",
+                {"command": "echo " + block_marker, "working_directory": "."},
+            )
+            block_id = defined_block.get("block_id")
+            if not isinstance(block_id, str) or not block_id:
+                raise RuntimeError(f"define_shell_block did not return a block ID: {defined_block!r}")
+            block_receipt = call_tool(
+                process,
+                responses,
+                12,
+                "run_shell_command",
+                {"block_id": block_id},
+            )
+            if not block_receipt["ok"] or block_marker in json.dumps(block_receipt):
+                raise RuntimeError("shell block receipt was not compact and successful")
+            block_logs = call_tool(
+                process,
+                responses,
+                13,
+                "get_run_logs",
+                {
+                    "run_id": block_receipt["run_id"],
+                    "stream": "stdout",
+                    "offset": 0,
+                    "limit": 64,
+                },
+            )
+            if block_logs["data"].strip() != block_marker:
+                raise RuntimeError(f"unexpected shell block output: {block_logs['data']!r}")
+            conflicting_selector = request(
+                process,
+                responses,
+                14,
+                "tools/call",
+                {
+                    "name": "run_shell_command",
+                    "arguments": {"command": "echo " + block_marker, "block_id": block_id},
+                },
+            )
+            assert_tool_error_message(
+                "conflicting shell command selectors",
+                conflicting_selector,
+                "command and block_id must not be combined; "
+                "use one shell command selector per request",
+            )
+            stale_block_id = "stale-shell-block"
+            unknown_block = request(
+                process,
+                responses,
+                15,
+                "tools/call",
+                {
+                    "name": "run_shell_command",
+                    "arguments": {"block_id": stale_block_id},
+                },
+            )
+            assert_tool_error_message(
+                "unknown shell block",
+                unknown_block,
+                f'unknown block_id "{stale_block_id}"; shell blocks live only for one '
+                "server session, so define the block again",
+            )
+
             long_task_id = next(
                 task["task_id"] for task in tasks["tasks"] if task["task_id"] == "just:long"
             )
             started = call_tool(
                 process,
                 responses,
-                11,
+                16,
                 "start_task",
                 {"project_path": project_path, "task_id": long_task_id, "arguments": []},
             )
@@ -285,7 +354,7 @@ def smoke(_: argparse.Namespace) -> None:
             status = call_tool(
                 process,
                 responses,
-                12,
+                17,
                 "get_run_status",
                 {"run_id": run_id, "tail_bytes": 0},
             )
@@ -294,7 +363,7 @@ def smoke(_: argparse.Namespace) -> None:
             waiting = call_tool(
                 process,
                 responses,
-                13,
+                18,
                 "wait_run",
                 {"run_id": run_id, "max_wait_ms": 0, "tail_bytes": 0},
             )
@@ -303,7 +372,7 @@ def smoke(_: argparse.Namespace) -> None:
             listed = call_tool(
                 process,
                 responses,
-                14,
+                19,
                 "list_runs",
                 {"status": ["running"], "task_id": long_task_id},
             )
@@ -312,7 +381,7 @@ def smoke(_: argparse.Namespace) -> None:
             stopped = call_tool(
                 process,
                 responses,
-                15,
+                20,
                 "stop_run",
                 {"run_id": run_id, "tail_bytes": 0},
             )
@@ -322,14 +391,14 @@ def smoke(_: argparse.Namespace) -> None:
             shell_started = call_tool(
                 process,
                 responses,
-                16,
+                21,
                 "start_shell_command",
                 {"command": "echo " + shell_marker, "working_directory": "."},
             )
             if not shell_started.get("run_id"):
                 raise RuntimeError(f"start_shell_command did not return a run: {shell_started!r}")
 
-            version_status = call_tool(process, responses, 17, "version_status", {})
+            version_status = call_tool(process, responses, 22, "version_status", {})
             assert_typed_fields(
                 "version_status",
                 version_status,
@@ -364,6 +433,24 @@ def assert_typed_fields(name: str, payload: dict[str, object], fields: dict[str,
     }
     if invalid:
         raise RuntimeError(f"{name} response fields changed: {invalid!r}")
+
+
+def assert_tool_error_message(
+    name: str,
+    response: dict[str, object],
+    expected: str,
+) -> None:
+    result = response.get("result")
+    if not isinstance(result, dict) or result.get("isError") is not True:
+        raise RuntimeError(f"{name} did not return a tool error: {response!r}")
+    content = result.get("content")
+    if (
+        not isinstance(content, list)
+        or not content
+        or not isinstance(content[0], dict)
+        or content[0].get("text") != expected
+    ):
+        raise RuntimeError(f"{name} message changed: {response!r}")
 
 
 def call_tool(

@@ -103,7 +103,8 @@ HOW TO DRIVE IT
   start_shell_command, or another shell path.
 - Shell tools remain available for genuinely ad-hoc commands outside the
   discovered or withheld task surfaces. Set working_directory to a
-  workspace-relative directory (default .).`
+  workspace-relative directory (default .).
+- Define a long repeated block once with define_shell_block and rerun it by block_id.`
 
 // managedBlockText is the instruction block written into the agent files. It
 // carries the same contract as promptText in a form an agent can read before
@@ -152,7 +153,7 @@ func ParseClaudePermissions(value string) (ClaudePermissions, error) {
 	}
 }
 
-// ShellPermission selects whether the two free-form shell tools need client
+// ShellPermission selects whether the free-form shell command tools need client
 // approval.
 type ShellPermission string
 
@@ -177,9 +178,9 @@ func ParseShellPermission(value string) (ShellPermission, error) {
 const ClaudeToolPrefix = claudeServerRule + "__"
 
 // ClaudeToolPermissions holds the managed Claude permission entries of this MCP
-// server. Allow lists the tools that may run unattended; Ask lists the tools
-// that stay behind a Claude confirmation because they execute a free-form
-// command.
+// server. Allow lists the tools that may run unattended; Ask lists the tools that
+// carry or execute free-form command text and therefore stay behind a Claude
+// confirmation.
 type ClaudeToolPermissions struct {
 	Allow []string
 	Ask   []string
@@ -203,7 +204,11 @@ func ClaudeManagedTools(shell ShellPermission) (ClaudeToolPermissions, error) {
 			"version_status",
 		),
 	}
-	shellRules := claudeToolRules("run_shell_command", "start_shell_command")
+	shellRules := claudeToolRules(
+		"define_shell_block",
+		"run_shell_command",
+		"start_shell_command",
+	)
 	switch shell {
 	case ShellPermissionAsk:
 		managed.Ask = shellRules
@@ -870,8 +875,10 @@ func findClaudeSettings(scope string) (string, error) {
 }
 
 // CurrentShellPermission reports the shell permission currently expressed by
-// the workspace Claude settings. Both shell rules must appear in exactly one
-// list and agree; partial, split, or contradictory placements are unrecorded.
+// the workspace Claude settings. The two legacy shell rules must appear in
+// exactly one list and agree. define_shell_block may be absent from pre-upgrade
+// settings, but when present it must agree with them; partial, split, or
+// contradictory placements are unrecorded.
 func CurrentShellPermission(scope string) (ShellPermission, bool, error) {
 	path, err := findClaudeSettings(scope)
 	if err != nil {
@@ -888,10 +895,18 @@ func CurrentShellPermission(scope string) (ShellPermission, bool, error) {
 	if !found {
 		return ShellPermissionAsk, false, nil
 	}
+	managed, err := ClaudeManagedTools(ShellPermissionAsk)
+	if err != nil {
+		return "", false, fmt.Errorf("derive managed shell rules: %w", err)
+	}
+	optionalRule := ClaudeToolPrefix + "define_shell_block"
 	var current ShellPermission
-	for _, rule := range claudeToolRules("run_shell_command", "start_shell_command") {
+	for _, rule := range managed.Ask {
 		inAllow := slices.Contains(lists["allow"], rule)
 		inAsk := slices.Contains(lists["ask"], rule)
+		if rule == optionalRule && !inAllow && !inAsk {
+			continue
+		}
 		if inAllow == inAsk {
 			return ShellPermissionAsk, false, nil
 		}
