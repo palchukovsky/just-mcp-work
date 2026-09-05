@@ -13,9 +13,10 @@ already ran. `just-mcp-work` is a small local MCP server that gives it one way
 to find and run everything a workspace can run, and answers with a short receipt
 instead of a wall of output.
 
-- **No build files in context.** Go modules, Just, CMake, Docker, and GNU Make
-  projects nested anywhere in the workspace are discovered on demand. The agent
-  asks for one task and gets that one task.
+- **No build files in context.** Go modules, Just, CMake, Docker, GNU Make, and
+  Git repositories for fixed CLI coding-agent tasks nested anywhere in the
+  workspace are discovered on demand. The agent asks for one task and gets that
+  one task.
 - **Output only when it is wanted.** A run answers with its status, exit code,
   and short output tails. The full stdout and stderr stay one call away - for
   the failures where they matter.
@@ -68,10 +69,12 @@ go install github.com/palchukovsky/just-mcp-work/cmd/just-mcp-work@latest
 
 The [Go toolchain](https://go.dev/), [`just`](https://just.systems/),
 [CMake](https://cmake.org/), [Docker](https://www.docker.com/) with the
-[Compose](https://docs.docker.com/compose/) v2 plugin, and
-[GNU Make](https://www.gnu.org/software/make/) are needed only for the project
-types you actually have. A tool missing on this host is reported as a warning,
-and everything else in the workspace keeps working.
+[Compose](https://docs.docker.com/compose/) v2 plugin,
+[GNU Make](https://www.gnu.org/software/make/),
+[`codex`](https://openai.com/codex/), and
+[`claude`](https://docs.anthropic.com/en/docs/claude-code/overview) are needed
+only for the project types you actually have. A tool missing on this host is
+reported as a warning, and everything else in the workspace keeps working.
 
 ### Go runner authorization
 
@@ -96,6 +99,14 @@ may run toolchains and helper programs, and `go mod download` may use the
 network and write the module cache. `all` also permits arbitrary Go argv;
 Go exec and tool hooks can launch external programs without going through a
 shell.
+
+### Agent runner authorization
+
+A Git repository or linked worktree exposes `agent:codex` and `agent:claude`
+when their respective CLIs are available. `safe` is the default mode and exposes
+only those fixed tasks; its only alternative is `disabled`, which exposes none.
+The launched coding agent is not sandboxed and runs in the checkout with the
+operator's permissions. See [SECURITY.md](SECURITY.md) for the trust boundary.
 
 ## Set it up
 
@@ -150,14 +161,16 @@ or agent configuration targets above the resolved workspace scope.
 
 Every runner must register a permission declaration before it can enter the
 runtime catalog. `init` asks about every declared runner; Go defaults to
-`safe`. Just, Make, CMake, and Docker are currently unreviewed and offer their
-existing `all` behavior by default or `disabled` for compatibility while their
-command surfaces are reviewed separately. Pass the repeatable
-`init --runner-mode <name>=<mode>` option to answer selected runner questions
-non-interactively. `init` writes the complete canonical selection to
-`.just-mcp-work.json` in the workspace scope root, next to `.mcp.json`.
-Managed MCP and Codex server arguments are `serve --root <dir>`; to change the
-selection, run `init`, not `serve --runner-mode`.
+`safe`, as does the agent runner; see
+[Agent runner authorization](#agent-runner-authorization). Just, Make, CMake,
+and Docker are currently unreviewed and offer their existing `all` behavior by
+default or `disabled` for compatibility while their command surfaces are
+reviewed separately. Pass the repeatable `init --runner-mode <name>=<mode>`
+option to answer selected runner questions non-interactively. `init` writes the
+complete canonical selection to `.just-mcp-work.json` in the workspace scope
+root, next to `.mcp.json`. Managed MCP and Codex server arguments are
+`serve --root <dir>`; to change the selection, run `init`, not
+`serve --runner-mode`.
 
 Run `init` again after an update. In a beta-test workspace, use
 `init-beta-test` to stay in beta mode; plain `init` asks before it removes beta

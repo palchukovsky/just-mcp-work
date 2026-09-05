@@ -22,6 +22,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/mcpserver"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
+	agentrunner "github.com/palchukovsky/just-mcp-work/internal/runner/agent"
 	cmakerunner "github.com/palchukovsky/just-mcp-work/internal/runner/cmake"
 	dockerrunner "github.com/palchukovsky/just-mcp-work/internal/runner/docker"
 	gorunner "github.com/palchukovsky/just-mcp-work/internal/runner/go"
@@ -255,6 +256,7 @@ func resolveServeRoot(options serveOptions) (string, error) {
 func runnerCatalog() (*runner.Catalog, error) {
 	catalog, err := runner.NewCatalog(
 		justrunner.Registration(""),
+		agentrunner.Registration("", ""),
 		cmakerunner.Registration(""),
 		dockerrunner.Registration(""),
 		gorunner.Registration(""),

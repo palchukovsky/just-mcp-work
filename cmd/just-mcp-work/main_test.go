@@ -85,7 +85,7 @@ type erroringWriter struct {
 }
 
 func defaultRunnerInput() *strings.Reader {
-	return strings.NewReader(strings.Repeat("\n", 5))
+	return strings.NewReader(strings.Repeat("\n", 6))
 }
 
 func initArgsWithoutQuestions(dir string) []string {
@@ -94,6 +94,7 @@ func initArgsWithoutQuestions(dir string) []string {
 		"--agents", "codex",
 		"--write-mcp-config=false",
 		"--runner-mode", "just=all",
+		"--runner-mode", "agent=safe",
 		"--runner-mode", "cmake=all",
 		"--runner-mode", "docker=all",
 		"--runner-mode", "go=safe",
@@ -272,6 +273,7 @@ func TestInitQuestionsUseDefaultsAndPersistCanonicalSelections(t *testing.T) {
 	}
 	wantSelections := []runner.Selection{
 		{Name: "just", Mode: runner.ModeAll},
+		{Name: "agent", Mode: runner.ModeSafe},
 		{Name: "cmake", Mode: runner.ModeAll},
 		{Name: "docker", Mode: runner.ModeAll},
 		{Name: "go", Mode: runner.ModeSafe},
@@ -285,7 +287,7 @@ func TestInitQuestionsUseDefaultsAndPersistCanonicalSelections(t *testing.T) {
 		t.Fatalf("workspace policy = %+v, want selections %#v", loaded, wantSelections)
 	}
 	text := output.String()
-	for _, name := range []string{"just", "cmake", "docker", "go", "make"} {
+	for _, name := range []string{"just", "agent", "cmake", "docker", "go", "make"} {
 		if !strings.Contains(text, name+" runner") {
 			t.Errorf("init output did not ask for %s runner:\n%s", name, text)
 		}
@@ -333,11 +335,11 @@ func TestInitRunnerOverrideSkipsQuestionAndCanDisable(t *testing.T) {
 func TestInitRunnerQuestionRepromptsAndSharesInputWithClaudeConfirmation(t *testing.T) {
 	dir := t.TempDir()
 	var output bytes.Buffer
-	// The first line is invalid for Just, and the fifth line is a valid Go mode
+	// The first line is invalid for Just, and the sixth line is a valid Go mode
 	// typed in the wrong case, which must be rejected literally rather than
 	// silently lowercased. The remaining lines answer the repeated Just
 	// question, the other runner questions, and the Claude confirmation.
-	input := strings.NewReader("safe\nall\nall\nall\nSAFE\nsafe\nall\ny\n")
+	input := strings.NewReader("safe\nall\nsafe\nall\nall\nSAFE\nsafe\nall\ny\n")
 	err := initCommandWithIO(
 		false,
 		[]string{"--dir", dir, "--agents", "claude"},
@@ -547,6 +549,7 @@ func TestInitReconcilesChangedRunnerSet(t *testing.T) {
 	}
 	want := []runner.Selection{
 		{Name: "just", Mode: runner.ModeDisabled},
+		{Name: "agent", Mode: runner.ModeSafe},
 		{Name: "cmake", Mode: runner.ModeAll},
 		{Name: "docker", Mode: runner.ModeAll},
 		{Name: "go", Mode: runner.ModeSafe},
@@ -922,6 +925,8 @@ func TestRunSelectsTheRequestedManagedBlock(t *testing.T) {
 				"--runner-mode",
 				"just=all",
 				"--runner-mode",
+				"agent=safe",
+				"--runner-mode",
 				"cmake=all",
 				"--runner-mode",
 				"docker=all",
@@ -1233,7 +1238,7 @@ func TestProductionRunnerCatalogIncludesEveryRunnerAndUsesDeclaredDefaults(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantNames := []string{"just", "cmake", "docker", "go", "make"}
+	wantNames := []string{"just", "agent", "cmake", "docker", "go", "make"}
 	if names := catalog.Names(); !slices.Equal(names, wantNames) {
 		t.Fatalf("catalog names = %#v, want %#v", names, wantNames)
 	}
@@ -1289,10 +1294,10 @@ func TestProductionCatalogDeclaresEveryInitQuestion(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := catalog.PermissionRequests()
-	if len(requests) != 5 {
+	if len(requests) != 6 {
 		t.Fatalf("permission requests = %#v", requests)
 	}
-	for _, index := range []int{0, 1, 2, 4} {
+	for _, index := range []int{0, 2, 3, 5} {
 		request := requests[index]
 		if request.Reviewed || request.Default != runner.ModeAll || len(request.Choices) != 2 ||
 			request.Choices[0].Mode != runner.ModeAll ||
@@ -1300,9 +1305,23 @@ func TestProductionCatalogDeclaresEveryInitQuestion(t *testing.T) {
 			t.Errorf("unreviewed permission request = %#v", request)
 		}
 	}
-	if request := requests[3]; request.Name != "go" || !request.Reviewed ||
+	if request := requests[4]; request.Name != "go" || !request.Reviewed ||
 		request.Default != runner.ModeSafe {
 		t.Fatalf("Go permission request = %#v", request)
+	}
+}
+
+func TestProductionCatalogDeclaresAgentPermission(t *testing.T) {
+	catalog, err := runnerCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := catalog.PermissionRequests()
+	request := requests[1]
+	if request.Name != "agent" || !request.Reviewed || request.Default != runner.ModeSafe ||
+		len(request.Choices) != 2 || request.Choices[0].Mode != runner.ModeSafe ||
+		request.Choices[1].Mode != runner.ModeDisabled {
+		t.Fatalf("agent permission request = %#v", request)
 	}
 }
 
@@ -1318,14 +1337,16 @@ func TestRunnerRegistryRequiresCompleteKnownPolicyAndFailsClosedWhenAbsent(t *te
 			document: `{"version":1,"runners":[` +
 				`{"name":"just","mode":"all"},` +
 				`{"name":"cmake","mode":"all"},` +
+				`{"name":"docker","mode":"all"},` +
 				`{"name":"go","mode":"safe"},` +
 				`{"name":"make","mode":"all"}]}`,
-			wantError: "docker",
+			wantError: "agent",
 		},
 		{
 			name: "unknown runner",
 			document: `{"version":1,"runners":[` +
 				`{"name":"just","mode":"all"},` +
+				`{"name":"agent","mode":"safe"},` +
 				`{"name":"cmake","mode":"all"},` +
 				`{"name":"docker","mode":"all"},` +
 				`{"name":"go","mode":"safe"},` +
@@ -1337,6 +1358,7 @@ func TestRunnerRegistryRequiresCompleteKnownPolicyAndFailsClosedWhenAbsent(t *te
 			name: "complete policy",
 			document: `{"version":1,"runners":[` +
 				`{"name":"just","mode":"disabled"},` +
+				`{"name":"agent","mode":"disabled"},` +
 				`{"name":"cmake","mode":"disabled"},` +
 				`{"name":"docker","mode":"disabled"},` +
 				`{"name":"go","mode":"safe"},` +
@@ -1514,6 +1536,7 @@ func TestInitClaudeConfirmationAbortsOnNonEOFReadFailure(t *testing.T) {
 			"--dir", dir,
 			"--agents", "claude",
 			"--runner-mode", "just=all",
+			"--runner-mode", "agent=safe",
 			"--runner-mode", "cmake=all",
 			"--runner-mode", "docker=all",
 			"--runner-mode", "go=safe",

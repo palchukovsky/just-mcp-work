@@ -47,7 +47,7 @@ by the next.
 flowchart TD
     W["Workspace root<br/>--root, default cwd"]
     P["Project<br/>project_path, e.g. services/api"]
-    R["Runner<br/>just | make | cmake | docker | go"]
+    R["Runner<br/>just | make | cmake | docker | go | agent"]
     T["Task<br/>task_id = runner:task"]
     N["Run<br/>run_id, UUIDv7"]
     L["Ledger entry<br/>meta.json + stdout.log + stderr.log"]
@@ -65,8 +65,9 @@ flowchart TD
 - **Project** - a directory holding at least one runner, addressed by
   `project_path`: workspace-relative, slash-separated, the root itself being
   `.`. Produced by `list_projects`.
-- **Runner** - a build-tool backend detected in that directory: `just`, `make`,
-  `cmake`, `docker`, or `go`.
+- **Runner** - a backend detected in that directory that parses project data or
+  provides a synthesized task table: `just`, `make`, `cmake`, `docker`, `go`,
+  or `agent`.
 - **Task** - one runnable thing, addressed by `task_id`, always namespaced
   `<runner>:<task>`. Produced by `list_tasks`.
 - **Run** - one process, addressed by `run_id`, a UUIDv7 that stays valid after
@@ -94,6 +95,9 @@ next to a `go.mod` is two runners in one project.
   Docker itself.
 - **`go`** - a regular `go.mod`. The task table is fixed and synthesized; the
   module is never parsed for targets.
+- **`agent`** - a `.git` entry in the project directory that is a directory or
+  regular file, not a symlink. Its tasks come from a fixed table and appear only
+  for the CLI binaries present on the host.
 
 Listing never configures, generates, or builds anything. CMake targets come
 from a build tree that already exists; a project that was never configured
@@ -109,7 +113,8 @@ dot-directories. Widen it deliberately:
 - `include_hidden: true` descends into dot-directories.
 - `runners` keeps only projects exposing one of the named runners.
 
-Some directories are never scanned: `.git`, `node_modules`, `target`,
+Some directories are never descended into while scanning: `.git`,
+`node_modules`, `target`,
 `.just-mcp-work`, and whatever the operator passed to `--exclude`. Symlinked
 directories are not followed. Exclusions are an operator setting and cannot be
 widened over MCP.
@@ -170,6 +175,16 @@ nothing explains itself without a second call.
 - **`go`** - `go:build`, `go:test`, `go:vet`, `go:mod:download`, and, in `all`
   mode, `go:fmt`, `go:mod:tidy`, and `go:any`. Every fixed task rejects
   arguments; only `go:any` forwards argv.
+- **`agent`** - `agent:codex` launches `codex exec`; `agent:claude` launches
+  `claude -p`. Both take positional `prompt`, `model`, and `effort`: `prompt`
+  is required and non-blank, and an empty `model` or `effort` slot omits its
+  flag. Codex renders `-m <model>` and `-c model_reasoning_effort=<effort>`;
+  Claude renders `--model <model>` and `--effort <effort>`. Optional values
+  with surrounding whitespace, values starting with `-`, and unsupported efforts
+  are rejected before the process starts. Codex accepts `low`, `medium`, `high`,
+  `xhigh`, `max`, or `ultra`; Claude accepts `low`, `medium`, `high`, `xhigh`,
+  or `max`. The fixed `--` places the prompt after flags. Agent runs have an
+  empty `runner_version` because one runner covers two binaries.
 
 Two task fields are worth reading before invoking anything:
 
@@ -242,11 +257,17 @@ surface.
 | Runner | Modes | Default |
 | --- | --- | --- |
 | `go` | `safe`, `all`, `disabled` | `safe` |
+| `agent` | `safe`, `disabled` | `safe` |
 | `just`, `make`, `cmake`, `docker` | `all`, `disabled` | `all` |
 
 In Go `safe` mode the four fixed tasks reject caller arguments outright. `all`
 adds `go:fmt`, `go:mod:tidy`, and the unrestricted `go:any`. `disabled` does
 not construct the runner at all, so nothing Go-related is discovered or run.
+In agent `safe` mode, only the fixed Codex and Claude tasks accept their three
+declared values; there is no `all` mode to widen the surface. This reduces the
+command surface, not the trust boundary: the launched agent is not sandboxed
+and inherits the operator's permissions in the checkout. `disabled` does not
+construct the agent runner.
 Just, Make, CMake, and Docker are still unreviewed: they offer their existing
 unrestricted surface or nothing.
 

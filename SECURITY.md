@@ -9,7 +9,11 @@ decide how much to trust it in a given setup.
 jmw runs tasks addressed as `<runner>:<task>` (for example, `just:build`). Just,
 Make, CMake, and Docker tasks come from project recipes, targets, presets,
 Dockerfiles, and Compose manifests. Go tasks are synthesized by jmw from a
-fixed command table when it finds a regular `go.mod`.
+fixed command table when it finds a regular `go.mod`. Agent tasks launch a CLI
+coding agent, which then runs unsandboxed, with the operator's own permissions,
+in the checkout. jmw fixes the command shape and argument surface apart from
+the caller-supplied prompt that becomes the agent's instructions; it does not
+constrain what the launched agent then does.
 
 ## Runner authorization
 
@@ -41,7 +45,9 @@ includes a fresh workspace where `init` has never run: jmw exposes no tasks
 until the policy exists. Deleting the policy therefore cannot widen the task
 surface.
 
-The reviewed Go declaration provides these modes:
+The reviewed declarations provide these modes:
+
+### Go
 
 | Mode | Surface | Caller arguments |
 | --- | --- | --- |
@@ -60,9 +66,32 @@ helper programs, and module download may access the network and write the
 module cache. All mode also permits arbitrary Go argv. Go exec and tool hooks
 can launch external programs without using a shell.
 
+### Agent
+
+The agent declaration has `safe` (default) and `disabled` modes; there is no
+`all` mode.
+
+| Mode | Surface | Caller arguments |
+| --- | --- | --- |
+| `safe` (default) | Fixed tasks | Prompt/model accepted; effort restricted |
+| `disabled` | No agent tasks | Not applicable |
+
+Safe exposes only the fixed `agent:codex` and `agent:claude` tasks. The caller
+supplies the non-blank `prompt`, arbitrary text that becomes the launched
+agent's instructions and is placed after literal `--`; a flag-shaped prompt is
+accepted. `model` is free-form, but may not have surrounding whitespace or
+start with `-`; only `effort` is restricted to a fixed vocabulary. The binary
+and flag skeleton are fixed, but this is not an isolation boundary: the launched
+agent inherits the operator's permissions in the checkout. Disabled does not
+construct the agent runner, so it discovers and runs nothing.
+
+### Unreviewed runners
+
 Just, Make, CMake, and Docker are currently explicit unreviewed declarations.
 For compatibility they offer their existing unrestricted `all` behavior by
 default or `disabled`; their command review is tracked separately.
+
+### Shell escape hatch
 
 The `run_shell_command` and `start_shell_command` tools pass caller-provided
 command text to the operating system shell. They remain available for genuinely
@@ -71,6 +100,8 @@ absent because its runner mode withheld it; agents must not recreate or run that
 task through either shell tool or another shell path. Runner selections do not
 implement a general shell authorization policy, so grant access to the shell
 tools only when arbitrary shell execution is acceptable.
+
+### CMake
 
 CMake target discovery reads an existing `CMakeCache.txt` and `build.ninja`;
 listing does not configure or regenerate the build tree. Treat generated build

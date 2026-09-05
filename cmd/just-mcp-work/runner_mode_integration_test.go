@@ -35,6 +35,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 			"--dir", root,
 			"--agents", "codex",
 			"--runner-mode", "just=all",
+			"--runner-mode", "agent=safe",
 			"--runner-mode", "cmake=all",
 			"--runner-mode", "docker=disabled",
 			"--runner-mode", "go=all",
@@ -49,6 +50,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 
 	wantSelections := []runner.Selection{
 		{Name: "just", Mode: runner.ModeAll},
+		{Name: "agent", Mode: runner.ModeSafe},
 		{Name: "cmake", Mode: runner.ModeAll},
 		{Name: "docker", Mode: runner.ModeDisabled},
 		{Name: "go", Mode: runner.ModeAll},
