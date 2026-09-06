@@ -108,6 +108,13 @@ func TestBeginPersistsOnlyCanonicalAIProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The run is never finished here, so the log files stay open and Windows
+	// refuses to remove the temporary directory.
+	t.Cleanup(func() {
+		if closeErr := errors.Join(handle.stdout.Close(), handle.stderr.Close()); closeErr != nil {
+			t.Error(closeErr)
+		}
+	})
 	if handle.Meta.AIProfile != codex {
 		t.Fatalf("run AI profile = %#v, want %#v", handle.Meta.AIProfile, codex)
 	}
