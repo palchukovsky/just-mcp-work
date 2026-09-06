@@ -70,8 +70,8 @@ func TestSyncShellReceiptTails(t *testing.T) {
 	smallStdoutBytes := int64(10)
 	smallStderrBytes := int64(16)
 	if runtime.GOOS == "windows" {
-		failingCommand = "echo stdout & echo stderr 1>&2 & exit /b 1"
-		smallTailCommand = "echo 0123456789 & echo abcdefghijklmnop 1>&2"
+		failingCommand = "echo stdout& echo stderr>&2& exit /b 1"
+		smallTailCommand = "echo 0123456789& echo abcdefghijklmnop>&2"
 		successTails = receiptTails{stdout: "shell-output\r\n"}
 		failingTails = receiptTails{stdout: "stdout\r\n", stderr: "stderr\r\n"}
 		smallTails = receiptTails{stdout: "9\r\n", stderr: "p\r\n"}

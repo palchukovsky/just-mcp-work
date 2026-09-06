@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -234,6 +235,19 @@ func writeMakefile(t *testing.T, dir string, name string) {
 		"\n" +
 		"%.generated:\n" +
 		"\t@printf 'pattern' > $@\n"
+	if runtime.GOOS == "windows" {
+		contents = ".PHONY: all hello\n" +
+			"all: hello\n" +
+			"\n" +
+			"hello:\n" +
+			"\t@echo hello from Make\n" +
+			"\n" +
+			"output.txt:\n" +
+			"\t@echo generated> $@\n" +
+			"\n" +
+			"%.generated:\n" +
+			"\t@echo pattern> $@\n"
+	}
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}

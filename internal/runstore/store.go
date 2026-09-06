@@ -211,7 +211,7 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve run directory: %w", err)
 	}
-	if err := os.Mkdir(dir, 0o750); err != nil {
+	if err := s.createActiveRunDir(meta.RunID, dir); err != nil {
 		return nil, fmt.Errorf("create run directory: %w", err)
 	}
 	// #nosec G304 -- dir is derived from a validated UUIDv7 below the store root.
@@ -221,6 +221,7 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 		0o600,
 	)
 	if err != nil {
+		s.markActive(meta.RunID, false)
 		return nil, fmt.Errorf("create stdout log: %w", err)
 	}
 	// #nosec G304 -- dir is derived from a validated UUIDv7 below the store root.
@@ -230,6 +231,7 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 		0o600,
 	)
 	if err != nil {
+		s.markActive(meta.RunID, false)
 		//nolint:errcheck // The original open failure remains the actionable error.
 		_ = stdout.Close()
 		return nil, fmt.Errorf("create stderr log: %w", err)
@@ -242,7 +244,6 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 		worktreeRoot: s.worktreeRoot,
 		Meta:         meta,
 	}
-	s.markActive(meta.RunID, true)
 	if err := s.writeMeta(dir, meta); err != nil {
 		s.markActive(meta.RunID, false)
 		//nolint:errcheck // Metadata write failure remains the actionable error.
@@ -758,6 +759,16 @@ func (s *Store) markActive(id string, active bool) {
 		return
 	}
 	delete(s.active, id)
+}
+
+func (s *Store) createActiveRunDir(id, dir string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := os.Mkdir(dir, 0o750); err != nil {
+		return fmt.Errorf("make active run directory: %w", err)
+	}
+	s.active[id] = struct{}{}
+	return nil
 }
 
 func (s *Store) isActive(id string) bool {

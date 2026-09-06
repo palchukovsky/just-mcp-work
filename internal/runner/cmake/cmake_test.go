@@ -825,6 +825,16 @@ func writeExecutableFixture(t *testing.T, filePath string, contents string) {
 
 func requireCMake(t *testing.T) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		cmakePath, err := exec.LookPath("cmake")
+		if err != nil {
+			t.Skip("cmake is not installed")
+		}
+		t.Setenv(
+			"PATH",
+			filepath.Dir(cmakePath)+string(os.PathListSeparator)+os.Getenv("PATH"),
+		)
+	}
 	for _, binary := range []string{"cmake", "ctest", "cpack"} {
 		if _, err := exec.LookPath(binary); err != nil {
 			t.Skipf("%s is not installed", binary)

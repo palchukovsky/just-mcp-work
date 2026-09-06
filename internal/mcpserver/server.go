@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -1516,24 +1515,7 @@ func shellCommand(dir, command string) (*exec.Cmd, error) {
 	if strings.TrimSpace(command) == "" {
 		return nil, fmt.Errorf("command must not be empty")
 	}
-	if runtime.GOOS == "windows" {
-		shell := os.Getenv("ComSpec")
-		if shell == "" {
-			shell = "cmd.exe"
-		}
-		// #nosec G702 -- command text is intentionally interpreted by the requested shell tool.
-		cmd := exec.CommandContext(context.Background(), shell, "/D", "/S", "/C", command)
-		cmd.Dir = dir
-		return cmd, nil
-	}
-	shell := os.Getenv("SHELL")
-	if shell == "" {
-		shell = "/bin/sh"
-	}
-	// #nosec G702 -- command text is intentionally interpreted by the requested shell tool.
-	cmd := exec.CommandContext(context.Background(), shell, "-c", command)
-	cmd.Dir = dir
-	return cmd, nil
+	return platformShellCommand(dir, command), nil
 }
 
 func (s *Server) reject(handle *runstore.Handle, reason error) executor.Result {

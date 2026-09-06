@@ -1307,7 +1307,11 @@ func TestServeVerifiesManagedSurfacesBeforeRunnerRegistry(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	managedPath := filepath.Join(root, "AGENTS.md")
+	resolvedRoot, resolveErr := filepath.EvalSymlinks(root)
+	if resolveErr != nil {
+		t.Fatal(resolveErr)
+	}
+	managedPath := filepath.Join(resolvedRoot, "AGENTS.md")
 	editedBlock := "<!-- BEGIN just-mcp-work (managed) -->\n" +
 		"edited\n" +
 		"<!-- END just-mcp-work (managed) -->\n"

@@ -83,7 +83,9 @@ func attach(cmd *exec.Cmd) (func() error, func() error, error) {
 	var once sync.Once
 	closeJob := func() (err error) {
 		once.Do(func() {
-			err = windows.CloseHandle(job)
+			if closeErr := windows.CloseHandle(job); closeErr != nil {
+				err = fmt.Errorf("close task job: %w", closeErr)
+			}
 		})
 		return err
 	}
@@ -157,21 +159,22 @@ func terminate(cmd *exec.Cmd, _ time.Duration, killTree func() error) error {
 		return killTree()
 	}
 	// #nosec G204 -- the PID comes from the process started by this executor.
-	if killErr := exec.CommandContext(
+	killErr := exec.CommandContext(
 		context.Background(),
 		"taskkill",
 		"/T",
 		"/F",
 		"/PID",
 		fmt.Sprint(cmd.Process.Pid),
-	).Run(); killErr == nil {
+	).Run()
+	if killErr == nil {
 		return nil
-	} else if fallbackErr := cmd.Process.Kill(); fallbackErr != nil {
+	}
+	if fallbackErr := cmd.Process.Kill(); fallbackErr != nil {
 		return errors.Join(
 			fmt.Errorf("terminate task tree: %w", killErr),
 			fmt.Errorf("terminate task process: %w", fallbackErr),
 		)
-	} else {
-		return fmt.Errorf("terminate task tree: %w", killErr)
 	}
+	return fmt.Errorf("terminate task tree: %w", killErr)
 }
