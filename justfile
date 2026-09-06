@@ -89,14 +89,27 @@ check-semgrep:
 verify: check
     {{ python }} scripts/dev.py smoke
 
+# Install every pinned verification tool into ignored repo-local directories.
+setup: install-lint install-semgrep
+
 # Install the pinned golangci-lint binary into the ignored repo-local .tmp/bin.
 install-lint:
     go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v{{ golangci_lint_version }}
 
-# Install the pinned Semgrep binary into the ignored repo-local virtual environment.
-install-semgrep:
-    {{ python }} -m venv {{ venv_dir }}
-    {{ venv_python }} -m pip install --requirement checks/requirements.txt
+# Create the ignored repo-local Python environment when it does not exist.
+[private]
+ensure-venv:
+    {{ python }} scripts/dev.py ensure-venv
+
+# Install the pinned Semgrep package into the ignored repo-local Python environment.
+[unix]
+install-semgrep: ensure-venv
+    "{{ venv_python }}" -m pip install --requirement "{{ repo_dir }}/checks/requirements.txt"
+
+# Install the pinned Semgrep package into the ignored repo-local Python environment.
+[windows]
+install-semgrep: ensure-venv
+    & "{{ venv_python }}" -m pip install --requirement "{{ repo_dir }}\checks\requirements.txt"
 
 # Install the pinned Windows C toolchain required by the Go race detector.
 [windows]
@@ -105,7 +118,7 @@ install-race-toolchain:
 
 # Install every tool required by the Windows check and verify recipes.
 [windows]
-install-windows-tools: install-lint install-semgrep install-race-toolchain
+install-windows-tools: setup install-race-toolchain
 
 # Scan dependencies and source for known Go vulnerabilities.
 vuln:

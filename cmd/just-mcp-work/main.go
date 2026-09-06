@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/mcpserver"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
@@ -68,6 +69,7 @@ func run(args []string) error {
 type serveOptions struct {
 	Root              string
 	RootExplicit      bool
+	AIProfile         aiprofile.Profile
 	Timeout           time.Duration
 	TimeoutUnlimited  bool
 	SyncDeadline      time.Duration
@@ -103,6 +105,7 @@ func parseServeOptions(args []string) (serveOptions, error) {
 	flags.SetOutput(os.Stderr)
 	rootFromEnvironment := os.Getenv("JMW_ROOT") != ""
 	root := flags.String("root", envOr("JMW_ROOT", "."), "workspace root")
+	ai := flags.String("ai", "", "caller AI family: codex or claude")
 	timeout := flags.Duration(
 		"timeout",
 		durationEnvOr("JMW_TIMEOUT", 15*time.Minute),
@@ -137,7 +140,8 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		// nosemgrep: discarded-error
 		_, _ = fmt.Fprintln(
 			flags.Output(),
-			"Usage: just-mcp-work serve [--root <dir>] [--timeout <duration>] "+
+			"Usage: just-mcp-work serve [--root <dir>] [--ai <codex|claude>] "+
+				"[--timeout <duration>] "+
 				"[--sync-deadline <duration>] [--retention <duration>] "+
 				"[--exclude <glob>,...]",
 		)
@@ -159,14 +163,27 @@ func parseServeOptions(args []string) (serveOptions, error) {
 		return serveOptions{}, fmt.Errorf("timeout must be zero or at least 1ms")
 	}
 	rootExplicit := rootFromEnvironment
+	aiExplicit := false
 	flags.Visit(func(current *flag.Flag) {
-		if current.Name == "root" {
+		switch current.Name {
+		case "root":
 			rootExplicit = true
+		case "ai":
+			aiExplicit = true
 		}
 	})
+	aiProfile := aiprofile.Unknown()
+	if aiExplicit {
+		declaredProfile, profileErr := aiprofile.Parse(*ai)
+		if profileErr != nil {
+			return serveOptions{}, fmt.Errorf("parse --ai: %w", profileErr)
+		}
+		aiProfile = declaredProfile
+	}
 	return serveOptions{
 		Root:              *root,
 		RootExplicit:      rootExplicit,
+		AIProfile:         aiProfile,
 		Timeout:           *timeout,
 		TimeoutUnlimited:  *timeout == 0,
 		SyncDeadline:      *syncDeadline,
@@ -201,6 +218,13 @@ func serve(args []string) error {
 		return fmt.Errorf("verify managed surfaces: %w", verifyErr)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger.Info(
+		"AI profile selected",
+		"ai_family", options.AIProfile.Family,
+		"profile_id", options.AIProfile.ID,
+		"profile_version", options.AIProfile.Version,
+		"transport", options.AIProfile.Transport,
+	)
 	registry, err := runnerRegistry(root, logger)
 	if err != nil {
 		return err
@@ -223,6 +247,7 @@ func serve(args []string) error {
 		mcpserver.Config{
 			BetaTest:         managedSurfaces.BetaTest,
 			AgentGuidePath:   managedSurfaces.AgentGuidePath,
+			AIProfile:        options.AIProfile,
 			Timeout:          options.Timeout,
 			TimeoutUnlimited: options.TimeoutUnlimited,
 			SyncDeadline:     options.SyncDeadline,
@@ -387,6 +412,12 @@ func initCommandWithIO(
 		"shell tool handling in Claude permission lists and Codex approval modes: "+
 			"allow or ask; empty asks on the console",
 	)
+	aiFamily := flags.String(
+		"ai",
+		"",
+		"AI family for generated managed server arguments: unknown, codex, or claude; "+
+			"empty asks on the console",
+	)
 	var runnerModes runnerModeFlag
 	flags.Var(
 		&runnerModes,
@@ -401,6 +432,7 @@ func initCommandWithIO(
 			flags.Output(),
 			"Usage: just-mcp-work "+command+" [--dir <dir>] [--agents <names>] [--dry-run] "+
 				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
+				"[--ai unknown|codex|claude] "+
 				"[--runner-mode <name>=<mode>]...",
 		)
 		flags.PrintDefaults()
@@ -435,6 +467,10 @@ func initCommandWithIO(
 			return confirmErr
 		}
 	}
+	profile, err := console.selectAIProfile(scope, *aiFamily)
+	if err != nil {
+		return fmt.Errorf("select AI profile: %w", err)
+	}
 	currentModes, err := console.currentRunnerModes(scope, catalog)
 	if err != nil {
 		return fmt.Errorf("read current runner modes: %w", err)
@@ -451,6 +487,7 @@ func initCommandWithIO(
 			BetaTest:          betaTest,
 			DryRun:            *dryRun,
 			WriteMCPConfig:    *writeMCPConfig,
+			AIProfile:         profile,
 			RunnerModes:       canonicalModes,
 			ClaudePermissions: permissions,
 			ShellPermission:   parsedShellPermission,
@@ -468,7 +505,7 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("apply agent instructions: %w", err)
 	}
-	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig)
+	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig, profile)
 }
 
 func writeInitResult(
@@ -476,6 +513,7 @@ func writeInitResult(
 	result agentinit.Result,
 	dryRun bool,
 	writeMCPConfig bool,
+	profile aiprofile.Profile,
 ) error {
 	if dryRun {
 		for _, diff := range result.Diffs {
@@ -502,7 +540,7 @@ func writeInitResult(
 			"Restart Codex or your MCP client to load updated server configuration.\n",
 		)
 	}
-	snippet, snippetErr := agentinit.MCPConfigSnippet(result.Scope)
+	snippet, snippetErr := agentinit.MCPConfigSnippet(result.Scope, profile)
 	if snippetErr != nil {
 		return fmt.Errorf("build MCP config snippet: %w", snippetErr)
 	}
@@ -518,6 +556,42 @@ func writeInitResult(
 type initConsole struct {
 	input  *bufio.Reader
 	output io.Writer
+}
+
+func parseInitAIProfile(value string) (aiprofile.Profile, error) {
+	switch aiprofile.Family(value) {
+	case aiprofile.FamilyUnknown:
+		return aiprofile.Unknown(), nil
+	case aiprofile.FamilyCodex, aiprofile.FamilyClaude:
+		profile, err := aiprofile.Parse(value)
+		if err != nil {
+			return aiprofile.Profile{}, fmt.Errorf("parse AI family: %w", err)
+		}
+		return profile, nil
+	default:
+		return aiprofile.Profile{}, fmt.Errorf(
+			"unsupported AI family %q; must be one of unknown, codex, claude",
+			value,
+		)
+	}
+}
+
+func (c *initConsole) selectAIProfile(
+	scope string,
+	explicit string,
+) (aiprofile.Profile, error) {
+	if explicit != "" {
+		return parseInitAIProfile(explicit)
+	}
+	current, found, err := agentinit.ReadRecordedAIProfile(scope)
+	if err != nil {
+		return aiprofile.Profile{}, fmt.Errorf("read current AI profile: %w", err)
+	}
+	offer := enumeratedOffer{value: string(aiprofile.FamilyUnknown)}
+	if found {
+		offer = enumeratedOffer{value: string(current.Family), current: true}
+	}
+	return c.askAIProfile(offer)
 }
 
 func writeInitOutput(output io.Writer, format string, arguments ...any) error {
@@ -872,6 +946,51 @@ func requestModeNames(request runner.PermissionRequest) string {
 		names = append(names, string(choice.Mode))
 	}
 	return strings.Join(names, ", ")
+}
+
+func (c *initConsole) askAIProfile(offer enumeratedOffer) (aiprofile.Profile, error) {
+	question := enumeratedQuestion{
+		introduction: "\nWhich AI family should the managed just-mcp-work server present?\n" +
+			"This is recorded provenance and changes presentation only; runner and shell " +
+			"permissions stay unchanged.\n",
+		choices: []enumeratedChoice{
+			{
+				value:       string(aiprofile.FamilyUnknown),
+				description: "do not declare an AI family",
+			},
+			{
+				value:       string(aiprofile.FamilyCodex),
+				description: "declare the Codex presentation profile",
+			},
+			{
+				value:       string(aiprofile.FamilyClaude),
+				description: "declare the Claude presentation profile",
+			},
+		},
+		defaultValue:          string(aiprofile.FamilyUnknown),
+		promptLabel:           "AI family",
+		readDescription:       "AI family",
+		unansweredDescription: "AI family",
+		flagName:              "--ai unknown|codex|claude",
+		parse: func(value string) (string, bool) {
+			profile, err := parseInitAIProfile(value)
+			return string(profile.Family), err == nil
+		},
+		unsupported: func(value string) error {
+			return fmt.Errorf("unsupported AI family %q", value)
+		},
+		unsupportedPrompt: func(value string) string {
+			return fmt.Sprintf(
+				"Unsupported AI family %q; choose one of unknown, codex, claude.\n",
+				value,
+			)
+		},
+	}
+	value, err := c.askEnumeratedChoice(question, offer)
+	if err != nil {
+		return aiprofile.Profile{}, err
+	}
+	return parseInitAIProfile(value)
 }
 
 func (c *initConsole) askShellPermission(

@@ -25,8 +25,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/executor"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
@@ -889,8 +891,42 @@ func TestListRunsSkipsMissingAndForeignWorktreeIdentities(t *testing.T) {
 	}
 }
 
+func TestListRunsReportsUnreadableMetadataSkips(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	valid, err := server.store.Begin(runstore.Meta{TaskID: "just:valid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishErr := valid.Finish(runstore.StatusOK, 0, "", false, false); finishErr != nil {
+		t.Fatal(finishErr)
+	}
+	id := uuid.Must(uuid.NewV7()).String()
+	if id <= valid.Meta.RunID {
+		t.Fatal("new UUIDv7 is not newer than the valid run")
+	}
+	if mkdirErr := os.Mkdir(filepath.Join(server.store.LogRoot(), id), 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+
+	result, output, err := server.listRuns(context.Background(), nil, listRunsInput{})
+	if err != nil || result != nil || output.Error != nil ||
+		len(output.Runs) != 1 || output.Runs[0].RunID != valid.Meta.RunID ||
+		output.Scanned != 2 || output.SkippedMetadata != 1 ||
+		output.SkippedIdentity != 0 {
+		t.Fatalf("list_runs = %#v, %#v, %v", result, output, err)
+	}
+	encoded, err := json.Marshal(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"skipped_metadata":1`) {
+		t.Fatalf("list_runs JSON = %s, want skipped_metadata", encoded)
+	}
+}
+
 //nolint:gocyclo // The mixed ledger setup and output assertions form one scenario.
-func TestListRunsReportsTrailingIdentitySkipsWhenLimitIsFilled(t *testing.T) {
+func TestListRunsReportsTrailingSkipsWhenLimitIsFilled(t *testing.T) {
 	root := t.TempDir()
 	server := newShellTestServer(t, root)
 	for range 2 {
@@ -919,6 +955,10 @@ func TestListRunsReportsTrailingIdentitySkipsWhenLimitIsFilled(t *testing.T) {
 			t.Fatal(writeErr)
 		}
 	}
+	id := uuid.Must(uuid.NewV7()).String()
+	if mkdirErr := os.Mkdir(filepath.Join(server.store.LogRoot(), id), 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
 	valid, err := server.store.Begin(runstore.Meta{TaskID: "just:valid"})
 	if err != nil {
 		t.Fatal(err)
@@ -934,7 +974,8 @@ func TestListRunsReportsTrailingIdentitySkipsWhenLimitIsFilled(t *testing.T) {
 		listRunsInput{Limit: &limit},
 	)
 	if err != nil || result != nil || output.Error != nil || len(output.Runs) != 1 ||
-		output.Runs[0].RunID != valid.Meta.RunID || output.Scanned != 3 ||
+		output.Runs[0].RunID != valid.Meta.RunID || output.Scanned != 4 ||
+		output.SkippedMetadata != 1 ||
 		output.SkippedIdentity != 2 || output.Truncated || output.NextCursor != "" {
 		t.Fatalf("list_runs = %#v, %#v, %v", result, output, err)
 	}
@@ -959,6 +1000,117 @@ func TestReceiptForHandleUsesImmutableWorktreeIdentity(t *testing.T) {
 	if finishErr := handle.Finish(runstore.StatusOK, 0, "", false, false); finishErr != nil {
 		t.Fatal(finishErr)
 	}
+}
+
+func TestRejectedReceiptForHandleUsesMutableAIProfile(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	originalProfile := aiprofile.Unknown()
+	handle, err := server.store.Begin(runstore.Meta{
+		TaskID:    "just:receipt-profile",
+		AIProfile: originalProfile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := server.reject(handle, errors.New("profile rejection"))
+	wantReceiptProfile := mustTestAIProfile(t, "codex")
+	handle.Meta.AIProfile = wantReceiptProfile
+	receipt := receiptForHandle(handle, result)
+	if receipt.Status != runstore.StatusSpawnError || receipt.ExitCode != -1 ||
+		receipt.AIProfile != wantReceiptProfile {
+		t.Fatalf(
+			"rejected receipt = %#v, want mutable handle profile %#v",
+			receipt,
+			wantReceiptProfile,
+		)
+	}
+	persisted, err := server.store.Get(handle.Meta.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.AIProfile != originalProfile {
+		t.Fatalf(
+			"persisted AI profile = %#v, want original profile %#v",
+			persisted.AIProfile,
+			originalProfile,
+		)
+	}
+}
+
+func TestAIProfileJSONShapeInReceiptAndPersistedMetadata(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	profile := mustTestAIProfile(t, "codex")
+	handle, err := server.store.Begin(runstore.Meta{
+		TaskID:    "just:profile-json",
+		AIProfile: profile,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if finishErr := handle.Finish(
+			runstore.StatusOK,
+			0,
+			"",
+			false,
+			false,
+		); finishErr != nil {
+			t.Errorf("finish profile JSON fixture: %v", finishErr)
+		}
+	}()
+
+	receiptJSON, err := json.Marshal(
+		receiptForHandle(handle, executor.Result{RunID: handle.Meta.RunID}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataJSON, err := os.ReadFile(
+		filepath.Join(server.store.LogRoot(), handle.Meta.RunID, "meta.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProfile := map[string]string{
+		"family":          "codex",
+		"profile_id":      "jmw/codex",
+		"profile_version": "1",
+		"transport":       "mcp-stdio",
+	}
+	for _, testCase := range []struct {
+		name    string
+		encoded []byte
+	}{
+		{name: "MCP receipt", encoded: receiptJSON},
+		{name: "persisted meta.json", encoded: metadataJSON},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(testCase.encoded, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			profileJSON, ok := envelope["ai_profile"]
+			if !ok {
+				t.Fatalf("outer JSON keys = %#v, want exact key ai_profile", envelope)
+			}
+			var gotProfile map[string]string
+			if err := json.Unmarshal(profileJSON, &gotProfile); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotProfile, wantProfile) {
+				t.Fatalf("ai_profile = %#v, want exactly %#v", gotProfile, wantProfile)
+			}
+		})
+	}
+}
+
+func mustTestAIProfile(t *testing.T, family string) aiprofile.Profile {
+	t.Helper()
+	profile, err := aiprofile.Parse(family)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return profile
 }
 
 func TestRunShellCommandCanonicalizesWorkingDirectoryBeforeRecordingHistory(t *testing.T) {

@@ -13,9 +13,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	gorunner "github.com/palchukovsky/just-mcp-work/internal/runner/go"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
@@ -63,6 +65,122 @@ func TestGoPermissionModesAtMCPBoundary(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // Each profile exercises one complete task and shell authorization boundary.
+func TestAIProfileDoesNotChangeTaskSurfaceOrAuthorization(t *testing.T) {
+	wantTaskIDs := []string{
+		"go:build",
+		"go:test",
+		"go:vet",
+		"go:mod:download",
+	}
+	type authorizationOutcome struct {
+		rejectedStatus   runstore.Status
+		rejectedMessage  string
+		shellStatus      runstore.Status
+		shellMessage     string
+		shellStdoutTail  string
+		rejectedExitCode int
+		shellExitCode    int
+	}
+	var wantOutcome *authorizationOutcome
+	for _, profile := range testAIProfiles(t) {
+		t.Run(string(profile.Family), func(t *testing.T) {
+			root := t.TempDir()
+			if err := os.WriteFile(
+				filepath.Join(root, "go.mod"),
+				[]byte("module example.com/ai-profile-permissions\n\ngo 1.25.0\n"),
+				0o600,
+			); err != nil {
+				t.Fatal(err)
+			}
+			registry := newGoPermissionRegistry(t, runner.ModeSafe)
+			server, _ := newPermissionBoundaryServer(t, root, registry, profile)
+
+			_, listed, err := server.listTasks(
+				context.Background(),
+				nil,
+				listTasksInput{ProjectPath: "."},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := listedTaskIDs(listed.Tasks); !slices.Equal(got, wantTaskIDs) {
+				t.Fatalf("safe Go tasks = %#v, want %#v", got, wantTaskIDs)
+			}
+
+			_, rejected, err := server.runTask(
+				context.Background(),
+				nil,
+				runTaskInput{ProjectPath: ".", TaskID: "go:fmt"},
+			)
+			if err != nil || rejected.OK || rejected.Status != runstore.StatusSpawnError ||
+				rejected.ExitCode != -1 || rejected.RunID == "" || !rejected.LogsReady {
+				t.Fatalf("withheld go:fmt receipt = %#v, %v", rejected, err)
+			}
+			if rejected.AIProfile != profile {
+				t.Fatalf(
+					"withheld go:fmt profile = %#v, want %#v",
+					rejected.AIProfile,
+					profile,
+				)
+			}
+
+			waitUntilComplete := int64(-1)
+			tailBytes := int64(64)
+			result, shellReceipt, err := server.runShellCommand(
+				context.Background(),
+				nil,
+				runShellCommandInput{
+					Command:   shellOutputCommand(),
+					MaxWaitMS: &waitUntilComplete,
+					TailBytes: &tailBytes,
+				},
+			)
+			if err != nil || result != nil || !shellReceipt.OK ||
+				shellReceipt.Status != runstore.StatusOK || shellReceipt.ExitCode != 0 ||
+				!shellReceipt.LogsReady || !strings.Contains(shellReceipt.StdoutTail, "shell-output") {
+				t.Fatalf("client-permitted shell receipt = %#v, %#v, %v", result, shellReceipt, err)
+			}
+			if shellReceipt.AIProfile != profile {
+				t.Fatalf(
+					"client-permitted shell profile = %#v, want %#v",
+					shellReceipt.AIProfile,
+					profile,
+				)
+			}
+
+			outcome := authorizationOutcome{
+				rejectedStatus:   rejected.Status,
+				rejectedExitCode: rejected.ExitCode,
+				rejectedMessage:  rejected.Message,
+				shellStatus:      shellReceipt.Status,
+				shellExitCode:    shellReceipt.ExitCode,
+				shellMessage:     shellReceipt.Message,
+				shellStdoutTail:  shellReceipt.StdoutTail,
+			}
+			if wantOutcome == nil {
+				wantOutcome = &outcome
+			} else if outcome != *wantOutcome {
+				t.Fatalf(
+					"authorization outcome for %s = %#v, want %#v",
+					profile.Family,
+					outcome,
+					*wantOutcome,
+				)
+			}
+		})
+	}
+}
+
+func testAIProfiles(t *testing.T) []aiprofile.Profile {
+	t.Helper()
+	return []aiprofile.Profile{
+		aiprofile.Unknown(),
+		mustTestAIProfile(t, "codex"),
+		mustTestAIProfile(t, "claude"),
+	}
+}
+
 func assertGoPermissionModeAtMCPBoundary(
 	t *testing.T,
 	mode runner.Mode,
@@ -77,17 +195,8 @@ func assertGoPermissionModeAtMCPBoundary(
 	); err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := runner.NewCatalog(gorunner.Registration(""))
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry, err := catalog.Resolve(
-		[]runner.Selection{{Name: "go", Mode: mode}},
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	server, store := newPermissionBoundaryServer(t, root, registry)
+	registry := newGoPermissionRegistry(t, mode)
+	server, store := newPermissionBoundaryServer(t, root, registry, aiprofile.Unknown())
 	_, listed, err := server.listTasks(
 		context.Background(),
 		nil,
@@ -103,6 +212,21 @@ func assertGoPermissionModeAtMCPBoundary(
 		return
 	}
 	assertUnsafeGoTestArgumentsRejected(t, server, store)
+}
+
+func newGoPermissionRegistry(t *testing.T, mode runner.Mode) *runner.Registry {
+	t.Helper()
+	catalog, err := runner.NewCatalog(gorunner.Registration(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := catalog.Resolve(
+		[]runner.Selection{{Name: "go", Mode: mode}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return registry
 }
 
 func assertUnsafeGoTestArgumentsRejected(
@@ -187,7 +311,12 @@ func TestTaskInputValidationPrecedesRunnerVersionAndProcessStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server, store := newPermissionBoundaryServer(t, root, registry)
+	server, store := newPermissionBoundaryServer(
+		t,
+		root,
+		registry,
+		aiprofile.Unknown(),
+	)
 	_, rejected, err := server.runTask(
 		context.Background(),
 		nil,
@@ -221,6 +350,7 @@ func newPermissionBoundaryServer(
 	t *testing.T,
 	root string,
 	registry *runner.Registry,
+	profile aiprofile.Profile,
 ) (*Server, *runstore.Store) {
 	t.Helper()
 	workspaceRegistry, err := workspace.NewRegistry(root, registry, nil)
@@ -236,6 +366,7 @@ func newPermissionBoundaryServer(
 		registry,
 		store,
 		Config{
+			AIProfile: profile,
 			Timeout:   5 * time.Second,
 			Retention: time.Hour,
 			Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),

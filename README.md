@@ -172,8 +172,17 @@ default or `disabled` for compatibility while their command surfaces are
 reviewed separately. Pass the repeatable `init --runner-mode <name>=<mode>`
 option to answer selected runner questions non-interactively. `init` writes the
 complete canonical selection to `.just-mcp-work.json` in the workspace scope
-root, next to `.mcp.json`. Managed MCP and Codex server arguments are
-`serve --root <dir>`; to change the selection, run `init`, not
+root, next to `.mcp.json`.
+
+`init` also asks which AI family the managed server should declare. A workspace
+with no managed manifest offers `unknown`; later runs offer the family stored by
+the previous `init`. Pass `--ai unknown|codex|claude` to answer the question
+non-interactively. The selection is recorded in the managed manifest and used
+for both generated MCP configurations: their arguments always include
+`serve --root <dir>`, add `--ai codex|claude` for those families, and omit
+`--ai` for `unknown`. The profile is caller-declared presentation and
+provenance; it does not change runner modes, task visibility, shell permission,
+or write access. To change runner selection, run `init`, not
 `serve --runner-mode`.
 
 `init` also asks whether the shell tools may run without a client confirmation.
@@ -194,24 +203,29 @@ test when that preflight succeeds.
 | Flag | Environment | Default |
 | --- | --- | --- |
 | `--root` | `JMW_ROOT` | Current directory |
+| `--ai` | - | `unknown` |
 | `--timeout` | `JMW_TIMEOUT` | `15m` (`0` disables the timeout) |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` |
 | `--retention` | `JMW_RETENTION` | `72h` |
 | `--exclude` | - | None |
 
-Run data is kept under `.just-mcp-work/log/` in the selected workspace.
+Run data is kept under `.just-mcp-work/log/` in the selected workspace. Every
+new run records the active AI profile and returns it in receipts; `unknown`
+means `serve` started without `--ai`.
 
 ## Development and release
 
 With [Just](https://just.systems/):
 
 ```console
-just install-lint
+just setup
 just verify
 just build-all
 just package
 ```
 
+`just setup` installs the pinned verification tools into ignored directories in
+this checkout: golangci-lint under `.tmp/bin/` and Semgrep under `.venv/`.
 `just verify` checks formatting, dependencies, strict lint, vet, race-enabled
 tests, build, and the MCP smoke flow. `just build-all` produces the Linux,
 macOS, and Windows binaries; `just package` creates the release archives and

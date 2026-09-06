@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 )
 
 const (
@@ -47,29 +48,30 @@ var ErrFinalMetadataPersistence = errors.New("final run metadata persistence fai
 //
 //nolint:govet // Field order follows the stable on-disk metadata schema.
 type Meta struct {
-	RunID           string    `json:"run_id"`
-	WorktreeRoot    string    `json:"worktree_root"`
-	ProjectPath     string    `json:"project_path,omitempty"`
-	Runner          string    `json:"runner,omitempty"`
-	TaskID          string    `json:"task_id,omitempty"`
-	Args            []string  `json:"args,omitempty"`
-	CWD             string    `json:"cwd,omitempty"`
-	StartedAt       time.Time `json:"started_at"`
-	EndedAt         time.Time `json:"ended_at"`
-	DurationMS      int64     `json:"duration_ms,omitempty"`
-	TaskTimeoutMS   *int64    `json:"task_timeout_ms,omitempty"`
-	ExitCode        int       `json:"exit_code"`
-	Status          Status    `json:"status"`
-	RunnerVersion   string    `json:"runner_version,omitempty"`
-	OwnerPID        int       `json:"owner_pid,omitempty"`
-	OwnerIdentity   string    `json:"owner_identity,omitempty"`
-	PID             int       `json:"pid,omitempty"`
-	ProcessIdentity string    `json:"process_identity,omitempty"`
-	StdoutBytes     int64     `json:"stdout_bytes"`
-	StderrBytes     int64     `json:"stderr_bytes"`
-	StdoutTruncated bool      `json:"stdout_truncated,omitempty"`
-	StderrTruncated bool      `json:"stderr_truncated,omitempty"`
-	Error           string    `json:"error,omitempty"`
+	RunID           string            `json:"run_id"`
+	WorktreeRoot    string            `json:"worktree_root"`
+	ProjectPath     string            `json:"project_path,omitempty"`
+	Runner          string            `json:"runner,omitempty"`
+	TaskID          string            `json:"task_id,omitempty"`
+	Args            []string          `json:"args,omitempty"`
+	CWD             string            `json:"cwd,omitempty"`
+	AIProfile       aiprofile.Profile `json:"ai_profile"`
+	StartedAt       time.Time         `json:"started_at"`
+	EndedAt         time.Time         `json:"ended_at"`
+	DurationMS      int64             `json:"duration_ms,omitempty"`
+	TaskTimeoutMS   *int64            `json:"task_timeout_ms,omitempty"`
+	ExitCode        int               `json:"exit_code"`
+	Status          Status            `json:"status"`
+	RunnerVersion   string            `json:"runner_version,omitempty"`
+	OwnerPID        int               `json:"owner_pid,omitempty"`
+	OwnerIdentity   string            `json:"owner_identity,omitempty"`
+	PID             int               `json:"pid,omitempty"`
+	ProcessIdentity string            `json:"process_identity,omitempty"`
+	StdoutBytes     int64             `json:"stdout_bytes"`
+	StderrBytes     int64             `json:"stderr_bytes"`
+	StdoutTruncated bool              `json:"stdout_truncated,omitempty"`
+	StderrTruncated bool              `json:"stderr_truncated,omitempty"`
+	Error           string            `json:"error,omitempty"`
 }
 
 // LogState is a filesystem-derived snapshot of a run's two log files.
@@ -95,21 +97,23 @@ type Store struct {
 }
 
 // RecentRun is a valid ledger entry with cumulative scan accounting through it.
-// Callers issuing a cursor for Meta must report Scanned and SkippedIdentity from
-// this entry so scan work after the cursor remains attributable to a later page.
+// Callers issuing a cursor for Meta must report the scan and skip counters from
+// this entry so work after the cursor remains attributable to a later page.
 type RecentRun struct {
 	Meta            Meta
 	Scanned         int
+	SkippedMetadata int
 	SkippedIdentity int
 }
 
 // RecentPage contains valid ledger entries and page-local scan accounting.
 // Callers that issue no continuation cursor must report the page-level Scanned
-// and SkippedIdentity totals, including trailing identity-invalid entries after
-// the last valid run; callers cursoring at a RecentRun use that entry's totals.
+// and skip totals, including trailing invalid entries after the last valid run;
+// callers cursoring at a RecentRun use that entry's totals.
 type RecentPage struct {
 	Runs            []RecentRun
 	Scanned         int
+	SkippedMetadata int
 	SkippedIdentity int
 	More            bool
 }
@@ -192,6 +196,11 @@ type Handle struct {
 //
 //nolint:govet // Local error scopes keep each filesystem operation explicit.
 func (s *Store) Begin(meta Meta) (*Handle, error) {
+	profile, err := aiprofile.Canonical(meta.AIProfile)
+	if err != nil {
+		return nil, fmt.Errorf("validate run AI profile: %w", err)
+	}
+	meta.AIProfile = profile
 	id, err := uuid.NewV7()
 	if err != nil {
 		return nil, fmt.Errorf("generate run id: %w", err)
@@ -473,6 +482,7 @@ func (s *Store) ListRecentPage(limit int, cursor string) (RecentPage, error) {
 	sort.Sort(sort.Reverse(sort.StringSlice(names)))
 	page.Runs = make([]RecentRun, 0, min(limit, len(names)))
 	trailingScanned := 0
+	trailingSkippedMetadata := 0
 	trailingSkippedIdentity := 0
 	for _, name := range names {
 		if cursor != "" && name >= cursor {
@@ -490,6 +500,11 @@ func (s *Store) ListRecentPage(limit int, cursor string) (RecentPage, error) {
 		}
 		meta, metaErr := readMeta(filepath.Join(dir, "meta.json"))
 		if metaErr != nil {
+			if pageFull {
+				trailingSkippedMetadata++
+			} else {
+				page.SkippedMetadata++
+			}
 			continue
 		}
 		if identityErr := s.validateWorktreeIdentity(meta); identityErr != nil {
@@ -509,12 +524,14 @@ func (s *Store) ListRecentPage(limit int, cursor string) (RecentPage, error) {
 			RecentRun{
 				Meta:            meta,
 				Scanned:         page.Scanned,
+				SkippedMetadata: page.SkippedMetadata,
 				SkippedIdentity: page.SkippedIdentity,
 			},
 		)
 	}
 	// Look-ahead entries belong to this page only when no later valid page exists.
 	page.Scanned += trailingScanned
+	page.SkippedMetadata += trailingSkippedMetadata
 	page.SkippedIdentity += trailingSkippedIdentity
 	return page, nil
 }
@@ -694,6 +711,11 @@ func (s *Store) encodeMeta(meta Meta) ([]byte, error) {
 	if err := s.validateWorktreeIdentity(meta); err != nil {
 		return nil, fmt.Errorf("validate run metadata identity: %w", err)
 	}
+	profile, err := aiprofile.Canonical(meta.AIProfile)
+	if err != nil {
+		return nil, fmt.Errorf("validate run AI profile: %w", err)
+	}
+	meta.AIProfile = profile
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("encode run metadata: %w", err)
@@ -747,6 +769,9 @@ func readMeta(path string) (Meta, error) {
 	var meta Meta
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return Meta{}, fmt.Errorf("decode run metadata: %w", err)
+	}
+	if meta.AIProfile == (aiprofile.Profile{}) {
+		meta.AIProfile = aiprofile.Unknown()
 	}
 	return meta, nil
 }

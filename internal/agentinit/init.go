@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
@@ -41,20 +42,32 @@ const (
 	claudeServerRule = "mcp__" + serverName
 )
 
-// Prompt returns the JMW usage guidance served as the MCP server's instructions.
+// Prompt returns the profiled JMW usage guidance served as the MCP server's instructions.
 // A verified agent guide path lets the server use the compact form. When
 // betaTest is true, it appends the beta feedback contract.
-func Prompt(betaTest bool, agentGuidePath string) string {
+func Prompt(profile aiprofile.Profile, betaTest bool, agentGuidePath string) string {
 	prompt := promptText
 	if agentGuidePath != "" {
 		prompt = fmt.Sprintf(shortPromptText, agentGuidePath)
 	}
-	if !betaTest {
-		return prompt
+	if betaTest {
+		// This wrapper is presentation only; the managed-block text is the single contract.
+		prompt += "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText
 	}
-	// This wrapper is presentation only; the managed-block text is the single contract.
-	return prompt + "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText
+	return fmt.Sprintf(
+		profilePromptText,
+		profile.Family,
+		profile.ID,
+		profile.Version,
+		profile.Transport,
+	) + "\n\n" + prompt
 }
+
+const profilePromptText = `AI PROFILE
+family: %s
+profile_id: %s
+profile_version: %s
+transport: %s`
 
 const shortPromptText = `JMW is this workspace's task runner; it saves context budget.
 
@@ -286,6 +299,9 @@ type Options struct {
 	BetaTest       bool
 	DryRun         bool
 	WriteMCPConfig bool
+	// AIProfile selects the presentation profile carried by generated managed
+	// server arguments. The zero value means unknown.
+	AIProfile aiprofile.Profile
 	// RunnerModes is the complete, catalog-ordered runner selection persisted in
 	// the workspace policy file.
 	RunnerModes runner.ValidatedSelections
@@ -344,6 +360,11 @@ func Apply(options Options) (Result, error) {
 	if _, err := options.RunnerModes.Selections(); err != nil {
 		return Result{}, fmt.Errorf("validate runner selections: %w", err)
 	}
+	profile, err := aiprofile.Canonical(options.AIProfile)
+	if err != nil {
+		return Result{}, fmt.Errorf("validate AI profile: %w", err)
+	}
+	options.AIProfile = profile
 	scope, preserveMCPAnchor, err := resolveScope(options.Dir)
 	if err != nil {
 		return Result{}, err
@@ -389,6 +410,7 @@ func Apply(options Options) (Result, error) {
 		surfaces,
 		options.BetaTest,
 		options.ShellPermission,
+		options.AIProfile,
 		selected,
 	)
 	if err != nil {
@@ -581,7 +603,7 @@ func planMCPConfig(
 		return nil, nil, err
 	}
 	if options.WriteMCPConfig {
-		after, mergeErr := mergeMCPConfig(before, scope)
+		after, mergeErr := mergeMCPConfig(before, scope, options.AIProfile)
 		if mergeErr != nil {
 			return nil, nil, mergeErr
 		}
@@ -622,7 +644,12 @@ func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurf
 		return nil, nil, err
 	}
 	if options.WriteMCPConfig {
-		after, mergeErr := mergeCodexConfig(before, scope, options.ShellPermission)
+		after, mergeErr := mergeCodexConfig(
+			before,
+			scope,
+			options.ShellPermission,
+			options.AIProfile,
+		)
 		if mergeErr != nil {
 			return nil, nil, fmt.Errorf("merge %s: %w", path, mergeErr)
 		}
@@ -1308,11 +1335,15 @@ func resolvePath(path string) (string, error) {
 }
 
 // MCPConfigSnippet is a ready-to-paste local MCP configuration for scopeRoot.
-func MCPConfigSnippet(scopeRoot string) (string, error) {
+func MCPConfigSnippet(scopeRoot string, profile aiprofile.Profile) (string, error) {
 	if scopeRoot == "" {
 		return "", fmt.Errorf("MCP config scope root is required")
 	}
-	data, err := mergeMCPConfig(nil, scopeRoot)
+	profile, err := aiprofile.Canonical(profile)
+	if err != nil {
+		return "", fmt.Errorf("validate AI profile: %w", err)
+	}
+	data, err := mergeMCPConfig(nil, scopeRoot, profile)
 	if err != nil {
 		return "", err
 	}
@@ -1422,7 +1453,7 @@ type serverEntry struct {
 	Args    []string `json:"args"`
 }
 
-func managedServerEntry(root string) (serverEntry, error) {
+func managedServerEntry(root string, profile aiprofile.Profile) (serverEntry, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("resolve executable: %w", err)
@@ -1435,7 +1466,7 @@ func managedServerEntry(root string) (serverEntry, error) {
 	if err != nil {
 		return serverEntry{}, fmt.Errorf("resolve workspace root: %w", err)
 	}
-	return serverEntry{Command: executable, Args: managedServerArgs(root)}, nil
+	return serverEntry{Command: executable, Args: managedServerArgs(root, profile)}, nil
 }
 
 // mergeMCPConfig writes the managed server entry into the configuration text.
@@ -1444,8 +1475,9 @@ func managedServerEntry(root string) (serverEntry, error) {
 func mergeMCPConfig(
 	before []byte,
 	scopeRoot string,
+	profile aiprofile.Profile,
 ) ([]byte, error) {
-	entry, err := managedServerEntry(scopeRoot)
+	entry, err := managedServerEntry(scopeRoot, profile)
 	if err != nil {
 		return nil, err
 	}
@@ -1852,6 +1884,7 @@ func mergeCodexConfig(
 	before []byte,
 	root string,
 	shellPermission ShellPermission,
+	profile aiprofile.Profile,
 ) ([]byte, error) {
 	if _, _, _, err := codexBlockRange(string(before)); err != nil {
 		return nil, err
@@ -1872,7 +1905,7 @@ func mergeCodexConfig(
 	if err != nil {
 		return nil, fmt.Errorf("encode executable path: %w", err)
 	}
-	argsValue, err := tomlStringArray(managedServerArgs(root))
+	argsValue, err := tomlStringArray(managedServerArgs(root, profile))
 	if err != nil {
 		return nil, fmt.Errorf("encode server arguments: %w", err)
 	}
@@ -2051,8 +2084,12 @@ func tomlStringArray(values []string) (string, error) {
 	return "[" + strings.Join(encoded, ", ") + "]", nil
 }
 
-func managedServerArgs(root string) []string {
-	return []string{"serve", "--root", root}
+func managedServerArgs(root string, profile aiprofile.Profile) []string {
+	args := []string{"serve", "--root", root}
+	if profile.Family != aiprofile.FamilyUnknown {
+		args = append(args, "--ai", string(profile.Family))
+	}
+	return args
 }
 
 func unique(values []string) []string {

@@ -25,6 +25,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/executor"
 	"github.com/palchukovsky/just-mcp-work/internal/runmanager"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
@@ -65,6 +66,7 @@ func startShellCommandDescription() string {
 type Config struct {
 	BetaTest         bool
 	AgentGuidePath   string
+	AIProfile        aiprofile.Profile
 	Timeout          time.Duration
 	TimeoutUnlimited bool
 	SyncDeadline     time.Duration
@@ -89,6 +91,8 @@ type Server struct {
 }
 
 // New creates an MCP server facade.
+//
+//nolint:gocyclo // Each constructor branch keeps one configuration invariant explicit.
 func New(
 	workspaceRegistry *workspace.Registry,
 	runners *runner.Registry,
@@ -112,6 +116,11 @@ func New(
 			store.WorktreeRoot(),
 		)
 	}
+	profile, err := aiprofile.Canonical(config.AIProfile)
+	if err != nil {
+		return nil, fmt.Errorf("validate AI profile: %w", err)
+	}
+	config.AIProfile = profile
 	if err := validateTaskTimeout(config); err != nil {
 		return nil, err
 	}
@@ -191,8 +200,12 @@ func (s *Server) newMCPServer() *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "just-mcp-work", Version: version.Current().Display()},
 		&mcp.ServerOptions{
-			Instructions: agentinit.Prompt(s.config.BetaTest, s.config.AgentGuidePath),
-			Logger:       s.config.Logger,
+			Instructions: agentinit.Prompt(
+				s.config.AIProfile,
+				s.config.BetaTest,
+				s.config.AgentGuidePath,
+			),
+			Logger: s.config.Logger,
 		},
 	)
 	mcp.AddTool(
@@ -929,31 +942,32 @@ type runTaskOutput struct {
 
 //nolint:govet // Field order follows the stable MCP running receipt response shape.
 type runDetails struct {
-	Completed           *bool           `json:"completed,omitempty"`
-	Promoted            bool            `json:"promoted,omitempty"`
-	WorktreeRoot        string          `json:"worktree_root"`
-	ProjectPath         string          `json:"project_path,omitempty"`
-	Runner              string          `json:"runner,omitempty"`
-	TaskID              string          `json:"task_id,omitempty"`
-	Args                []string        `json:"args,omitempty"`
-	CWD                 string          `json:"cwd,omitempty"`
-	PID                 int             `json:"pid,omitempty"`
-	OwnerPID            int             `json:"owner_pid,omitempty"`
-	ProcessAlive        *bool           `json:"process_alive,omitempty"`
-	OwnedByThis         *bool           `json:"owned_by_this_server,omitempty"`
-	StartedAt           *time.Time      `json:"started_at,omitempty"`
-	EndedAt             *time.Time      `json:"ended_at,omitempty"`
-	LastOutputAt        *time.Time      `json:"last_output_at,omitempty"`
-	LastOutputAgeMS     int64           `json:"last_output_age_ms,omitempty"`
-	NoOutputYet         *bool           `json:"no_output_yet,omitempty"`
-	StdoutBytes         int64           `json:"stdout_bytes,omitempty"`
-	StderrBytes         int64           `json:"stderr_bytes,omitempty"`
-	TaskTimeoutMS       *int64          `json:"task_timeout_ms,omitempty"`
-	TimeToTaskTimeoutMS *int64          `json:"time_to_task_timeout_ms,omitempty"`
-	TimeoutMS           int64           `json:"timeout_ms,omitempty"`
-	TimeToTimeoutMS     *int64          `json:"time_to_timeout_ms,omitempty"`
-	Stats               *runstats.Stats `json:"stats,omitempty"`
-	AlreadyFinished     bool            `json:"already_finished,omitempty"`
+	Completed           *bool             `json:"completed,omitempty"`
+	Promoted            bool              `json:"promoted,omitempty"`
+	WorktreeRoot        string            `json:"worktree_root"`
+	ProjectPath         string            `json:"project_path,omitempty"`
+	Runner              string            `json:"runner,omitempty"`
+	TaskID              string            `json:"task_id,omitempty"`
+	Args                []string          `json:"args,omitempty"`
+	CWD                 string            `json:"cwd,omitempty"`
+	AIProfile           aiprofile.Profile `json:"ai_profile"`
+	PID                 int               `json:"pid,omitempty"`
+	OwnerPID            int               `json:"owner_pid,omitempty"`
+	ProcessAlive        *bool             `json:"process_alive,omitempty"`
+	OwnedByThis         *bool             `json:"owned_by_this_server,omitempty"`
+	StartedAt           *time.Time        `json:"started_at,omitempty"`
+	EndedAt             *time.Time        `json:"ended_at,omitempty"`
+	LastOutputAt        *time.Time        `json:"last_output_at,omitempty"`
+	LastOutputAgeMS     int64             `json:"last_output_age_ms,omitempty"`
+	NoOutputYet         *bool             `json:"no_output_yet,omitempty"`
+	StdoutBytes         int64             `json:"stdout_bytes,omitempty"`
+	StderrBytes         int64             `json:"stderr_bytes,omitempty"`
+	TaskTimeoutMS       *int64            `json:"task_timeout_ms,omitempty"`
+	TimeToTaskTimeoutMS *int64            `json:"time_to_task_timeout_ms,omitempty"`
+	TimeoutMS           int64             `json:"timeout_ms,omitempty"`
+	TimeToTimeoutMS     *int64            `json:"time_to_timeout_ms,omitempty"`
+	Stats               *runstats.Stats   `json:"stats,omitempty"`
+	AlreadyFinished     bool              `json:"already_finished,omitempty"`
 }
 
 func (s *Server) runTask(
@@ -1012,6 +1026,7 @@ func (s *Server) startTaskRun(
 			ProjectPath: input.ProjectPath,
 			TaskID:      input.TaskID,
 			Args:        input.Arguments,
+			AIProfile:   s.config.AIProfile,
 		},
 	)
 	if err != nil {
@@ -1026,7 +1041,7 @@ func (s *Server) startTaskRun(
 	if !found {
 		return nil, stats, runTaskOutput{
 			Result:     s.reject(handle, fmt.Errorf("task_id must be namespaced as <runner>:<task>")),
-			runDetails: receiptDetails(handle.WorktreeRoot(), nil),
+			runDetails: receiptDetails(handle.WorktreeRoot(), handle.Meta.AIProfile, nil),
 		}
 	}
 	candidate, ok := s.runners.Get(runnerName)
@@ -1043,7 +1058,7 @@ func (s *Server) startTaskRun(
 				handle,
 				fmt.Errorf("unknown task_id %q for project %q", input.TaskID, input.ProjectPath),
 			),
-			runDetails: receiptDetails(handle.WorktreeRoot(), nil),
+			runDetails: receiptDetails(handle.WorktreeRoot(), handle.Meta.AIProfile, nil),
 		}
 	}
 	handle.Meta.Runner = runnerName
@@ -1137,7 +1152,7 @@ func (s *Server) runShellCommand(
 	)
 	if err != nil {
 		return toolErrorResult(err), runTaskOutput{
-			runDetails: receiptDetails(s.store.WorktreeRoot(), nil),
+			runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
 			Error:      newToolError(err),
 		}, nil
 	}
@@ -1168,7 +1183,7 @@ func (s *Server) startShellCommand(
 	)
 	if err != nil {
 		return toolErrorResult(err), runTaskOutput{
-			runDetails: receiptDetails(s.store.WorktreeRoot(), nil),
+			runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
 			Error:      newToolError(err),
 		}, nil
 	}
@@ -1198,6 +1213,7 @@ func (s *Server) startShellRun(
 			ProjectPath: workingDirectory,
 			TaskID:      "shell:command",
 			Args:        []string{input.Command},
+			AIProfile:   s.config.AIProfile,
 		},
 	)
 	if err != nil {
@@ -1256,7 +1272,7 @@ func (s *Server) startRun(
 	)
 	if run == nil {
 		return nil, stats, runTaskOutput{
-			runDetails: receiptDetails(handle.WorktreeRoot(), nil),
+			runDetails: receiptDetails(handle.WorktreeRoot(), handle.Meta.AIProfile, nil),
 			Error:      newToolError(startErr),
 		}
 	}
@@ -1357,7 +1373,7 @@ func (s *Server) finishedReceipt(
 		s.attachTails(&result, *tailBytes)
 	}
 	meta := run.Meta()
-	details := receiptDetails(s.store.WorktreeRoot(), stats)
+	details := receiptDetails(s.store.WorktreeRoot(), meta.AIProfile, stats)
 	details.StdoutBytes = meta.StdoutBytes
 	details.StderrBytes = meta.StderrBytes
 	return runTaskOutput{
@@ -1399,12 +1415,20 @@ func (s *Server) attachTails(result *executor.Result, tailBytes int64) {
 func receiptForHandle(handle *runstore.Handle, result executor.Result) runTaskOutput {
 	return runTaskOutput{
 		Result:     result,
-		runDetails: receiptDetails(handle.WorktreeRoot(), nil),
+		runDetails: receiptDetails(handle.WorktreeRoot(), handle.Meta.AIProfile, nil),
 	}
 }
 
-func receiptDetails(worktreeRoot string, stats *runstats.Stats) *runDetails {
-	return &runDetails{WorktreeRoot: worktreeRoot, Stats: stats}
+func receiptDetails(
+	worktreeRoot string,
+	profile aiprofile.Profile,
+	stats *runstats.Stats,
+) *runDetails {
+	return &runDetails{
+		WorktreeRoot: worktreeRoot,
+		AIProfile:    profile,
+		Stats:        stats,
+	}
 }
 
 func (s *Server) runningReceipt(
@@ -1417,8 +1441,12 @@ func (s *Server) runningReceipt(
 	if err != nil {
 		s.config.Logger.Warn("read running task status failed", "run_id", result.RunID, "error", err)
 		return runTaskOutput{
-			Result:     result,
-			runDetails: receiptDetails(s.store.WorktreeRoot(), nil),
+			Result: result,
+			runDetails: receiptDetails(
+				s.store.WorktreeRoot(),
+				run.Meta().AIProfile,
+				nil,
+			),
 		}
 	}
 	if result.Status == runstore.StatusRunning {
@@ -1789,6 +1817,7 @@ type runListEntry struct {
 type listRunsOutput struct {
 	Runs            []runListEntry `json:"runs"`
 	Scanned         int            `json:"scanned"`
+	SkippedMetadata int            `json:"skipped_metadata,omitempty"`
 	SkippedIdentity int            `json:"skipped_identity,omitempty"`
 	Truncated       bool           `json:"truncated,omitempty"`
 	NextCursor      string         `json:"next_cursor,omitempty"`
@@ -1830,6 +1859,7 @@ func (s *Server) listRuns(
 	}
 	for index, recent := range page.Runs {
 		output.Scanned = recent.Scanned
+		output.SkippedMetadata = recent.SkippedMetadata
 		output.SkippedIdentity = recent.SkippedIdentity
 		meta := recent.Meta
 		if current, _, metaErr := s.metaFor(meta.RunID); metaErr == nil {
@@ -1881,12 +1911,14 @@ func (s *Server) listRuns(
 				output.NextCursor = meta.RunID
 			} else {
 				output.Scanned = page.Scanned
+				output.SkippedMetadata = page.SkippedMetadata
 				output.SkippedIdentity = page.SkippedIdentity
 			}
 			return nil, output, nil
 		}
 	}
 	output.Scanned = page.Scanned
+	output.SkippedMetadata = page.SkippedMetadata
 	output.SkippedIdentity = page.SkippedIdentity
 	if page.More && len(page.Runs) > 0 {
 		output.Truncated = true
@@ -1992,6 +2024,7 @@ func (s *Server) runDetails(meta runstore.Meta, predicted *runstats.Stats) (*run
 		TaskID:          meta.TaskID,
 		Args:            meta.Args,
 		CWD:             meta.CWD,
+		AIProfile:       meta.AIProfile,
 		PID:             meta.PID,
 		OwnerPID:        meta.OwnerPID,
 		ProcessAlive:    boolPointer(processAlive),

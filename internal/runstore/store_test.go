@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 )
 
 //nolint:gocyclo,govet // This end-to-end test keeps metadata and paging assertions together.
@@ -50,6 +51,9 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	if handle.Meta.Status != StatusRunning || handle.Meta.StartedAt.IsZero() {
 		t.Fatalf("initial metadata = %#v", handle.Meta)
 	}
+	if handle.Meta.AIProfile != aiprofile.Unknown() {
+		t.Fatalf("default AI profile = %#v, want unknown", handle.Meta.AIProfile)
+	}
 	if handle.Meta.OwnerPID != os.Getpid() {
 		t.Fatalf("owner PID = %d, want %d", handle.Meta.OwnerPID, os.Getpid())
 	}
@@ -79,6 +83,7 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	}
 	if meta.Status != StatusNonzero ||
 		meta.WorktreeRoot != worktreeRoot ||
+		meta.AIProfile != aiprofile.Unknown() ||
 		meta.ExitCode != 7 ||
 		meta.StdoutBytes != 6 ||
 		meta.StderrBytes != 7 ||
@@ -87,6 +92,130 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	}
 	if meta.EndedAt.IsZero() || meta.EndedAt.Before(meta.StartedAt) {
 		t.Fatalf("invalid run timestamps: %#v", meta)
+	}
+}
+
+func TestBeginPersistsOnlyCanonicalAIProfile(t *testing.T) {
+	store, err := NewForWorktree(t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	codex, err := aiprofile.Parse("codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "agent:codex", AIProfile: codex})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.Meta.AIProfile != codex {
+		t.Fatalf("run AI profile = %#v, want %#v", handle.Meta.AIProfile, codex)
+	}
+
+	invalid := codex
+	invalid.Transport = "native"
+	if _, err = store.Begin(Meta{AIProfile: invalid}); err == nil {
+		t.Fatal("Begin accepted a modified AI profile")
+	}
+}
+
+func TestStoreReadsLegacyMetadataWithoutAIProfileAsUnknown(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:legacy-profile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = handle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	mutatePersistedMetadata(
+		t,
+		filepath.Join(handle.dir, "meta.json"),
+		func(metadata map[string]any) { delete(metadata, "ai_profile") },
+	)
+
+	meta, err := store.Get(handle.Meta.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.AIProfile != aiprofile.Unknown() {
+		t.Fatalf("legacy AI profile = %#v, want unknown", meta.AIProfile)
+	}
+	page, err := store.ListRecent(1)
+	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.AIProfile != aiprofile.Unknown() {
+		t.Fatalf("ListRecent = %#v, %v, want legacy run with unknown profile", page, err)
+	}
+}
+
+//nolint:gocyclo // The regression covers every read and cleanup path for one stored run.
+func TestStoreReadsAndCleansUpCompletedStaleRunWithFutureAIProfile(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:future-profile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const logText = "future-profile output"
+	if _, err = handle.Stdout().Write([]byte(logText)); err != nil {
+		t.Fatal(err)
+	}
+	if err = handle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	handle.Meta.EndedAt = time.Now().UTC().Add(-2 * time.Hour)
+	if err = store.writeMeta(handle.dir, handle.Meta); err != nil {
+		t.Fatal(err)
+	}
+
+	futureProfile := aiprofile.Profile{
+		Family:    aiprofile.Family("future-family"),
+		ID:        "future/profile",
+		Version:   "42",
+		Transport: "future-transport",
+	}
+	mutatePersistedMetadata(
+		t,
+		filepath.Join(handle.dir, "meta.json"),
+		func(metadata map[string]any) {
+			metadata["ai_profile"] = map[string]any{
+				"family":          futureProfile.Family,
+				"profile_id":      futureProfile.ID,
+				"profile_version": futureProfile.Version,
+				"transport":       futureProfile.Transport,
+			}
+		},
+	)
+
+	meta, err := store.Get(handle.Meta.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.AIProfile != futureProfile {
+		t.Fatalf("Get AI profile = %#v, want %#v", meta.AIProfile, futureProfile)
+	}
+	logData, err := store.ReadLog(handle.Meta.RunID, "stdout", 0, int64(len(logText)))
+	if err != nil || string(logData) != logText {
+		t.Fatalf("ReadLog = %q, %v, want %q", logData, err, logText)
+	}
+	page, err := store.ListRecent(1)
+	if err != nil || len(page.Runs) != 1 ||
+		page.Runs[0].Meta.RunID != handle.Meta.RunID ||
+		page.Runs[0].Meta.AIProfile != futureProfile {
+		t.Fatalf("ListRecent = %#v, %v, want future-profile run", page, err)
+	}
+
+	if err = store.Cleanup(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(handle.dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expired future-profile run still exists: %v", err)
 	}
 }
 
@@ -396,7 +525,7 @@ func TestListRecentSkipsInvalidNewerEntries(t *testing.T) {
 	}
 	page, err := store.ListRecent(1)
 	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.RunID != valid.Meta.RunID ||
-		page.Scanned != 3 || page.SkippedIdentity != 0 {
+		page.Scanned != 3 || page.SkippedMetadata != 2 || page.SkippedIdentity != 0 {
 		t.Fatalf("ListRecent = %#v, %v, want the older valid run", page, err)
 	}
 }
@@ -444,7 +573,7 @@ func TestListRecentPageUsesExclusiveCursor(t *testing.T) {
 	}
 }
 
-func TestListRecentPageIncludesTrailingIdentitySkipsWithoutMore(t *testing.T) {
+func TestListRecentPageIncludesTrailingSkipsWithoutMore(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewForWorktree(root, root)
 	if err != nil {
@@ -466,6 +595,10 @@ func TestListRecentPageIncludesTrailingIdentitySkipsWithoutMore(t *testing.T) {
 			},
 		)
 	}
+	id := uuid.Must(uuid.NewV7()).String()
+	if mkdirErr := os.Mkdir(filepath.Join(store.LogRoot(), id), 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
 	valid, err := store.Begin(Meta{TaskID: "just:valid"})
 	if err != nil {
 		t.Fatal(err)
@@ -476,8 +609,9 @@ func TestListRecentPageIncludesTrailingIdentitySkipsWithoutMore(t *testing.T) {
 
 	page, err := store.ListRecentPage(1, "")
 	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.RunID != valid.Meta.RunID ||
-		page.More || page.Scanned != 3 || page.SkippedIdentity != 2 {
-		t.Fatalf("ListRecentPage = %#v, %v, want one run and two trailing identity skips", page, err)
+		page.More || page.Scanned != 4 || page.SkippedMetadata != 1 ||
+		page.SkippedIdentity != 2 {
+		t.Fatalf("ListRecentPage = %#v, %v, want one run and three trailing skips", page, err)
 	}
 }
 

@@ -12,10 +12,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 )
@@ -54,6 +56,10 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 	}
 	if manifest.BetaTest {
 		t.Fatal("plain manifest beta test = true, want false")
+	}
+	if manifest.AIFamily != aiprofile.FamilyUnknown ||
+		!bytes.Contains(manifestBytes, []byte(`"ai_family": "unknown"`)) {
+		t.Fatalf("plain manifest AI family = %q:\n%s", manifest.AIFamily, manifestBytes)
 	}
 	if manifest.ShellPermission != string(ShellPermissionAsk) {
 		t.Fatalf(
@@ -1068,6 +1074,127 @@ func TestReadRecordedBetaTestReturnsManifestIOError(t *testing.T) {
 
 	if _, _, err := ReadRecordedBetaTest(root); err == nil {
 		t.Fatal("ReadRecordedBetaTest() error = nil, want manifest I/O error")
+	}
+}
+
+func TestReadRecordedAIProfileUsesUnknownForLegacyManifest(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	legacyDocument := map[string]any{
+		"schema_version":   manifest.SchemaVersion,
+		"release":          manifest.Release,
+		"shell_permission": manifest.ShellPermission,
+		"surfaces":         manifest.Surfaces,
+	}
+	writeJSONFile(t, filepath.Join(root, manifestFile), legacyDocument)
+
+	profile, found, err := ReadRecordedAIProfile(root)
+	if err != nil {
+		t.Fatalf("ReadRecordedAIProfile() error = %v, want nil", err)
+	}
+	if !found || profile != aiprofile.Unknown() {
+		t.Fatalf("ReadRecordedAIProfile() = (%#v, %t), want unknown current", profile, found)
+	}
+	if _, err = VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() legacy AI family error = %v, want nil", err)
+	}
+}
+
+func TestReadRecordedAIProfileRejectsUnusableManifest(t *testing.T) {
+	for _, testCase := range []struct {
+		name    string
+		want    string
+		content []byte
+	}{
+		{name: "malformed", content: []byte("{not json"), want: "decode managed manifest"},
+		{
+			name: "empty family",
+			content: []byte(
+				`{"schema_version": 1, "ai_family": ""}`,
+			),
+			want: `unsupported AI family ""`,
+		},
+		{
+			name:    "null family",
+			content: []byte(`{"schema_version": 1, "ai_family": null}`),
+			want:    "unsupported AI family null",
+		},
+		{
+			name:    "unsupported schema",
+			content: []byte(`{"schema_version": 2, "ai_family": "codex"}`),
+			want:    "unsupported schema version 2",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, manifestFile)
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, testCase.content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := ReadRecordedAIProfile(root); err == nil ||
+				!strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("ReadRecordedAIProfile() error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
+func TestApplyRecordsAIProfileInManagedServerArguments(t *testing.T) {
+	root := t.TempDir()
+	codex := mustParseAIProfile(t, string(aiprofile.FamilyCodex))
+	if _, err := Apply(Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             root,
+		Agents:          []string{"codex"},
+		WriteMCPConfig:  true,
+		AIProfile:       codex,
+		RunnerModes:     testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, _ := readManagedManifest(t, root)
+	if manifest.AIFamily != aiprofile.FamilyCodex {
+		t.Fatalf("manifest AI family = %q, want codex", manifest.AIFamily)
+	}
+	wantArgs := []string{"serve", "--root", root, "--ai", "codex"}
+	for path, got := range map[string][]string{
+		mcpConfig:   readJSONServerArgs(t, filepath.Join(root, mcpConfig)),
+		codexConfig: readCodexServerArgs(t, filepath.Join(root, codexConfig)),
+	} {
+		if !slices.Equal(got, wantArgs) {
+			t.Fatalf("%s server args = %#v, want %#v", path, got, wantArgs)
+		}
+	}
+	recorded, found, err := ReadRecordedAIProfile(root)
+	if err != nil || !found || recorded != codex {
+		t.Fatalf("ReadRecordedAIProfile() = (%#v, %t, %v), want codex current", recorded, found, err)
+	}
+	if _, err = VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
+	}
+}
+
+func TestVerifyManagedSurfacesRejectsUnknownAIFamily(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	manifest.AIFamily = "gemini"
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+
+	_, err := VerifyManagedSurfaces(root)
+	if err == nil || !strings.Contains(err.Error(), `unsupported AI family "gemini"`) ||
+		!strings.Contains(err.Error(), wantManagedManifestRecovery(root)) {
+		t.Fatalf(
+			"VerifyManagedSurfaces() error = %v, want unknown AI family and recovery",
+			err,
+		)
+	}
+	if _, _, err = ReadRecordedAIProfile(root); err == nil ||
+		!strings.Contains(err.Error(), `unsupported AI family "gemini"`) {
+		t.Fatalf("ReadRecordedAIProfile() error = %v, want unknown AI family", err)
 	}
 }
 

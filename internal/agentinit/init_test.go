@@ -17,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 )
@@ -1062,7 +1063,7 @@ func TestApplyNestedCleanupPreservesMCPConfigScopeAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(workspace, mcpConfig)
-	managed, err := mergeMCPConfig(nil, ".")
+	managed, err := mergeMCPConfig(nil, ".", aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1118,7 +1119,7 @@ func TestApplyLocalCleanupPreservesScopeWhenHigherMCPConfigExists(t *testing.T) 
 		t.Fatal(err)
 	}
 	localMCPPath := filepath.Join(scope, mcpConfig)
-	localMCPBefore, err := mergeMCPConfig(nil, ".")
+	localMCPBefore, err := mergeMCPConfig(nil, ".", aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1173,7 +1174,7 @@ func TestApplyRejectsNonRegularHigherMCPConfigBeforeLocalCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	localMCPPath := filepath.Join(scope, mcpConfig)
-	localMCPBefore, err := mergeMCPConfig(nil, ".")
+	localMCPBefore, err := mergeMCPConfig(nil, ".", aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1745,7 +1746,10 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 			qualified:      shortQualifiedRoutingRule,
 		},
 	} {
-		flat := strings.Join(strings.Fields(Prompt(false, test.agentGuidePath)), " ")
+		flat := strings.Join(
+			strings.Fields(Prompt(aiprofile.Unknown(), false, test.agentGuidePath)),
+			" ",
+		)
 		if !strings.Contains(flat, test.qualified) {
 			t.Errorf("%s does not state the qualified routing rule: %s", name, flat)
 		}
@@ -1755,7 +1759,7 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 			}
 		}
 	}
-	flat := strings.Join(strings.Fields(Prompt(false, "")), " ")
+	flat := strings.Join(strings.Fields(Prompt(aiprofile.Unknown(), false, "")), " ")
 	for _, expected := range []string{
 		"just-mcp-work (JMW)",
 		"save tokens",
@@ -1845,8 +1849,14 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 		"too large for a tail",
 	}
 	for name, text := range map[string]string{
-		"plain prompt":  strings.Join(strings.Fields(Prompt(false, "")), " "),
-		"beta prompt":   strings.Join(strings.Fields(Prompt(true, "")), " "),
+		"plain prompt": strings.Join(
+			strings.Fields(Prompt(aiprofile.Unknown(), false, "")),
+			" ",
+		),
+		"beta prompt": strings.Join(
+			strings.Fields(Prompt(aiprofile.Unknown(), true, "")),
+			" ",
+		),
 		"managed block": strings.Join(strings.Fields(managedBlockText), " "),
 	} {
 		for _, expected := range shared {
@@ -1856,7 +1866,7 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 		}
 	}
 	guidePath := filepath.Join(t.TempDir(), guideFile)
-	short := strings.Join(strings.Fields(Prompt(false, guidePath)), " ")
+	short := strings.Join(strings.Fields(Prompt(aiprofile.Unknown(), false, guidePath)), " ")
 	if !strings.Contains(short, "too large for a tail") {
 		t.Errorf("short prompt does not carry the shared term %q", "too large for a tail")
 	}
@@ -1864,29 +1874,42 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 
 func TestPromptSelectsBetaTestContract(t *testing.T) {
 	guidePath := filepath.Join(t.TempDir(), guideFile)
+	profile := aiprofile.Unknown()
+	prefix := fmt.Sprintf(
+		profilePromptText,
+		profile.Family,
+		profile.ID,
+		profile.Version,
+		profile.Transport,
+	) + "\n\n"
 	for _, test := range []struct {
 		want           string
 		name           string
 		agentGuidePath string
 		betaTest       bool
 	}{
-		{name: "full", want: promptText},
-		{name: "short", agentGuidePath: guidePath, want: fmt.Sprintf(shortPromptText, guidePath)},
+		{name: "full", want: prefix + promptText},
+		{
+			name:           "short",
+			agentGuidePath: guidePath,
+			want:           prefix + fmt.Sprintf(shortPromptText, guidePath),
+		},
 		{
 			name:     "full beta",
 			betaTest: true,
-			want:     promptText + "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText,
+			want: prefix + promptText + "\n\nBETA TEST FEEDBACK\n" +
+				betaTestManagedBlockText,
 		},
 		{
 			name:           "short beta",
 			betaTest:       true,
 			agentGuidePath: guidePath,
-			want: fmt.Sprintf(shortPromptText, guidePath) +
+			want: prefix + fmt.Sprintf(shortPromptText, guidePath) +
 				"\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if got := Prompt(test.betaTest, test.agentGuidePath); got != test.want {
+			if got := Prompt(profile, test.betaTest, test.agentGuidePath); got != test.want {
 				t.Fatalf(
 					"Prompt(%t, %q) = %q, want %q",
 					test.betaTest,
@@ -1899,18 +1922,81 @@ func TestPromptSelectsBetaTestContract(t *testing.T) {
 	}
 }
 
+func TestPromptProfileSnapshotsShareTheCommonContract(t *testing.T) {
+	profiles := []struct {
+		profile aiprofile.Profile
+		name    string
+		want    string
+	}{
+		{
+			name:    "unknown",
+			profile: aiprofile.Unknown(),
+			want: `AI PROFILE
+family: unknown
+profile_id: jmw/unknown
+profile_version: 1
+transport: mcp-stdio
+
+<COMMON>`,
+		},
+		{
+			name:    "codex",
+			profile: mustParseAIProfile(t, "codex"),
+			want: `AI PROFILE
+family: codex
+profile_id: jmw/codex
+profile_version: 1
+transport: mcp-stdio
+
+<COMMON>`,
+		},
+		{
+			name:    "claude",
+			profile: mustParseAIProfile(t, "claude"),
+			want: `AI PROFILE
+family: claude
+profile_id: jmw/claude
+profile_version: 1
+transport: mcp-stdio
+
+<COMMON>`,
+		},
+	}
+
+	for _, test := range profiles {
+		t.Run(test.name, func(t *testing.T) {
+			got := Prompt(test.profile, false, "")
+			if count := strings.Count(got, promptText); count != 1 {
+				t.Fatalf("common contract count = %d, want 1", count)
+			}
+			got = strings.Replace(got, promptText, "<COMMON>", 1)
+			if got != test.want {
+				t.Fatalf("profile snapshot = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func mustParseAIProfile(t *testing.T, value string) aiprofile.Profile {
+	t.Helper()
+	profile, err := aiprofile.Parse(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return profile
+}
+
 // TestShortPromptCarriesTheAlwaysOnContract bounds the text every session pays
-// for. The budget constrains the constant, not the served string: the guide path
-// is required content of unknown length, so a workspace whose root is longer than
-// guidePathBudgetBytes exceeds maxPromptBytes by exactly that excess and nothing
-// refuses it. What this pins is that the wording leaves that much room.
+// for. A 128-byte guide path is the representative allowance; the 1200-byte
+// product budget leaves 116 bytes for wording or path growth. Runtime does not
+// reject longer paths.
 func TestShortPromptCarriesTheAlwaysOnContract(t *testing.T) {
 	const (
-		maxPromptBytes       = 1000
+		maxPromptBytes       = 1200
 		guidePathBudgetBytes = 128
 	)
 	guidePath := "/" + strings.Repeat("w", guidePathBudgetBytes-1)
-	prompt := Prompt(false, guidePath)
+	prompt := Prompt(aiprofile.Unknown(), false, guidePath)
 	if len(prompt) > maxPromptBytes {
 		t.Fatalf(
 			"short prompt length with a %d-byte guide path = %d, want at most %d; "+
@@ -1943,7 +2029,7 @@ func TestShortPromptCarriesTheAlwaysOnContract(t *testing.T) {
 
 func TestPromptKeepsWindowsGuidePathVerbatim(t *testing.T) {
 	const guidePath = `C:\Users\me\ws\.just-mcp-work\guide.txt`
-	prompt := Prompt(false, guidePath)
+	prompt := Prompt(aiprofile.Unknown(), false, guidePath)
 	if !strings.Contains(prompt, guidePath) {
 		t.Fatalf("short prompt does not contain raw Windows guide path %q: %s", guidePath, prompt)
 	}
@@ -1957,7 +2043,10 @@ func TestPromptKeepsWindowsGuidePathVerbatim(t *testing.T) {
 // directory with a space in it is ordinary on macOS and Windows.
 func TestPromptDelimitsAGuidePathContainingSpaces(t *testing.T) {
 	const guidePath = "/Users/me/My Projects/app/.just-mcp-work/guide.txt"
-	if prompt := Prompt(false, guidePath); !strings.Contains(prompt, `"`+guidePath+`";`) {
+	if prompt := Prompt(aiprofile.Unknown(), false, guidePath); !strings.Contains(
+		prompt,
+		`"`+guidePath+`";`,
+	) {
 		t.Fatalf("short prompt does not delimit a guide path containing spaces: %s", prompt)
 	}
 }
@@ -2144,7 +2233,7 @@ func TestApplyPersistsRunnerPolicyAndKeepsServerArgsMinimal(t *testing.T) {
 		dir,
 	)
 
-	snippet, err := MCPConfigSnippet(dir)
+	snippet, err := MCPConfigSnippet(dir, aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2929,7 +3018,7 @@ func TestApplyDirectLinkedWorktreeCleanupPreservesHigherLocalAnchor(t *testing.T
 		t.Fatal(writeErr)
 	}
 	localPath := filepath.Join(scope, mcpConfig)
-	managed, err := mergeMCPConfig(nil, scope)
+	managed, err := mergeMCPConfig(nil, scope, aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3193,7 +3282,7 @@ func TestApplyDisableRejectsUnmanagedCodexServerWithoutPartialChanges(t *testing
 		t.Fatal(err)
 	}
 	mcpPath := filepath.Join(dir, mcpConfig)
-	mcpBefore, err := mergeMCPConfig(nil, ".")
+	mcpBefore, err := mergeMCPConfig(nil, ".", aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3380,7 +3469,7 @@ func TestApplyDisablePreservesSafeSymlinkedCodexConfigFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(dir, "shared-codex-config.toml")
-	managed, err := mergeCodexConfig(nil, dir, ShellPermissionAsk)
+	managed, err := mergeCodexConfig(nil, dir, ShellPermissionAsk, aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4004,7 +4093,7 @@ func TestApplyDisableKeepsSafeCodexConfigDirectorySymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := filepath.Join(targetDirectory, filepath.Base(codexConfig))
-	managed, err := mergeCodexConfig(nil, workspace, ShellPermissionAsk)
+	managed, err := mergeCodexConfig(nil, workspace, ShellPermissionAsk, aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4042,11 +4131,11 @@ func TestApplyDisableKeepsSafeCodexConfigDirectorySymlink(t *testing.T) {
 }
 
 func TestMCPConfigSnippetUsesAbsoluteExecutablePath(t *testing.T) {
-	if _, err := MCPConfigSnippet(""); err == nil ||
+	if _, err := MCPConfigSnippet("", aiprofile.Unknown()); err == nil ||
 		!strings.Contains(err.Error(), "scope root is required") {
 		t.Fatalf("empty MCP scope error = %v", err)
 	}
-	snippet, err := MCPConfigSnippet(t.TempDir())
+	snippet, err := MCPConfigSnippet(t.TempDir(), aiprofile.Unknown())
 	if err != nil {
 		t.Fatal(err)
 	}

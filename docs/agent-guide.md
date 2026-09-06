@@ -5,7 +5,9 @@ coding agent should drive them. The server has two forms of usage rules in its
 MCP `instructions` field: with a verified `.just-mcp-work/guide.txt`, it serves
 the short rules that must fire unprompted and points to that file by its
 verified absolute path; without a verified guide path, it serves the full usage
-text. This page is the project's public long form.
+text. Both forms start with the active AI family, profile ID, profile version,
+and transport, followed by the same JMW contract. This page is the project's
+public long form.
 
 - [What the server is for](#what-the-server-is-for)
 - [The object model](#the-object-model)
@@ -220,9 +222,15 @@ array of selections:
 {"version": 1, "runners": [{"name": "go", "mode": "safe"}]}
 ```
 
-Managed MCP and Codex server arguments are `serve --root <dir>` and carry no
-runner selection. The policy, not the server arguments, defines the authorized
-task surface an agent sees.
+During `init`, the operator selects `unknown`, `codex`, or `claude`. A workspace
+with no managed manifest offers `unknown`; later runs offer the family in the
+managed manifest. Pass `init --ai unknown|codex|claude` to answer the question
+non-interactively. Managed MCP and Codex server arguments always include
+`serve --root <dir>`, add `--ai codex|claude` for those families, and omit
+`--ai` for `unknown`. They carry no runner selection. The AI family is
+caller-declared provenance, not authenticated identity, and selects an
+instruction/profile presentation only. The policy, not the server arguments,
+defines the authorized task surface an agent sees.
 
 `init` also writes `.just-mcp-work/guide.txt`, the generated reference used by an
 agent at work, and records it with the other managed surfaces. JMW owns that
@@ -376,11 +384,13 @@ normal receipt with an explanation in `message`, not as a tool error.
 Live receipts and status calls carry lifecycle detail worth reading before you
 act: `completed`, `process_alive`, `owned_by_this_server`,
 `last_output_age_ms`, `no_output_yet`, `stdout_bytes`, `stderr_bytes`,
-`task_timeout_ms`, and `time_to_task_timeout_ms`. A completed synchronous
-receipt carries none of those except `stdout_bytes` and `stderr_bytes`, and
-omits either for an empty stream. A gate
-that has printed nothing for minutes and a gate about to hit its timeout look
-identical in `status` alone.
+`task_timeout_ms`, and `time_to_task_timeout_ms`. They also carry `ai_profile`
+with `family`, `profile_id`, `profile_version`, and `transport`. `Store.Begin`
+records the profile in the run ledger, and `get_run` returns that persisted
+value. A completed synchronous receipt keeps `ai_profile` and the nonempty
+stream byte counts, but carries no other lifecycle fields. A gate that has
+printed nothing for minutes and a gate about to hit its timeout look identical
+in `status` alone.
 
 The `stats` block compares this invocation with its own history. `exact`
 aggregates runs of the same task with the same arguments, `task` aggregates the
@@ -493,11 +503,12 @@ entries and returns `truncated` with `next_cursor` when more remain. Use it to
 recover a `run_id` you lost, or to check whether a gate is already running
 before starting a second copy of it.
 
-`skipped_identity` counts ledger entries excluded from the listing because
-their `worktree_root` is missing or belongs to another worktree. Such entries
-are not returned by any read path, and they age out under ordinary retention -
-a non-zero count on a workspace whose ledger predates the field is expected and
-is not data loss.
+`skipped_metadata` counts ledger entries whose `meta.json` could not be read or
+decoded. `skipped_identity` counts entries excluded because their
+`worktree_root` is missing or belongs to another worktree. Neither kind is
+returned by the listing. Identity-skipped entries age out under ordinary
+retention; a non-zero identity count on a workspace whose ledger predates the
+field is expected and is not data loss.
 
 ## Choosing the right call
 
@@ -618,6 +629,7 @@ The operator sets these; an agent cannot change them at runtime.
 | Flag | Environment | Default | Effect |
 | --- | --- | --- | --- |
 | `--root` | `JMW_ROOT` | cwd | Workspace scope. |
+| `--ai` | - | `unknown` | Declared `codex` or `claude` presentation profile. |
 | `--timeout` | `JMW_TIMEOUT` | `15m` | Per-run timeout; `0` disables it. |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` | Default synchronous wait. |
 | `--retention` | `JMW_RETENTION` | `72h` | Run-log retention. |

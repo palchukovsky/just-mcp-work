@@ -9,12 +9,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 )
 
@@ -36,6 +38,9 @@ type managedManifest struct {
 	SchemaVersion int    `json:"schema_version"`
 	Release       string `json:"release"`
 	BetaTest      bool   `json:"beta_test,omitempty"`
+	// An omitted AIFamily predates this field and means unknown, matching the
+	// managed serve arguments written by those manifests.
+	AIFamily aiprofile.Family `json:"ai_family"`
 	// An omitted ShellPermission predates this field and means ask, the only
 	// shell permission those manifests could have recorded.
 	ShellPermission string            `json:"shell_permission,omitempty"`
@@ -62,6 +67,7 @@ func planManifest(
 	surfaces []manifestSurface,
 	betaTest bool,
 	shellPermission ShellPermission,
+	profile aiprofile.Profile,
 	selected map[string]struct{},
 ) ([]plannedEdit, error) {
 	path, err := findScopedConfig(
@@ -197,6 +203,7 @@ func planManifest(
 			SchemaVersion:   manifestSchemaVersion,
 			Release:         version.Current().Display(),
 			BetaTest:        betaTest,
+			AIFamily:        profile.Family,
 			ShellPermission: recordedShellPermission,
 			Surfaces:        surfaces,
 		},
@@ -212,6 +219,41 @@ func planManifest(
 		newEdit(manifestFile, path, before, after, 0o644, beforeExists, false),
 	)
 	return edits, nil
+}
+
+func profileForManifestFamily(family aiprofile.Family) (aiprofile.Profile, error) {
+	switch family {
+	case aiprofile.FamilyUnknown:
+		return aiprofile.Unknown(), nil
+	case aiprofile.FamilyCodex, aiprofile.FamilyClaude:
+		profile, err := aiprofile.Parse(string(family))
+		if err != nil {
+			return aiprofile.Profile{}, fmt.Errorf("parse AI family: %w", err)
+		}
+		return profile, nil
+	default:
+		return aiprofile.Profile{}, fmt.Errorf("unsupported AI family %q", family)
+	}
+}
+
+func profileFromManagedManifest(data []byte) (aiprofile.Profile, error) {
+	var fields struct {
+		AIFamily json.RawMessage `json:"ai_family"`
+	}
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return aiprofile.Profile{}, fmt.Errorf("decode AI family: %w", err)
+	}
+	if len(fields.AIFamily) == 0 {
+		return aiprofile.Unknown(), nil
+	}
+	if bytes.Equal(bytes.TrimSpace(fields.AIFamily), []byte("null")) {
+		return aiprofile.Profile{}, errors.New("unsupported AI family null")
+	}
+	var family aiprofile.Family
+	if err := json.Unmarshal(fields.AIFamily, &family); err != nil {
+		return aiprofile.Profile{}, fmt.Errorf("decode AI family: %w", err)
+	}
+	return profileForManifestFamily(family)
 }
 
 func planRetiredAgentGuide(
@@ -487,6 +529,46 @@ func ReadRecordedShellPermission(root string) (ShellPermission, bool, error) {
 	return permission, true, nil
 }
 
+// ReadRecordedAIProfile reports the AI family recorded in the workspace
+// manifest. A legacy manifest with no family records unknown. A missing
+// manifest has no recorded choice. Malformed, schema-incompatible, and invalid
+// manifests fail so init cannot silently replace a recorded family.
+func ReadRecordedAIProfile(root string) (aiprofile.Profile, bool, error) {
+	manifestPath := filepath.Join(root, manifestFile)
+	data, exists, err := readOptionalFile(manifestPath)
+	if err != nil {
+		return aiprofile.Profile{}, false, err
+	}
+	if !exists {
+		return aiprofile.Unknown(), false, nil
+	}
+
+	var manifest managedManifest
+	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil {
+		return aiprofile.Profile{}, false, fmt.Errorf(
+			"decode managed manifest %s: %w",
+			manifestPath,
+			decodeErr,
+		)
+	}
+	if manifest.SchemaVersion != manifestSchemaVersion {
+		return aiprofile.Profile{}, false, fmt.Errorf(
+			"managed manifest %s has unsupported schema version %d",
+			manifestPath,
+			manifest.SchemaVersion,
+		)
+	}
+	profile, err := profileFromManagedManifest(data)
+	if err != nil {
+		return aiprofile.Profile{}, false, fmt.Errorf(
+			"read AI profile from managed manifest %s: %w",
+			manifestPath,
+			err,
+		)
+	}
+	return profile, true, nil
+}
+
 // VerifyManagedSurfaces checks that the generated workspace configuration
 // recorded by the last init still matches this binary and the files on disk.
 // It returns the verified recorded modes after successful verification; a missing
@@ -509,11 +591,11 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 	}
 
 	var manifest managedManifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil {
 		return ManagedSurfaces{}, fmt.Errorf(
 			"managed manifest %s is unreadable: %w; %s",
 			manifestPath,
-			err,
+			decodeErr,
 			managedManifestRecovery(root),
 		)
 	}
@@ -526,6 +608,15 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			"managed manifest %s %s; %s",
 			manifestPath,
 			description,
+			managedManifestRecovery(root),
+		)
+	}
+	profile, err := profileFromManagedManifest(data)
+	if err != nil {
+		return ManagedSurfaces{}, fmt.Errorf(
+			"managed manifest %s is unusable: %w; %s",
+			manifestPath,
+			err,
 			managedManifestRecovery(root),
 		)
 	}
@@ -593,6 +684,7 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			root,
 			manifest.BetaTest,
 			shellPermission,
+			profile,
 			recorded,
 		)
 		if err != nil {
@@ -693,6 +785,7 @@ func generatedManifestSurface(
 	root string,
 	betaTest bool,
 	shellPermission ShellPermission,
+	profile aiprofile.Profile,
 	recorded manifestSurface,
 ) (manifestSurface, error) {
 	switch recorded.Kind {
@@ -709,7 +802,7 @@ func generatedManifestSurface(
 			[]byte(promptText+"\n"),
 		), nil
 	case manifestKindCodexConfig:
-		content, err := mergeCodexConfig(nil, root, shellPermission)
+		content, err := mergeCodexConfig(nil, root, shellPermission, profile)
 		if err != nil {
 			return manifestSurface{}, err
 		}
@@ -720,7 +813,7 @@ func generatedManifestSurface(
 			codexBlockRange,
 		)
 	case manifestKindMCPConfig:
-		content, err := mergeMCPConfig(nil, root)
+		content, err := mergeMCPConfig(nil, root, profile)
 		if err != nil {
 			return manifestSurface{}, err
 		}
