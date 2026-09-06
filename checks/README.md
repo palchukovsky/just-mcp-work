@@ -25,8 +25,7 @@ rule file it appears in.
 ## Rules (`semgrep/`)
 
 - `text-style.yml` - invisible characters, emoji, conversational comments.
-- `isolation.yml` - no references to the private half of the workspace
-  (machine-local paths, the sibling `tools/` directory).
+- `isolation.yml` - no machine-local home paths in published files.
 - `ascii-punctuation.yml` - ASCII punctuation only, no em/en dashes.
 - `tracker-ids.yml` - no private-tracker issue IDs in source or docs.
 - `errors-go.yml` - `discarded-error` catches one-result and two-result all-blank

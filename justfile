@@ -78,7 +78,7 @@ check-dry: lint vet test test-race build check-semgrep
 check-semgrep:
     {{ semgrep }} --config checks/semgrep/ --error --quiet .
 
-# Run the project gate required by the workspace, including the MCP smoke test.
+# Run all project checks, including the MCP smoke test.
 verify: check
     {{ python }} scripts/dev.py smoke
 
@@ -105,8 +105,3 @@ release kind: verify
 # Run the release pipeline for a prospective version without creating a tag.
 release-dry kind="patch":
     {{ python }} scripts/dev.py release {{ kind }} --dry-run
-
-# Build and initialize agent-facing workspace files.
-init:
-    {{ python }} scripts/dev.py build
-    {{ python }} scripts/dev.py run -- init

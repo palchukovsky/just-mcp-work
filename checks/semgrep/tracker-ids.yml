@@ -5,8 +5,8 @@ rules:
   - id: no-tracker-ids-in-code
     message: >-
       Issue identifiers do not belong in source. They rot when the tracker
-      changes and mean nothing to a reader without access to the private Jira
-      project (JMW). Describe the pending work in words instead.
+      changes and mean nothing to a reader without access to that tracker.
+      Describe the pending work in words instead.
     severity: ERROR
     languages: [generic]
     patterns:
