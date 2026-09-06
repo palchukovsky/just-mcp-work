@@ -503,8 +503,8 @@ is not data loss.
 
 **Run a check gate.**
 
-1. `list_tasks` with `names: ["verify"]`, or `query: "check"`, and
-   `detail: compact`.
+1. `list_tasks` with `names: ["verify"]`, or `query: "check"`,
+   `detail: compact`, and `include_stats: true`.
 2. Read `stats.task.avg_duration_ms`. Long: `start_task`. Short: `run_task`.
 3. `wait_run` with a `max_wait_ms` you are willing to spend, repeated while
    `completed` is false.
