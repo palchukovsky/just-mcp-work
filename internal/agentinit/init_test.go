@@ -2492,6 +2492,7 @@ func TestApplyRejectsManagedCodexReplacementThatDuplicatesOperatorKey(t *testing
 	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		t.Fatal(err)
 	}
+	path = resolvedTestPath(t, path)
 	before := []byte(strings.Join(
 		[]string{
 			codexBegin,
@@ -4539,6 +4540,7 @@ func TestApplyRejectsInvalidClaudePermissionLists(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 				t.Fatal(err)
 			}
+			path = resolvedTestPath(t, path)
 			if err := os.WriteFile(path, []byte(testCase.settings), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -4998,6 +5000,7 @@ func TestCurrentShellPermissionReportsMalformedSettings(t *testing.T) {
 			if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 				t.Fatal(err)
 			}
+			path = resolvedTestPath(t, path)
 			if err := os.WriteFile(path, []byte(testCase.settings), 0o600); err != nil {
 				t.Fatal(err)
 			}

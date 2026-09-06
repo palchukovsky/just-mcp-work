@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -146,6 +147,9 @@ func TestListTasksIncludesAvailableBinariesAndWarnsForMissingOnesWithoutRedetect
 func TestListTasksLooksUpEachBinaryWithoutExecutingIt(t *testing.T) {
 	dir := t.TempDir()
 	binary := filepath.Join(dir, "agent-fixture")
+	if runtime.GOOS == "windows" {
+		binary += ".exe"
+	}
 	r := newRunner(taskSpecs(binary, binary))
 
 	tasks, err := r.ListTasks(context.Background(), dir)

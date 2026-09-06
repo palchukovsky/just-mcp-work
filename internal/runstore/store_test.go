@@ -617,7 +617,7 @@ func TestCleanupReportsUnreadableMetadataWithoutDeletingRun(t *testing.T) {
 	}
 
 	cleanupErr := store.Cleanup(time.Hour)
-	if cleanupErr == nil || !strings.Contains(cleanupErr.Error(), handle.dir) {
+	if cleanupErr == nil || !strings.Contains(cleanupErr.Error(), strconv.Quote(handle.dir)) {
 		t.Fatalf("cleanup error = %v, want error naming %q", cleanupErr, handle.dir)
 	}
 	if _, err := os.Stat(handle.dir); err != nil {

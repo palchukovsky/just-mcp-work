@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -20,7 +21,7 @@ import (
 )
 
 func wantManagedManifestRecovery(root string) string {
-	return `run just-mcp-work init --dir "` + root + `"`
+	return "run just-mcp-work init --dir " + strconv.Quote(root)
 }
 
 //nolint:gocyclo // This test pins the manifest document, every surface, and idempotency together.
