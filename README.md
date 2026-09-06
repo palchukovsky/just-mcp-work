@@ -130,10 +130,14 @@ selected. `.claude/settings.json` is touched only when `claude` is one of the
 selected agents, and then follows the permission answer. `.mcp.json` and
 `.codex/config.toml` follow `--write-mcp-config` rather than `--agents`: they
 are rewritten when it is true and stripped of their JMW entries when it is
-false, whether or not `codex` was selected. Two agent targets that resolve to
-one document - a `CLAUDE.md` symlinked to an `AGENTS.md`, say - are each
-written with their own header, so keep such a document under a single selected
-agent, or give it text of its own before the first `init`.
+false, whether or not `codex` was selected. Two selected agent targets that
+resolve to one document are accepted only when both edits produce identical
+content; otherwise `init` refuses before writing and names both surfaces and
+their shared path. A deselected aliased target remains untouched.
+
+It also writes `.just-mcp-work/guide.txt`, a generated reference for agents
+working with JMW. Once `serve` verifies it, the short MCP instructions point to
+its absolute path; without a verified guide, they contain the full reference.
 
 Use `init-beta-test` for a workspace beta-testing JMW. It does everything
 `init` does and records beta-test mode, so the selected agents and every client

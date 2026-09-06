@@ -48,6 +48,8 @@ func TestRunShellCommandDescriptionNamesItsAlternatives(t *testing.T) {
 			"withheld",
 			"runner mode",
 			"another shell path",
+			"normal shell",
+			"too large for a tail",
 			"Exactly one of command and block_id",
 			"block_id comes from define_shell_block",
 			"working_directory must not accompany block_id",
@@ -57,11 +59,98 @@ func TestRunShellCommandDescriptionNamesItsAlternatives(t *testing.T) {
 			}
 		}
 	}
-	for _, expected := range []string{"run_task", "start_task", "normal shell", "promoted: true"} {
+	for _, expected := range []string{"run_task", "start_task", "promoted: true"} {
 		if !strings.Contains(runShellCommandDescription(), expected) {
 			t.Errorf("run_shell_command description does not mention %q", expected)
 		}
 	}
+}
+
+func TestTaskDescriptionsRetainTheirSafetyContract(t *testing.T) {
+	descriptions := registeredToolDescriptions(t)
+	for name, expectedTerms := range map[string][]string{
+		"list_tasks": {
+			"tasks you need", "not the catalog", "names", "name_prefix", "query", "detail: compact",
+		},
+		"run_task":   {"positional", "name=value", "running receipt", "run_id", "promoted: true"},
+		"start_task": {"positional", "name=value", "running receipt", "run_id", "wait_run", "get_run_status"},
+	} {
+		for _, expected := range expectedTerms {
+			description := descriptions[name]
+			if !strings.Contains(description, expected) {
+				t.Errorf("%s description does not mention %q", name, expected)
+			}
+		}
+	}
+	if strings.Contains(descriptions["start_task"], "promoted: true") {
+		t.Error("start_task description promises promoted: true")
+	}
+	if !strings.Contains(descriptions["start_task"], "check/verify") {
+		t.Error("start_task description does not prefer check/verify gates")
+	}
+}
+
+func TestRegisteredToolContextBudget(t *testing.T) {
+	tools := registeredTools(t)
+	if len(tools) != 14 {
+		t.Fatalf("registered tools = %d, want 14", len(tools))
+	}
+	descriptionBytes := 0
+	schemaBytes := 0
+	for _, tool := range tools {
+		descriptionBytes += len(tool.Description)
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s input schema: %v", tool.Name, err)
+		}
+		schemaBytes += len(encoded)
+	}
+	if descriptionBytes > 2200 {
+		t.Errorf("tool descriptions = %d bytes, want at most 2200", descriptionBytes)
+	}
+	if schemaBytes > 4500 {
+		t.Errorf("tool input schemas = %d bytes, want at most 4500", schemaBytes)
+	}
+}
+
+func registeredToolDescriptions(t *testing.T) map[string]string {
+	t.Helper()
+	descriptions := make(map[string]string)
+	for _, tool := range registeredTools(t) {
+		descriptions[tool.Name] = tool.Description
+	}
+	return descriptions
+}
+
+func registeredTools(t *testing.T) []*mcp.Tool {
+	t.Helper()
+	ctx := context.Background()
+	server := newShellTestServer(t, t.TempDir()).newMCPServer()
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := serverSession.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}()
+	client := mcp.NewClient(&mcp.Implementation{Name: "test", Version: "1"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := clientSession.Close(); closeErr != nil {
+			t.Fatal(closeErr)
+		}
+	}()
+	listed, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return listed.Tools
 }
 
 // TestListTasksExplainsAnEmptyRunner keeps the reason for a taskless runner in
@@ -404,9 +493,10 @@ func TestMCPServerHelperProcess(t *testing.T) {
 			os.Exit(1)
 		}
 		server, err := New(workspaceRegistry, runners, store, Config{
-			BetaTest: os.Getenv("JMW_TEST_BETA") == "true",
-			Grace:    20 * time.Millisecond,
-			Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			BetaTest:       os.Getenv("JMW_TEST_BETA") == "true",
+			AgentGuidePath: os.Getenv("JMW_TEST_AGENT_GUIDE_PATH"),
+			Grace:          20 * time.Millisecond,
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
 		})
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
@@ -420,19 +510,23 @@ func TestMCPServerHelperProcess(t *testing.T) {
 }
 
 func TestMCPServerInstructionsFollowBetaTestMode(t *testing.T) {
-	const (
-		betaClause = "JMW bug, friction, missing capability, or improvement"
-		usageRule  = "output itself is the answer"
-	)
+	const betaClause = "JMW bug, friction, missing capability, or improvement"
 	for _, testCase := range []struct {
-		name      string
-		betaTest  bool
-		wantCount int
+		name       string
+		betaTest   bool
+		agentGuide bool
+		wantCount  int
 	}{
-		{name: "beta", betaTest: true, wantCount: 1},
-		{name: "plain", wantCount: 0},
+		{name: "full beta", betaTest: true, wantCount: 1},
+		{name: "short beta", betaTest: true, agentGuide: true, wantCount: 1},
+		{name: "full", wantCount: 0},
+		{name: "short", agentGuide: true, wantCount: 0},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
+			guidePath := ""
+			if testCase.agentGuide {
+				guidePath = filepath.Join(t.TempDir(), ".just-mcp-work", "guide.txt")
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			//nolint:gosec // The test intentionally reexecutes the current test binary.
@@ -440,6 +534,9 @@ func TestMCPServerInstructionsFollowBetaTestMode(t *testing.T) {
 			command.Env = append(os.Environ(), "JMW_TEST_HELPER_PROCESS=mcp")
 			if testCase.betaTest {
 				command.Env = append(command.Env, "JMW_TEST_BETA=true")
+			}
+			if testCase.agentGuide {
+				command.Env = append(command.Env, "JMW_TEST_AGENT_GUIDE_PATH="+guidePath)
 			}
 			stdin, err := command.StdinPipe()
 			if err != nil {
@@ -465,8 +562,14 @@ func TestMCPServerInstructionsFollowBetaTestMode(t *testing.T) {
 			if count := strings.Count(instructions, betaClause); count != testCase.wantCount {
 				t.Fatalf("beta clause count = %d, want %d: %s", count, testCase.wantCount, instructions)
 			}
-			if !strings.Contains(instructions, usageRule) {
-				t.Fatalf("served instructions do not contain usage rule %q: %s", usageRule, instructions)
+			gotGuide := guidePath != "" && strings.Contains(instructions, guidePath)
+			if gotGuide != testCase.agentGuide {
+				t.Fatalf(
+					"served instructions mention guide = %t, want %t: %s",
+					gotGuide,
+					testCase.agentGuide,
+					instructions,
+				)
 			}
 			if err := stdin.Close(); err != nil {
 				t.Fatal(err)

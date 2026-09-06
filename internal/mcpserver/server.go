@@ -36,43 +36,28 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
 
-// listTasksDescription tells the agent how to ask for one task instead of a
-// whole catalog, because the default full listing of a large project is the
-// most expensive answer this server can give.
 func listTasksDescription() string {
-	return "List runner-neutral tasks for one discovered project. Filter server-side instead of " +
-		"reading a whole catalog: names selects exact task names or task IDs, name_prefix and query " +
-		"search when the exact name is unknown, visibility keeps public or private tasks, and " +
-		"detail: compact keeps identity and parameters, returns at most the first 160 runes of the " +
-		"first description line, and drops runner metadata and run statistics. names, name_prefix, " +
-		"and query answer different questions and must not be combined. Results are paginated after " +
-		"filtering: limit defaults to 50 and has a maximum of 200, and cursor is the exclusive " +
-		"server-emitted next_cursor from the previous page with unchanged inputs. truncated and " +
-		"next_cursor explicitly report continuation. applied_filter reports the effective filter, " +
-		"how many tasks it removed, and any requested name that exists nowhere in the project."
+	return "List tasks for one project. Ask for the tasks you need, not the catalog: " +
+		"use names, name_prefix, or query with detail: compact."
 }
 
 // runShellCommandDescription describes the ad-hoc escape hatch of this server.
 func runShellCommandDescription() string {
-	return "Run a genuinely ad-hoc shell command outside the discovered or withheld task " +
-		"surfaces whenever a receipt or tail answers the question. A task " +
-		"may be absent because the operator withheld it through a runner mode; never recreate " +
-		"or run that task through this or another shell path. Prefer run_task/start_task for a " +
-		"discovered task; use a normal shell only when its output is too large for a tail. " +
-		"A short tail can be requested in the same call with tail_bytes; it returns the last N " +
-		"bytes of each stream rather than the whole log, which is read with get_run_logs. A " +
-		"running receipt with promoted: true is normal: follow its run_id instead of retrying " +
-		"the command. Exactly one of command and block_id selects the command; block_id comes " +
-		"from define_shell_block, and working_directory must not accompany block_id."
+	return "Run a genuinely ad-hoc command outside discovered or withheld tasks. A task withheld " +
+		"by the operator through a runner mode must never be recreated or run through this or another " +
+		"shell path. Prefer run_task/start_task for a discovered task and a normal shell when the " +
+		"command's own output is too large for a tail. A running receipt with run_id and promoted: true is " +
+		"normal: follow it; do not retry. Exactly one of command and block_id selects what runs; " +
+		"block_id comes from define_shell_block; working_directory must not accompany block_id."
 }
 
 func startShellCommandDescription() string {
-	return "Start a genuinely ad-hoc shell command outside the discovered or withheld task " +
-		"surfaces asynchronously and return its run_id immediately. A task may be absent because " +
-		"the operator withheld it through a runner mode; never recreate or run that task through " +
-		"this or another shell path. Exactly one of command and block_id selects the command; " +
-		"block_id comes from define_shell_block, and working_directory must not accompany " +
-		"block_id."
+	return "Start a genuinely ad-hoc command outside discovered or withheld tasks asynchronously. " +
+		"A task withheld by the operator through a runner mode must never be recreated or run through " +
+		"this or another shell path. Prefer run_task/start_task for a discovered task and a normal " +
+		"shell when the command's own output is too large for a tail. Exactly one of command and " +
+		"block_id selects what runs; block_id comes from define_shell_block; working_directory " +
+		"must not accompany block_id."
 }
 
 // Config controls server-side execution defaults.
@@ -80,6 +65,7 @@ func startShellCommandDescription() string {
 //nolint:govet // Field order groups process settings before the logger dependency.
 type Config struct {
 	BetaTest         bool
+	AgentGuidePath   string
 	Timeout          time.Duration
 	TimeoutUnlimited bool
 	SyncDeadline     time.Duration
@@ -196,23 +182,25 @@ func (s *Server) Run(ctx context.Context) error {
 		defer cancel()
 		s.manager.Shutdown(shutdownCtx)
 	}()
+	if err := s.newMCPServer().Run(ctx, &mcp.StdioTransport{}); err != nil {
+		return fmt.Errorf("run MCP transport: %w", err)
+	}
+	return nil
+}
+
+func (s *Server) newMCPServer() *mcp.Server {
 	server := mcp.NewServer(
 		&mcp.Implementation{Name: "just-mcp-work", Version: version.Current().Display()},
 		&mcp.ServerOptions{
-			Instructions: agentinit.Prompt(s.config.BetaTest),
+			Instructions: agentinit.Prompt(s.config.BetaTest, s.config.AgentGuidePath),
 			Logger:       s.config.Logger,
 		},
 	)
 	mcp.AddTool(
 		server,
 		&mcp.Tool{
-			Name: "list_projects",
-			Description: "List task projects. By default, scans depth 0-1 below the workspace root " +
-				"without dot-directories; use path to choose a subtree, max_depth or include_hidden to widen " +
-				"directory coverage, and runners to restrict projects. The depth, hidden, and excluded pruned " +
-				"counters count skipped directory subtrees; runner_mismatch counts inspected projects removed by runners. " +
-				"Excluded paths " +
-				"are configured by the operator and cannot be widened.",
+			Name:        "list_projects",
+			Description: "List task projects.",
 		},
 		recoverTool(withUpdateNotification(s, s.listProjects)),
 	)
@@ -228,12 +216,9 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name: "run_task",
-			Description: "Run one discovered task. Arguments are positional values; for a task with " +
-				"declared parameters, name=value arguments are rejected. A short tail can be requested " +
-				"in the same call with tail_bytes; it returns the last N bytes of each stream rather " +
-				"than the whole log, which is read with get_run_logs. A running receipt with promoted: " +
-				"true is normal: use its run_id with wait_run or get_run_status, never start the task " +
-				"again.",
+			Description: "Run a discovered task. Arguments are positional; tasks with declared parameters " +
+				"reject name=value. A running receipt with run_id and promoted: true is normal: follow it; " +
+				"do not start the task again.",
 		},
 		recoverTool(withUpdateNotification(s, s.runTask)),
 	)
@@ -241,10 +226,9 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name: "start_task",
-			Description: "Start one discovered task asynchronously and return its run_id immediately. " +
-				"Arguments are positional values; for a task with declared parameters, name=value " +
-				"arguments are rejected. Prefer this for long check/verify/CI-style gates; while a " +
-				"run_id is active, never launch the task again.",
+			Description: "Start a discovered task asynchronously. Arguments are positional; tasks with " +
+				"declared parameters reject name=value. Prefer it for long check/verify gates. A running " +
+				"receipt with run_id is normal: follow it with wait_run or get_run_status; do not start the task again.",
 		},
 		recoverTool(withUpdateNotification(s, s.startTask)),
 	)
@@ -281,7 +265,7 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "get_run_logs",
-			Description: "Read a paged stdout or stderr range from a persisted task run.",
+			Description: "Read a stdout or stderr log page.",
 		},
 		recoverTool(withUpdateNotification(s, s.getRunLogs)),
 	)
@@ -289,7 +273,7 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "get_run_status",
-			Description: "Get a non-blocking run snapshot, including liveness, recent output, and duration stats.",
+			Description: "Get a run snapshot.",
 		},
 		recoverTool(withUpdateNotification(s, s.getRunStatus)),
 	)
@@ -297,7 +281,7 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "wait_run",
-			Description: "Wait for a run without stopping it when the wait timeout expires.",
+			Description: "Wait for a run; expiry does not stop it.",
 		},
 		recoverTool(withUpdateNotification(s, s.waitRun)),
 	)
@@ -305,7 +289,7 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "stop_run",
-			Description: "Stop a run owned by this server process and return its final status.",
+			Description: "Stop a run owned by this server.",
 		},
 		recoverTool(withUpdateNotification(s, s.stopRun)),
 	)
@@ -313,7 +297,7 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "list_runs",
-			Description: "List recent persisted runs, newest first, with optional status, project, or task filters.",
+			Description: "List recent runs.",
 		},
 		recoverTool(withUpdateNotification(s, s.listRuns)),
 	)
@@ -321,14 +305,11 @@ func (s *Server) Run(ctx context.Context) error {
 		server,
 		&mcp.Tool{
 			Name:        "version_status",
-			Description: "Check the installed version against the latest stable GitHub release tag.",
+			Description: "Check for updates.",
 		},
 		recoverTool(s.versionStatus),
 	)
-	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		return fmt.Errorf("run MCP transport: %w", err)
-	}
-	return nil
+	return server
 }
 
 type versionStatusInput struct{}
@@ -343,10 +324,10 @@ func (s *Server) versionStatus(
 
 //nolint:govet // Field order follows the MCP request shape.
 type listProjectsInput struct {
-	Path          *string  `json:"path,omitempty" jsonschema:"workspace-relative subtree to search, default ."`
-	MaxDepth      *int     `json:"max_depth,omitempty" jsonschema:"relative scan depth: default 1, -1 unlimited"`
-	Runners       []string `json:"runners,omitempty" jsonschema:"keep projects exposing one of these runners"`
-	IncludeHidden *bool    `json:"include_hidden,omitempty" jsonschema:"include dot-directories, default false"`
+	Path          *string  `json:"path,omitempty" jsonschema:"path; default ."`
+	MaxDepth      *int     `json:"max_depth,omitempty" jsonschema:"depth; default 1, -1 unlimited"`
+	Runners       []string `json:"runners,omitempty"`
+	IncludeHidden *bool    `json:"include_hidden,omitempty" jsonschema:"hidden; default false"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -466,17 +447,17 @@ const (
 
 //nolint:govet,lll // Field order follows the MCP request shape; the schema help text is one string per field.
 type listTasksInput struct {
-	ProjectPath     string   `json:"project_path" jsonschema:"relative path returned by list_projects"`
-	Runner          string   `json:"runner,omitempty" jsonschema:"optional runner name to filter"`
-	Names           []string `json:"names,omitempty" jsonschema:"exact task names or task IDs; not combinable with name_prefix or query"`
-	NamePrefix      string   `json:"name_prefix,omitempty" jsonschema:"case-sensitive task name prefix; not combinable with names or query"`
-	Query           string   `json:"query,omitempty" jsonschema:"case-insensitive substring of the task name or description; not combinable with names or name_prefix"`
-	Visibility      string   `json:"visibility,omitempty" jsonschema:"public, private, or all; default all"`
-	Detail          string   `json:"detail,omitempty" jsonschema:"compact or full; default full"`
-	IncludeStats    *bool    `json:"include_stats,omitempty" jsonschema:"include run statistics; default true with detail full, false with detail compact"`
-	IncludeMetadata *bool    `json:"include_metadata,omitempty" jsonschema:"include runner metadata; default true with detail full, false with detail compact"`
-	Limit           *int     `json:"limit,omitempty" jsonschema:"maximum tasks, default 50, maximum 200"`
-	Cursor          string   `json:"cursor,omitempty" jsonschema:"exclusive task cursor from next_cursor"`
+	ProjectPath     string   `json:"project_path"`
+	Runner          string   `json:"runner,omitempty"`
+	Names           []string `json:"names,omitempty"`
+	NamePrefix      string   `json:"name_prefix,omitempty"`
+	Query           string   `json:"query,omitempty"`
+	Visibility      string   `json:"visibility,omitempty" jsonschema:"default all"`
+	Detail          string   `json:"detail,omitempty" jsonschema:"default full"`
+	IncludeStats    *bool    `json:"include_stats,omitempty"`
+	IncludeMetadata *bool    `json:"include_metadata,omitempty"`
+	Limit           *int     `json:"limit,omitempty" jsonschema:"default 50; max 200"`
+	Cursor          string   `json:"cursor,omitempty"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -933,11 +914,11 @@ func singleTaskSelector(names, prefix, query bool) error {
 
 //nolint:govet // Field order follows the MCP request shape.
 type runTaskInput struct {
-	ProjectPath string   `json:"project_path" jsonschema:"relative path returned by list_projects"`
-	TaskID      string   `json:"task_id" jsonschema:"task ID returned by list_tasks"`
-	Arguments   []string `json:"arguments,omitempty" jsonschema:"positional task values; tasks with declared parameters reject name=value forms"`
-	MaxWaitMS   *int64   `json:"max_wait_ms,omitempty" jsonschema:"wait up to this many milliseconds; 0 starts immediately, -1 waits for completion"`
-	TailBytes   *int64   `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail; omit to leave a completed receipt unchanged, zero disables tails"`
+	ProjectPath string   `json:"project_path"`
+	TaskID      string   `json:"task_id"`
+	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
+	MaxWaitMS   *int64   `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
+	TailBytes   *int64   `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
 }
 
 //nolint:govet // Embedded result precedes the structured MCP error by contract.
@@ -996,9 +977,9 @@ func (s *Server) runTask(
 }
 
 type startTaskInput struct {
-	ProjectPath string   `json:"project_path" jsonschema:"relative path returned by list_projects"`
-	TaskID      string   `json:"task_id" jsonschema:"task ID returned by list_tasks"`
-	Arguments   []string `json:"arguments,omitempty" jsonschema:"positional task values; tasks with declared parameters reject name=value forms"`
+	ProjectPath string   `json:"project_path"`
+	TaskID      string   `json:"task_id"`
+	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
 }
 
 func (s *Server) startTask(
@@ -1131,11 +1112,11 @@ func validatePositionalTaskArguments(task runner.Task, arguments []string) error
 
 //nolint:govet // Field order follows the MCP request shape.
 type runShellCommandInput struct {
-	Command          string `json:"command,omitempty" jsonschema:"command text interpreted by the operating system shell"`
-	BlockID          string `json:"block_id,omitempty" jsonschema:"session shell block ID returned by define_shell_block"`
-	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"workspace-relative directory, default root"`
-	MaxWaitMS        *int64 `json:"max_wait_ms,omitempty" jsonschema:"wait up to this many milliseconds; 0 starts immediately, -1 waits for completion"`
-	TailBytes        *int64 `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail; omit to leave a completed receipt unchanged, zero disables tails"`
+	Command          string `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
+	BlockID          string `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
+	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"directory; default ."`
+	MaxWaitMS        *int64 `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
+	TailBytes        *int64 `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
 }
 
 func (s *Server) runShellCommand(
@@ -1171,9 +1152,9 @@ func (s *Server) runShellCommand(
 }
 
 type startShellCommandInput struct {
-	Command          string `json:"command,omitempty" jsonschema:"command text interpreted by the operating system shell"`
-	BlockID          string `json:"block_id,omitempty" jsonschema:"session shell block ID returned by define_shell_block"`
-	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"workspace-relative directory, default root"`
+	Command          string `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
+	BlockID          string `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
+	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"directory; default ."`
 }
 
 func (s *Server) startShellCommand(
@@ -1581,7 +1562,7 @@ func taskByID(tasks []runner.Task, wanted string) (runner.Task, bool) {
 }
 
 type getRunInput struct {
-	RunID string `json:"run_id" jsonschema:"run ID returned by run_task"`
+	RunID string `json:"run_id"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.
@@ -1604,10 +1585,10 @@ func (s *Server) getRun(
 
 //nolint:govet // Field order follows the stable MCP JSON request shape.
 type getRunLogsInput struct {
-	RunID    string `json:"run_id" jsonschema:"run ID returned by run_task"`
-	Stream   string `json:"stream" jsonschema:"stdout or stderr"`
-	Offset   int64  `json:"offset,omitempty" jsonschema:"raw byte offset, default zero"`
-	Limit    int64  `json:"limit,omitempty" jsonschema:"maximum raw bytes, default 65536"`
+	RunID    string `json:"run_id"`
+	Stream   string `json:"stream"`
+	Offset   int64  `json:"offset,omitempty" jsonschema:"offset; default 0"`
+	Limit    int64  `json:"limit,omitempty" jsonschema:"bytes; default 65536"`
 	Encoding string `json:"encoding,omitempty" jsonschema:"utf8 or base64, default utf8"`
 }
 
@@ -1662,22 +1643,22 @@ func (s *Server) getRunLogs(
 
 //nolint:govet // Field order follows the MCP request shape.
 type getRunStatusInput struct {
-	RunID     string `json:"run_id" jsonschema:"run ID returned by a task tool"`
-	TailBytes *int64 `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail, default 4096, zero disables tails"`
+	RunID     string `json:"run_id"`
+	TailBytes *int64 `json:"tail_bytes,omitempty" jsonschema:"tail bytes; default 4096, 0 off"`
 }
 
 //nolint:govet // Field order follows the MCP request shape.
 type waitRunInput struct {
-	RunID     string `json:"run_id" jsonschema:"run ID returned by a task tool"`
-	MaxWaitMS *int64 `json:"max_wait_ms,omitempty" jsonschema:"wait duration in milliseconds, default 30000, maximum 600000"`
+	RunID     string `json:"run_id"`
+	MaxWaitMS *int64 `json:"max_wait_ms,omitempty" jsonschema:"ms; default 30000, max 600000"`
 	TimeoutMS *int64 `json:"timeout_ms,omitempty" jsonschema:"deprecated alias for max_wait_ms"`
-	TailBytes *int64 `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail, default 4096, zero disables tails"`
+	TailBytes *int64 `json:"tail_bytes,omitempty" jsonschema:"tail bytes; default 4096, 0 off"`
 }
 
 //nolint:govet // Field order follows the MCP request shape.
 type stopRunInput struct {
-	RunID     string `json:"run_id" jsonschema:"run ID returned by a task tool"`
-	TailBytes *int64 `json:"tail_bytes,omitempty" jsonschema:"bytes from each log tail, default 4096, zero disables tails"`
+	RunID     string `json:"run_id"`
+	TailBytes *int64 `json:"tail_bytes,omitempty" jsonschema:"tail bytes; default 4096, 0 off"`
 }
 
 //nolint:govet // Embedded result precedes the status details by contract.
@@ -1802,11 +1783,11 @@ func (s *Server) stopRun(
 
 //nolint:govet // Field order follows the MCP request shape.
 type listRunsInput struct {
-	Status      []string `json:"status,omitempty" jsonschema:"optional statuses: running, ok, nonzero, timeout, cancelled, spawn_error"`
-	ProjectPath string   `json:"project_path,omitempty" jsonschema:"optional project path filter"`
-	TaskID      string   `json:"task_id,omitempty" jsonschema:"optional task ID filter"`
-	Limit       *int     `json:"limit,omitempty" jsonschema:"maximum runs, default 20, maximum 200"`
-	Cursor      string   `json:"cursor,omitempty" jsonschema:"exclusive run cursor from next_cursor"`
+	Status      []string `json:"status,omitempty" jsonschema:"running, ok, nonzero, timeout, cancelled, or spawn_error"`
+	ProjectPath string   `json:"project_path,omitempty"`
+	TaskID      string   `json:"task_id,omitempty"`
+	Limit       *int     `json:"limit,omitempty" jsonschema:"limit; default 20, max 200"`
+	Cursor      string   `json:"cursor,omitempty"`
 }
 
 //nolint:govet // Field order follows the stable MCP JSON response shape.

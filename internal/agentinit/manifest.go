@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -20,8 +21,11 @@ import (
 const (
 	manifestSchemaVersion = 1
 	manifestFile          = ".just-mcp-work/managed.json"
+	guideFile             = ".just-mcp-work/guide.txt"
+	retiredGuideFile      = ".just-mcp-work/guide.md"
 
 	manifestKindAgentInstructions = "agent-instructions"
+	manifestKindAgentGuide        = "agent-guide"
 	manifestKindCodexConfig       = "codex-config"
 	manifestKindMCPConfig         = "mcp-config"
 	manifestKindClaudeSettings    = "claude-settings"
@@ -44,6 +48,12 @@ type manifestSurface struct {
 	SHA256 string `json:"sha256"`
 }
 
+// ManagedSurfaces reports the modes verified from a workspace's managed manifest.
+type ManagedSurfaces struct {
+	AgentGuidePath string
+	BetaTest       bool
+}
+
 type manifestBlockRange func(string) (int, int, bool, error)
 
 //nolint:gocyclo // Keep the pre-write mode-change refusal beside the manifest it validates.
@@ -53,7 +63,7 @@ func planManifest(
 	betaTest bool,
 	shellPermission ShellPermission,
 	selected map[string]struct{},
-) (*plannedEdit, error) {
+) ([]plannedEdit, error) {
 	path, err := findScopedConfig(
 		scope,
 		scopedConfig{relative: manifestFile, name: "managed manifest", lower: "managed manifest"},
@@ -65,6 +75,7 @@ func planManifest(
 	if err != nil {
 		return nil, err
 	}
+	var edits []plannedEdit
 	recordedShellPermission := ""
 	for _, surface := range surfaces {
 		if surface.Kind == manifestKindClaudeSettings ||
@@ -77,6 +88,16 @@ func planManifest(
 		var recorded managedManifest
 		if decodeErr := json.Unmarshal(before, &recorded); decodeErr == nil &&
 			recorded.SchemaVersion == manifestSchemaVersion {
+			retiredGuideEdit, hasRetiredGuideEdit, retiredGuideErr := planRetiredAgentGuide(
+				scope,
+				recorded.Surfaces,
+			)
+			if retiredGuideErr != nil {
+				return nil, retiredGuideErr
+			}
+			if hasRetiredGuideEdit {
+				edits = append(edits, retiredGuideEdit)
+			}
 			if recorded.BetaTest != betaTest {
 				var missingPaths []string
 				for _, surface := range recorded.Surfaces {
@@ -186,7 +207,64 @@ func planManifest(
 		return nil, fmt.Errorf("encode managed manifest: %w", err)
 	}
 	after = append(after, '\n')
-	return newEdit(path, before, after, 0o644, beforeExists, false), nil
+	edits = appendEdit(
+		edits,
+		newEdit(manifestFile, path, before, after, 0o644, beforeExists, false),
+	)
+	return edits, nil
+}
+
+func planRetiredAgentGuide(
+	scope string,
+	surfaces []manifestSurface,
+) (plannedEdit, bool, error) {
+	for _, surface := range surfaces {
+		if surface.Kind != manifestKindAgentGuide ||
+			filepath.ToSlash(surface.Path) != retiredGuideFile {
+			continue
+		}
+		config := scopedConfig{
+			relative: filepath.FromSlash(retiredGuideFile),
+			name:     "retired agent guide",
+			lower:    "retired agent guide",
+		}
+		resolvedScope, err := resolveWorkspaceScope(scope)
+		if err != nil {
+			return plannedEdit{}, false, err
+		}
+		resolvedDirectory, err := resolveScopedConfigDirectory(scope, resolvedScope, config)
+		if err != nil {
+			return plannedEdit{}, false, err
+		}
+		path := filepath.Join(resolvedDirectory, filepath.Base(config.relative))
+		lexicalPath := filepath.Join(scope, config.relative)
+		info, err := os.Lstat(lexicalPath)
+		if os.IsNotExist(err) {
+			return plannedEdit{}, false, nil
+		}
+		if err != nil {
+			return plannedEdit{}, false, fmt.Errorf(
+				"inspect retired agent guide %s: %w",
+				lexicalPath,
+				err,
+			)
+		}
+		if !info.Mode().IsRegular() {
+			return plannedEdit{}, false, fmt.Errorf(
+				"retired agent guide %s is not a regular file",
+				lexicalPath,
+			)
+		}
+		before, exists, err := readOptionalFile(path)
+		if err != nil {
+			return plannedEdit{}, false, err
+		}
+		if !exists {
+			return plannedEdit{}, false, nil
+		}
+		return *newEdit(retiredGuideFile, path, before, nil, 0o644, true, true), true, nil
+	}
+	return plannedEdit{}, false, nil
 }
 
 func blockManifestSurface(
@@ -411,15 +489,15 @@ func ReadRecordedShellPermission(root string) (ShellPermission, bool, error) {
 
 // VerifyManagedSurfaces checks that the generated workspace configuration
 // recorded by the last init still matches this binary and the files on disk.
-// It returns the recorded beta-test mode after successful verification; a missing
-// manifest is accepted as plain, and every error returns false.
+// It returns the verified recorded modes after successful verification; a missing
+// manifest is accepted without modes, and every error returns an empty result.
 //
 //nolint:gocyclo // Each refusal stage stays explicit so its recovery message remains specific.
-func VerifyManagedSurfaces(root string) (bool, error) {
+func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 	manifestPath := filepath.Join(root, manifestFile)
 	data, exists, err := readOptionalFile(manifestPath)
 	if err != nil {
-		return false, fmt.Errorf(
+		return ManagedSurfaces{}, fmt.Errorf(
 			"managed manifest %s is unreadable: %w; %s",
 			manifestPath,
 			err,
@@ -427,12 +505,12 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 		)
 	}
 	if !exists {
-		return false, nil
+		return ManagedSurfaces{}, nil
 	}
 
 	var manifest managedManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return false, fmt.Errorf(
+		return ManagedSurfaces{}, fmt.Errorf(
 			"managed manifest %s is unreadable: %w; %s",
 			manifestPath,
 			err,
@@ -444,7 +522,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 		if manifest.SchemaVersion > manifestSchemaVersion {
 			description = fmt.Sprintf("is too new (schema version %d)", manifest.SchemaVersion)
 		}
-		return false, fmt.Errorf(
+		return ManagedSurfaces{}, fmt.Errorf(
 			"managed manifest %s %s; %s",
 			manifestPath,
 			description,
@@ -455,7 +533,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 	if manifest.ShellPermission != "" {
 		parsed, parseErr := ParseShellPermission(manifest.ShellPermission)
 		if parseErr != nil {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed manifest %s is unusable: %w; %s",
 				manifestPath,
 				parseErr,
@@ -469,7 +547,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 	for _, recorded := range manifest.Surfaces {
 		path := filepath.FromSlash(recorded.Path)
 		if filepath.IsAbs(path) {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed manifest %s is unusable: managed surface path %q is absolute; %s",
 				manifestPath,
 				recorded.Path,
@@ -481,7 +559,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			func(char rune) bool { return char == '/' || char == '\\' },
 		)
 		if slices.Contains(elements, "..") {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed manifest %s is unusable: managed surface path %q contains a .. element; %s",
 				manifestPath,
 				recorded.Path,
@@ -499,7 +577,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			},
 		)
 		if err != nil {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed manifest %s is unusable: path %q: %w; %s",
 				manifestPath,
 				recorded.Path,
@@ -518,7 +596,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			recorded,
 		)
 		if err != nil {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed manifest %s is unreadable: %w; %s",
 				manifestPath,
 				err,
@@ -526,7 +604,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			)
 		}
 		if generated.SHA256 != recorded.SHA256 {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"generated configuration changed since it was written for %s "+
 					"(recorded by just-mcp-work %s); %s",
 				resolvedPaths[index],
@@ -540,7 +618,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 		path := resolvedPaths[index]
 		content, exists, err := readOptionalFile(path)
 		if err != nil {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed configuration in %s is unreadable: %w; %s",
 				path,
 				err,
@@ -548,7 +626,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			)
 		}
 		if !exists {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed configuration in %s is missing; %s",
 				path,
 				managedManifestRecovery(root),
@@ -556,7 +634,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 		}
 		actual, found, err := manifestSurfaceFromContent(recorded, content)
 		if err != nil {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed configuration in %s is malformed: %w; %s",
 				path,
 				err,
@@ -564,7 +642,7 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			)
 		}
 		if !found {
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed configuration in %s is missing; %s",
 				path,
 				managedManifestRecovery(root),
@@ -573,12 +651,14 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 		if actual.SHA256 != recorded.SHA256 {
 			ownership := "just-mcp-work owns the entries it generates in that file, " +
 				"so keep your own entries separate"
-			if recorded.Kind == manifestKindAgentInstructions ||
-				recorded.Kind == manifestKindCodexConfig {
+			switch recorded.Kind {
+			case manifestKindAgentInstructions, manifestKindCodexConfig:
 				ownership = "just-mcp-work owns the text between its markers, " +
 					"so keep your own text outside them"
+			case manifestKindAgentGuide:
+				ownership = "just-mcp-work owns that whole file, so do not edit it"
 			}
-			return false, fmt.Errorf(
+			return ManagedSurfaces{}, fmt.Errorf(
 				"managed configuration in %s was edited; %s; %s",
 				path,
 				ownership,
@@ -586,7 +666,27 @@ func VerifyManagedSurfaces(root string) (bool, error) {
 			)
 		}
 	}
-	return manifest.BetaTest, nil
+	agentGuidePath, pathErr := verifiedAgentGuidePath(manifest.Surfaces, resolvedPaths)
+	if pathErr != nil {
+		return ManagedSurfaces{}, fmt.Errorf("resolve verified agent guide: %w", pathErr)
+	}
+	return ManagedSurfaces{
+		BetaTest:       manifest.BetaTest,
+		AgentGuidePath: agentGuidePath,
+	}, nil
+}
+
+func verifiedAgentGuidePath(surfaces []manifestSurface, resolvedPaths []string) (string, error) {
+	for index, surface := range surfaces {
+		if surface.Kind == manifestKindAgentGuide && filepath.ToSlash(surface.Path) == guideFile {
+			absolutePath, err := filepath.Abs(resolvedPaths[index])
+			if err != nil {
+				return "", fmt.Errorf("make %s absolute: %w", resolvedPaths[index], err)
+			}
+			return absolutePath, nil
+		}
+	}
+	return "", nil
 }
 
 func generatedManifestSurface(
@@ -601,6 +701,12 @@ func generatedManifestSurface(
 			recorded.Path,
 			recorded.Kind,
 			[]byte(canonicalBlock(betaTest)),
+		), nil
+	case manifestKindAgentGuide:
+		return newManifestSurface(
+			recorded.Path,
+			recorded.Kind,
+			[]byte(promptText+"\n"),
 		), nil
 	case manifestKindCodexConfig:
 		content, err := mergeCodexConfig(nil, root, shellPermission)
@@ -661,6 +767,8 @@ func manifestSurfaceFromContent(
 	switch recorded.Kind {
 	case manifestKindAgentInstructions:
 		fragment, found, err = managedBlockFragment(content, managedBlockRange)
+	case manifestKindAgentGuide:
+		fragment, found = content, true
 	case manifestKindCodexConfig:
 		fragment, found, err = managedBlockFragment(content, codexBlockRange)
 	case manifestKindMCPConfig:

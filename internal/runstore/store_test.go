@@ -312,6 +312,37 @@ func TestReadLogValidatesPagingAndPath(t *testing.T) {
 	}
 }
 
+func TestReadLogAppliesDefaultAndMaximumPageSizes(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:paging"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = handle.Stdout().Write([]byte(strings.Repeat("x", (1<<20)+1))); err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := store.ReadLog(handle.Meta.RunID, "stdout", 0, 0)
+	if err != nil || len(page) != 64<<10 {
+		t.Fatalf("ReadLog(default limit) returned %d bytes, %v; want %d", len(page), err, 64<<10)
+	}
+	page, err = store.ReadLog(handle.Meta.RunID, "stdout", 0, 1<<20)
+	if err != nil || len(page) != 1<<20 {
+		t.Fatalf("ReadLog(maximum limit) returned %d bytes, %v; want %d", len(page), err, 1<<20)
+	}
+	if _, err = store.ReadLog(handle.Meta.RunID, "stdout", 0, (1<<20)+1); err == nil ||
+		err.Error() != "limit exceeds 1048576 bytes" {
+		t.Fatalf("ReadLog(oversized limit) error = %v, want exact limit error", err)
+	}
+	if err = handle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReadLogTailAndLogState(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewForWorktree(root, root)

@@ -41,15 +41,28 @@ const (
 	claudeServerRule = "mcp__" + serverName
 )
 
-// Prompt returns the canonical JMW usage guidance served as the MCP server's
-// instructions. When betaTest is true, it appends the beta feedback contract.
-func Prompt(betaTest bool) string {
+// Prompt returns the JMW usage guidance served as the MCP server's instructions.
+// A verified agent guide path lets the server use the compact form. When
+// betaTest is true, it appends the beta feedback contract.
+func Prompt(betaTest bool, agentGuidePath string) string {
+	prompt := promptText
+	if agentGuidePath != "" {
+		prompt = fmt.Sprintf(shortPromptText, agentGuidePath)
+	}
 	if !betaTest {
-		return promptText
+		return prompt
 	}
 	// This wrapper is presentation only; the managed-block text is the single contract.
-	return promptText + "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText
+	return prompt + "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText
 }
+
+const shortPromptText = `JMW is this workspace's task runner; it saves context budget.
+
+For build, test, lint, format, and check/verify, use list_tasks then run_task or start_task. Trust a green receipt; do not fetch logs of a successful run. On failure, read stdout_tail/stderr_tail first, then a byte range if needed. Status: running with a run_id is normal: follow with wait_run or get_run_status; never launch the task twice.
+
+Run a command directly only when the full output you need is too large for a tail. A task may be absent because the operator withheld it through a runner mode; never recreate or run it through run_shell_command, start_shell_command, or another shell path. Pass the same rule to sub-agents and other executors.
+
+Reference: list_tasks filters, pagination, tail_bytes semantics, receipt fields, and shell-tool details are in "%s"; read it when working with tasks.`
 
 const promptText = `This workspace exposes its runnable project tasks through just-mcp-work (JMW).
 
@@ -85,26 +98,59 @@ SPEND AS FEW TOKENS AS THE WORK ALLOWS
 - A receipt with status: running and a run_id is normal, not a failure: follow it
   with wait_run or get_run_status, and never launch the same task twice.
 
-HOW TO DRIVE IT
-- Discover what exists with list_projects and list_tasks. Prefer an existing task
-  over a hand-written command line, and do not edit build files unless asked.
-- Ask list_tasks for the tasks you need, not for the catalog: names takes the
-  exact names or task IDs you already expect, name_prefix and query search when
-  you do not, visibility: public hides the private helpers, and detail: compact
-  keeps task identity and parameters, returns at most the first 160 runes of the
-  first description line, and drops runner metadata and run statistics. Only
-  names, name_prefix, and query are mutually exclusive: use one of those per
-  call. Each response is a page: limit defaults to 50 and has a maximum of 200;
-  when truncated is true, continue with next_cursor and unchanged inputs.
-- run_task runs a discovered task and promotes a long run to the background;
-  start_task starts it in the background from the beginning.
-- A task may be absent because the operator withheld it through a runner mode.
-  Never recreate or run such a task through run_shell_command,
-  start_shell_command, or another shell path.
-- Shell tools remain available for genuinely ad-hoc commands outside the
-  discovered or withheld task surfaces. Set working_directory to a
-  workspace-relative directory (default .).
-- Define a long repeated block once with define_shell_block and rerun it by block_id.`
+REFERENCE
+
+Discovery
+- list_projects: path is a workspace-relative subtree (default .); max_depth
+  defaults to 1 and -1 is unlimited; include_hidden defaults false; runners
+  filters project runners. Excluded paths are operator-configured. Use the
+  returned rel_path as project_path for task tools.
+- list_tasks: names selects exact task names or IDs; name_prefix is a
+  case-sensitive prefix; query is a case-insensitive substring of the task name
+  or description; visibility is
+  public, private, or all (default all). names, name_prefix, and query are
+  mutually exclusive.
+- detail: compact keeps identity and parameters, returns at most the first 160
+  runes of the first description line, and drops runner metadata and run
+  statistics. detail defaults to full; metadata and stats default true for full
+  and false for compact.
+- Results page after filtering: limit defaults to 50 and has a maximum of 200.
+  cursor is the exclusive server-emitted next_cursor from the previous page with
+  unchanged inputs; when truncated is true, continue with next_cursor and
+  unchanged inputs. truncated and next_cursor explicitly report continuation.
+
+Task and shell execution
+- Prefer a discovered task over a hand-written command, and do not edit build
+  files unless asked. run_task waits up to
+  max_wait_ms (0 starts immediately; -1 waits for completion); start_task begins
+  asynchronously. Arguments are positional; declared task parameters reject
+  name=value forms. Prefer start_task for long check/verify gates.
+- A receipt with status: running and run_id is normal. promoted: true means the
+  synchronous call continued in the background; follow run_id with wait_run or
+  get_run_status, never launch the task again. Receipt fields include status,
+  exit_code, message, run_id, duration_ms, promoted, and optional output tails.
+- run_shell_command and start_shell_command are only for genuinely ad-hoc
+  commands outside discovered or withheld tasks. A task may be absent because the
+  operator withheld it through a runner mode. Never recreate or run such a task
+  through a shell path.
+- define_shell_block registers a long repeated command under a block_id. Exactly
+  one of command and block_id selects what run_shell_command or
+  start_shell_command runs; working_directory must not accompany block_id.
+- working_directory is workspace-relative and defaults to the workspace root.
+
+Run data
+- tail_bytes is bytes from each stream's end. On run_task and run_shell_command,
+  omit it to leave a completed receipt unchanged; 0 disables tails; 1..65536
+  requests that tail. get_run_status, wait_run, and stop_run default to 4096;
+  0 disables their tails.
+- get_run reads persisted metadata. get_run_logs reads stdout or stderr by raw
+  byte offset (default 0), with a default limit of 65536 bytes and a maximum of
+  1048576 bytes, as utf8 (default) or base64.
+- wait_run defaults to 30000 ms (maximum 600000) and does not stop the run when
+  the wait expires; timeout_ms is its deprecated alias. stop_run only stops a
+  run owned by this server. list_runs is newest first and pages with limit 20
+  by default (maximum 200) and next_cursor.
+- version_status checks the installed version against the latest stable release.`
 
 // managedBlockText is the instruction block written into the agent files. It
 // carries the same contract as promptText in a form an agent can read before
@@ -277,13 +323,18 @@ func ResolveScope(dir string) (string, error) {
 }
 
 type plannedEdit struct {
-	apply        func() error
-	path         string
-	before       []byte
-	after        []byte
-	mode         os.FileMode
-	beforeExists bool
-	remove       bool
+	apply         func() error
+	surface       string
+	path          string
+	collisionPath string
+	before        []byte
+	after         []byte
+	mode          os.FileMode
+	changed       bool
+	beforeExists  bool
+	remove        bool
+	// agentInstructions permits one intentional alias only when both writes are identical.
+	agentInstructions bool
 }
 
 // Apply makes the current invocation authoritative for every workspace-local
@@ -322,25 +373,18 @@ func Apply(options Options) (Result, error) {
 		return Result{}, err
 	}
 	edits := append([]plannedEdit(nil), agentEdits...)
-	mcpEdit, mcpSurface, err := planMCPConfig(scope, preserveMCPAnchor, options)
+	workspaceEdits, workspaceSurfaces, err := planWorkspaceConfiguration(
+		scope,
+		preserveMCPAnchor,
+		selected,
+		options,
+	)
 	if err != nil {
 		return Result{}, err
 	}
-	edits = appendEdit(edits, mcpEdit)
-	surfaces = appendManifestSurface(surfaces, mcpSurface)
-	codexEdit, codexSurface, err := planCodexConfig(scope, options)
-	if err != nil {
-		return Result{}, err
-	}
-	edits = appendEdit(edits, codexEdit)
-	surfaces = appendManifestSurface(surfaces, codexSurface)
-	claudeEdit, claudeSurface, err := planSelectedClaudeSettings(scope, selected, options)
-	if err != nil {
-		return Result{}, err
-	}
-	edits = appendEdit(edits, claudeEdit)
-	surfaces = appendManifestSurface(surfaces, claudeSurface)
-	manifestEdit, err := planManifest(
+	edits = append(edits, workspaceEdits...)
+	surfaces = append(surfaces, workspaceSurfaces...)
+	manifestEdits, err := planManifest(
 		scope,
 		surfaces,
 		options.BetaTest,
@@ -350,10 +394,13 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	edits = appendEdit(edits, manifestEdit)
+	edits = append(edits, manifestEdits...)
 	// Publish policy last. If another write fails, an absent policy keeps every runner
 	// disabled and an existing policy keeps its previous modes, so init cannot widen access.
 	edits = appendEdit(edits, policyEdit)
+	if err := validatePlannedEditPaths(edits); err != nil {
+		return Result{}, err
+	}
 	result := resultForEdits(edits)
 	result.Scope = scope
 	if options.DryRun {
@@ -363,19 +410,6 @@ func Apply(options Options) (Result, error) {
 		return Result{}, err
 	}
 	return result, nil
-}
-
-func planSelectedClaudeSettings(
-	scope string,
-	selected map[string]struct{},
-	options Options,
-) (*plannedEdit, *manifestSurface, error) {
-	// The Claude settings file belongs to the claude agent, so an invocation that
-	// does not select claude plans nothing for it, whatever ClaudePermissions says.
-	if _, claudeSelected := selected["claude"]; !claudeSelected {
-		return nil, nil, nil
-	}
-	return planClaudeSettings(scope, options)
 }
 
 func resolveShellPermission(
@@ -431,6 +465,45 @@ func plansShellPermission(
 			slices.Contains(agents, "claude"))
 }
 
+func planWorkspaceConfiguration(
+	scope string,
+	preserveMCPAnchor bool,
+	selected map[string]struct{},
+	options Options,
+) ([]plannedEdit, []manifestSurface, error) {
+	edits := make([]plannedEdit, 0, 4)
+	surfaces := make([]manifestSurface, 0, 4)
+	mcpEdit, mcpSurface, err := planMCPConfig(scope, preserveMCPAnchor, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	edits = appendEdit(edits, mcpEdit)
+	surfaces = appendManifestSurface(surfaces, mcpSurface)
+	codexEdit, codexSurface, err := planCodexConfig(scope, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	edits = appendEdit(edits, codexEdit)
+	surfaces = appendManifestSurface(surfaces, codexSurface)
+	// The Claude settings file belongs to the claude agent, so an invocation that
+	// does not select claude plans nothing for it, whatever ClaudePermissions says.
+	if _, claudeSelected := selected["claude"]; claudeSelected {
+		claudeEdit, claudeSurface, claudeErr := planClaudeSettings(scope, options)
+		if claudeErr != nil {
+			return nil, nil, claudeErr
+		}
+		edits = appendEdit(edits, claudeEdit)
+		surfaces = appendManifestSurface(surfaces, claudeSurface)
+	}
+	guideEdit, guideSurface, err := planAgentGuide(scope)
+	if err != nil {
+		return nil, nil, err
+	}
+	edits = appendEdit(edits, guideEdit)
+	surfaces = append(surfaces, guideSurface)
+	return edits, surfaces, nil
+}
+
 // planAgentInstructions plans the managed block for the selected agents only. An
 // agent the operator did not select is left alone, so init neither rewrites nor
 // removes its instruction file. That also keeps two agent targets that resolve
@@ -447,7 +520,7 @@ func planAgentInstructions(
 		if _, keep := selected[named.name]; !keep {
 			continue
 		}
-		path, err := findAgentInstruction(scope, named.target)
+		path, collisionPath, err := findAgentInstruction(scope, named.target)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -469,12 +542,29 @@ func planAgentInstructions(
 			return nil, nil, fmt.Errorf("record %s: %w", path, err)
 		}
 		surfaces = append(surfaces, surface)
-		edits = appendEdit(
-			edits,
-			newEdit(path, before, after, 0o644, beforeExists, false),
-		)
+		edit := newEdit(named.target.path, path, before, after, 0o644, beforeExists, false)
+		edit.agentInstructions = true
+		edit.collisionPath = collisionPath
+		edits = appendEdit(edits, edit)
 	}
 	return edits, surfaces, nil
+}
+
+func planAgentGuide(scope string) (*plannedEdit, manifestSurface, error) {
+	path, err := findScopedConfig(
+		scope,
+		scopedConfig{relative: guideFile, name: "agent guide", lower: "agent guide"},
+	)
+	if err != nil {
+		return nil, manifestSurface{}, err
+	}
+	before, beforeExists, err := readOptionalFile(path)
+	if err != nil {
+		return nil, manifestSurface{}, err
+	}
+	after := []byte(withLineBreak(promptText+"\n", documentLineBreak(before)))
+	surface := newManifestSurface(guideFile, manifestKindAgentGuide, after)
+	return newEdit(guideFile, path, before, after, 0o644, beforeExists, false), surface, nil
 }
 
 func planMCPConfig(
@@ -482,7 +572,7 @@ func planMCPConfig(
 	preserveAnchor bool,
 	options Options,
 ) (*plannedEdit, *manifestSurface, error) {
-	path, err := findMCPConfig(scope)
+	path, collisionPath, err := findMCPConfig(scope)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -499,7 +589,9 @@ func planMCPConfig(
 		if surfaceErr != nil {
 			return nil, nil, surfaceErr
 		}
-		return newEdit(path, before, after, 0o644, beforeExists, false), &surface, nil
+		edit := newEdit(mcpConfig, path, before, after, 0o644, beforeExists, false)
+		edit.collisionPath = collisionPath
+		return edit, &surface, nil
 	}
 	after, remove, err := removeMCPConfig(before)
 	if err != nil {
@@ -515,7 +607,9 @@ func planMCPConfig(
 		after = []byte("{}" + documentLineBreak(before))
 		remove = false
 	}
-	return newEdit(path, before, after, 0o644, beforeExists, remove), nil, nil
+	edit := newEdit(mcpConfig, path, before, after, 0o644, beforeExists, remove)
+	edit.collisionPath = collisionPath
+	return edit, nil, nil
 }
 
 func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurface, error) {
@@ -541,7 +635,7 @@ func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurf
 		if surfaceErr != nil {
 			return nil, nil, fmt.Errorf("record %s: %w", path, surfaceErr)
 		}
-		return newEdit(path, before, after, 0o600, beforeExists, false), &surface, nil
+		return newEdit(codexConfig, path, before, after, 0o600, beforeExists, false), &surface, nil
 	}
 	after, remove, err := removeCodexConfig(before)
 	if err != nil {
@@ -551,7 +645,7 @@ func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurf
 	if err != nil {
 		return nil, nil, err
 	}
-	return newEdit(path, before, after, 0o600, beforeExists, remove), nil, nil
+	return newEdit(codexConfig, path, before, after, 0o600, beforeExists, remove), nil, nil
 }
 
 // planClaudeSettings plans the Claude permission lists of a selected claude
@@ -574,7 +668,7 @@ func planClaudeSettings(scope string, options Options) (*plannedEdit, *manifestS
 		if err != nil {
 			return nil, nil, err
 		}
-		return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil, nil
+		return newEdit(claudeSettings, path, before, cleaned, 0o600, beforeExists, remove), nil, nil
 	}
 	after, err := mergeClaudeSettings(before, options.ShellPermission)
 	if err != nil {
@@ -584,7 +678,7 @@ func planClaudeSettings(scope string, options Options) (*plannedEdit, *manifestS
 	if err != nil {
 		return nil, nil, err
 	}
-	edit := newEdit(path, before, after, 0o600, beforeExists, false)
+	edit := newEdit(claudeSettings, path, before, after, 0o600, beforeExists, false)
 	if options.DryRun || options.ClaudePermissions == ClaudePermissionsYes {
 		return edit, &surface, nil
 	}
@@ -603,7 +697,7 @@ func planClaudeSettings(scope string, options Options) (*plannedEdit, *manifestS
 	if err != nil {
 		return nil, nil, err
 	}
-	return newEdit(path, before, cleaned, 0o600, beforeExists, remove), nil, nil
+	return newEdit(claudeSettings, path, before, cleaned, 0o600, beforeExists, remove), nil, nil
 }
 
 func planPolicy(
@@ -611,6 +705,10 @@ func planPolicy(
 	selections runner.ValidatedSelections,
 ) (*plannedEdit, error) {
 	path := policy.Path(scope)
+	resolvedScope, err := resolveWorkspaceScope(scope)
+	if err != nil {
+		return nil, err
+	}
 	before, beforeExists, err := policy.Read(scope)
 	if err != nil {
 		return nil, fmt.Errorf("plan workspace policy %s: %w", path, err)
@@ -619,8 +717,9 @@ func planPolicy(
 	if err != nil {
 		return nil, err
 	}
-	edit := newEdit(path, before, after, 0o644, beforeExists, false)
-	if edit != nil {
+	edit := newEdit(filepath.Base(path), path, before, after, 0o644, beforeExists, false)
+	edit.collisionPath = filepath.Join(resolvedScope, filepath.Base(path))
+	if edit.changed {
 		edit.apply = func() error {
 			if err := policy.Save(scope, selections); err != nil {
 				return fmt.Errorf("save workspace policy: %w", err)
@@ -664,6 +763,7 @@ func resolveScope(dir string) (string, bool, error) {
 }
 
 func newEdit(
+	surface string,
 	path string,
 	before []byte,
 	after []byte,
@@ -671,16 +771,16 @@ func newEdit(
 	beforeExists bool,
 	remove bool,
 ) *plannedEdit {
-	if bytes.Equal(before, after) && !remove {
-		return nil
-	}
 	return &plannedEdit{
-		path:         path,
-		before:       before,
-		after:        after,
-		mode:         mode,
-		beforeExists: beforeExists,
-		remove:       remove,
+		path:          path,
+		collisionPath: path,
+		changed:       !bytes.Equal(before, after) || remove,
+		surface:       filepath.ToSlash(surface),
+		before:        before,
+		after:         after,
+		mode:          mode,
+		beforeExists:  beforeExists,
+		remove:        remove,
 	}
 }
 
@@ -691,9 +791,32 @@ func appendEdit(edits []plannedEdit, edit *plannedEdit) []plannedEdit {
 	return append(edits, *edit)
 }
 
+func validatePlannedEditPaths(edits []plannedEdit) error {
+	seen := make(map[string]plannedEdit, len(edits))
+	for _, edit := range edits {
+		if first, ok := seen[edit.collisionPath]; ok {
+			if first.agentInstructions && edit.agentInstructions &&
+				first.remove == edit.remove && bytes.Equal(first.after, edit.after) {
+				continue
+			}
+			return fmt.Errorf(
+				"managed surfaces %q and %q resolve to the same path %s",
+				first.surface,
+				edit.surface,
+				edit.collisionPath,
+			)
+		}
+		seen[edit.collisionPath] = edit
+	}
+	return nil
+}
+
 func resultForEdits(edits []plannedEdit) Result {
 	result := Result{Paths: make([]string, 0, len(edits)), Diffs: make([]string, 0, len(edits))}
 	for _, edit := range edits {
+		if !edit.changed {
+			continue
+		}
 		result.Paths = append(result.Paths, edit.path)
 		result.Diffs = append(
 			result.Diffs,
@@ -711,6 +834,9 @@ func resultForEdits(edits []plannedEdit) Result {
 
 func applyEdits(edits []plannedEdit) error {
 	for _, edit := range edits {
+		if !edit.changed {
+			continue
+		}
 		if edit.remove {
 			if err := os.Remove(edit.path); err != nil {
 				return fmt.Errorf("remove %s: %w", edit.path, err)
@@ -821,34 +947,40 @@ func hasHigherMCPConfig(scope string) (bool, error) {
 }
 
 // findAgentInstruction resolves one fixed workspace-local instruction target.
-func findAgentInstruction(dir string, target target) (string, error) {
-	if _, err := findScopedConfig(
+func findAgentInstruction(dir string, target target) (string, string, error) {
+	resolved, err := findScopedConfig(
 		dir,
 		scopedConfig{
 			relative: target.path,
 			name:     "agent instruction",
 			lower:    "agent instruction",
 		},
-	); err != nil {
-		return "", err
+	)
+	if err != nil {
+		return "", "", err
 	}
-	return filepath.Join(dir, target.path), nil
+	return filepath.Join(dir, target.path), resolved, nil
 }
 
 // findMCPConfig resolves the workspace-local .mcp.json only.
-func findMCPConfig(dir string) (string, error) {
+func findMCPConfig(dir string) (string, string, error) {
 	path := filepath.Join(dir, mcpConfig)
+	resolvedScope, err := resolveWorkspaceScope(dir)
+	if err != nil {
+		return "", "", err
+	}
+	collisionPath := filepath.Join(resolvedScope, mcpConfig)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return path, nil
+		return path, collisionPath, nil
 	}
 	if err != nil {
-		return "", fmt.Errorf("inspect %s: %w", path, err)
+		return "", "", fmt.Errorf("inspect %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("mcp config %s is not a regular file", path)
+		return "", "", fmt.Errorf("mcp config %s is not a regular file", path)
 	}
-	return path, nil
+	return path, collisionPath, nil
 }
 
 // scopedConfig describes an agent configuration file that must stay inside the

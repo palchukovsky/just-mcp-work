@@ -679,21 +679,6 @@ func TestListLimitUsesCallersDefault(t *testing.T) {
 	}
 }
 
-func TestListTasksDescriptionExplainsCompactMode(t *testing.T) {
-	description := listTasksDescription()
-	for _, expected := range []string{
-		"first 160 runes of the first description line",
-		"drops runner metadata and run statistics",
-		"limit defaults to 50 and has a maximum of 200",
-		"exclusive server-emitted next_cursor",
-		"truncated and next_cursor explicitly report continuation",
-	} {
-		if !strings.Contains(description, expected) {
-			t.Errorf("list_tasks description does not mention %q", expected)
-		}
-	}
-}
-
 // TestListTasksSelectorsSelectServerSide pins the matching semantics of every
 // task selector, so an agent can trust one call instead of fetching the whole
 // catalog and filtering it again on its own side.

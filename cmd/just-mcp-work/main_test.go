@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
@@ -133,12 +135,12 @@ func assertWorkspaceBetaTest(t *testing.T, dir string, want bool) {
 	if _, err := os.ReadFile(filepath.Join(dir, ".just-mcp-work", "managed.json")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := agentinit.VerifyManagedSurfaces(dir)
+	managedSurfaces, err := agentinit.VerifyManagedSurfaces(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != want {
-		t.Fatalf("workspace beta_test = %t, want %t", got, want)
+	if managedSurfaces.BetaTest != want {
+		t.Fatalf("workspace beta_test = %t, want %t", managedSurfaces.BetaTest, want)
 	}
 }
 
@@ -185,6 +187,125 @@ func TestServerRunErrorAcceptsContextCancellation(t *testing.T) {
 	err := serverRunError(context.Background(), failure)
 	if !errors.Is(err, failure) {
 		t.Fatalf("server failure = %v", err)
+	}
+}
+
+func TestServeUsesVerifiedAgentGuideForInstructions(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		agentGuide bool
+	}{
+		{name: "recorded guide", agentGuide: true},
+		{name: "pre-guide manifest"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			initializeWorkspaceMode(t, root, false)
+			if !test.agentGuide {
+				removeAgentGuideSurface(t, root)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			//nolint:gosec // The test intentionally reexecutes the current test binary.
+			command := exec.CommandContext(
+				ctx,
+				os.Args[0],
+				"-test.run=^TestServeMCPHelperProcess$",
+			)
+			command.Env = append(
+				os.Environ(),
+				"JMW_TEST_HELPER_PROCESS=serve-mcp",
+				"JMW_TEST_SERVE_ROOT="+root,
+			)
+			stdin, err := command.StdinPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			stdout, err := command.StdoutPipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr strings.Builder
+			command.Stderr = &stderr
+			if err = command.Start(); err != nil {
+				t.Fatal(err)
+			}
+
+			client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v1"}, nil)
+			session, err := client.Connect(ctx, &mcp.IOTransport{Reader: stdout, Writer: stdin}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instructions := session.InitializeResult().Instructions
+			resolvedRoot, err := filepath.EvalSymlinks(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			guidePath := filepath.Join(resolvedRoot, ".just-mcp-work", "guide.txt")
+			gotGuide := strings.Contains(instructions, guidePath)
+			if gotGuide != test.agentGuide {
+				t.Fatalf("served guide pointer = %t, want %t: %s", gotGuide, test.agentGuide, instructions)
+			}
+			if err := stdin.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := command.Wait(); err != nil {
+				t.Fatalf("serve helper failed: %v: %s", err, stderr.String())
+			}
+		})
+	}
+}
+
+func TestServeMCPHelperProcess(_ *testing.T) {
+	if os.Getenv("JMW_TEST_HELPER_PROCESS") != "serve-mcp" {
+		return
+	}
+	if err := serve([]string{"--root", os.Getenv("JMW_TEST_SERVE_ROOT")}); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
+func removeAgentGuideSurface(t *testing.T, root string) {
+	t.Helper()
+	manifestPath := filepath.Join(root, ".just-mcp-work", "managed.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest map[string]any
+	if err = json.Unmarshal(data, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	surfaces, ok := manifest["surfaces"].([]any)
+	if !ok {
+		t.Fatal("managed manifest surfaces are not a list")
+	}
+	filtered := make([]any, 0, len(surfaces)-1)
+	for _, value := range surfaces {
+		surface, ok := value.(map[string]any)
+		if !ok {
+			t.Fatal("managed manifest surface is not an object")
+		}
+		if surface["kind"] != "agent-guide" {
+			filtered = append(filtered, surface)
+		}
+	}
+	if len(filtered) != len(surfaces)-1 {
+		t.Fatalf("removed %d guide surfaces, want one", len(surfaces)-len(filtered))
+	}
+	manifest["surfaces"] = filtered
+	data, err = json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, ".just-mcp-work", "guide.txt")); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -85,6 +86,7 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	}
 	wantPaths := []string{
 		path,
+		resolvedTestPath(t, filepath.Join(dir, guideFile)),
 		resolvedTestPath(t, filepath.Join(dir, manifestFile)),
 		policy.Path(dir),
 	}
@@ -107,6 +109,375 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 	if len(second.Paths) != 0 {
 		t.Fatalf("idempotent apply changed paths: %#v", second.Paths)
 	}
+}
+
+func TestApplyWritesAgentGuide(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		before    string
+		lineBreak string
+	}{
+		{name: "new LF guide", lineBreak: "\n"},
+		{
+			name:      "existing CRLF guide",
+			before:    "outdated\r\n",
+			lineBreak: "\r\n",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, guideFile)
+			if testCase.before != "" {
+				if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(
+					path,
+					[]byte(testCase.before),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			result, err := Apply(Options{
+				Dir: dir, Agents: []string{"cursor"}, RunnerModes: testRunnerModes(t),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			resolvedPath := resolvedTestPath(t, path)
+			if !containsPath(result.Paths, resolvedPath) {
+				t.Fatalf("Apply() paths = %#v, want agent guide %s", result.Paths, resolvedPath)
+			}
+			// #nosec G304 -- path is created in this test's temporary directory.
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := strings.ReplaceAll(promptText, "\n", testCase.lineBreak) + testCase.lineBreak
+			if string(data) != want {
+				t.Fatalf("agent guide = %q, want promptText plus one trailing line break", data)
+			}
+			if testCase.before == "" {
+				manifestPath := filepath.Join(dir, manifestFile)
+				assertSameFileMode(t, path, manifestPath)
+				assertSameFileMode(t, filepath.Dir(path), filepath.Dir(manifestPath))
+			}
+		})
+	}
+
+	t.Run("dry run", func(t *testing.T) {
+		dir := t.TempDir()
+		resolvedDirectory, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(resolvedDirectory, guideFile)
+		result, err := Apply(Options{
+			Dir: dir, Agents: []string{"windsurf"}, DryRun: true,
+			RunnerModes: testRunnerModes(t),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !containsPath(result.Paths, path) {
+			t.Fatalf("dry-run paths = %#v, want agent guide %s", result.Paths, path)
+		}
+		firstLine, _, _ := strings.Cut(promptText, "\n")
+		if !strings.Contains(resultDiffForPath(t, result, path), "+"+firstLine) {
+			t.Fatal("dry-run diff does not contain the agent guide")
+		}
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("dry run wrote agent guide: %v", err)
+		}
+	})
+}
+
+func TestApplyMigratesRetiredAgentGuide(t *testing.T) {
+	dir := t.TempDir()
+	options := Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		RunnerModes:     testRunnerModes(t),
+	}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	legacyContent := []byte(promptText + "\n")
+	recordRetiredAgentGuide(t, dir, legacyContent)
+
+	managedSurfaces, err := VerifyManagedSurfaces(dir)
+	if err != nil {
+		t.Fatalf("VerifyManagedSurfaces() rejected retired guide manifest: %v", err)
+	}
+	if managedSurfaces.AgentGuidePath != "" {
+		t.Fatalf("retired guide enabled short prompt at %q", managedSurfaces.AgentGuidePath)
+	}
+
+	result, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retiredPath := resolvedTestPath(t, filepath.Join(dir, retiredGuideFile))
+	if !containsPath(result.Paths, retiredPath) {
+		t.Fatalf("Apply() paths = %#v, want retired guide %s", result.Paths, retiredPath)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, retiredGuideFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("retired guide still exists after migration: %v", statErr)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, guideFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != promptText+"\n" {
+		t.Fatalf("new guide = %q, want current prompt", data)
+	}
+	manifest, _ := readManagedManifest(t, dir)
+	for _, surface := range manifest.Surfaces {
+		if surface.Path == retiredGuideFile {
+			t.Fatalf("manifest still records retired guide: %#v", surface)
+		}
+	}
+	second, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Paths) != 0 {
+		t.Fatalf("second Apply() changed paths: %#v", second.Paths)
+	}
+}
+
+// TestRetiredAgentGuideRefusesStaleContentUntilInitMigrates walks the sequence an
+// operator actually meets after an upgrade: the manifest records the retired
+// guide with text an older release generated, the current binary generates
+// different text, serve refuses, and the init that refusal prescribes performs
+// the migration and leaves verification clean.
+func TestRetiredAgentGuideRefusesStaleContentUntilInitMigrates(t *testing.T) {
+	dir := t.TempDir()
+	options := Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		RunnerModes:     testRunnerModes(t),
+	}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	recordRetiredAgentGuide(t, dir, []byte("stale generated guide\n"))
+
+	_, err := VerifyManagedSurfaces(dir)
+	retiredPath := resolvedTestPath(t, filepath.Join(dir, retiredGuideFile))
+	if err == nil ||
+		!strings.Contains(err.Error(), "generated configuration changed") ||
+		!strings.Contains(err.Error(), retiredPath) {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want stale retired guide refusal", err)
+	}
+
+	if _, err = Apply(options); err != nil {
+		t.Fatalf("Apply() did not migrate a stale retired guide: %v", err)
+	}
+	if _, statErr := os.Lstat(filepath.Join(dir, retiredGuideFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("stale retired guide survived the migration: %v", statErr)
+	}
+	// #nosec G304 -- the guide is created in this test's temporary directory.
+	data, readErr := os.ReadFile(filepath.Join(dir, guideFile))
+	if readErr != nil || string(data) != promptText+"\n" {
+		t.Fatalf("migrated guide = %q, %v, want the current prompt", data, readErr)
+	}
+	managedSurfaces, err := VerifyManagedSurfaces(dir)
+	if err != nil {
+		t.Fatalf("VerifyManagedSurfaces() rejected the migrated workspace: %v", err)
+	}
+	if want := resolvedTestPath(t, filepath.Join(dir, guideFile)); managedSurfaces.AgentGuidePath != want {
+		t.Fatalf("AgentGuidePath = %q, want %q", managedSurfaces.AgentGuidePath, want)
+	}
+}
+
+func TestApplyPreservesUnrecordedRetiredAgentGuide(t *testing.T) {
+	dir := t.TempDir()
+	options := Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		RunnerModes:     testRunnerModes(t),
+	}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, retiredGuideFile)
+	before := []byte("operator file\n")
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("unrecorded retired guide changed: %q", after)
+	}
+}
+
+//nolint:gocyclo // Keep the symlink setup and every no-write assertion in one regression.
+func TestApplyRejectsRetiredGuideCollisionThroughScopedDirectorySymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateDirectory := filepath.Join(dir, "state")
+	if err = os.Mkdir(stateDirectory, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink("state", filepath.Join(dir, ".just-mcp-work")); err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		RunnerModes:     testRunnerModes(t),
+	}
+	if _, err = Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	legacyContent := []byte("legacy generated guide\n")
+	recordRetiredAgentGuide(t, dir, legacyContent)
+	manifestPath := filepath.Join(stateDirectory, "managed.json")
+	manifestBefore, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(dir, "AGENTS.md")
+	if err = os.Remove(agentPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(filepath.FromSlash(retiredGuideFile), agentPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Apply(options)
+	retiredPath := filepath.Join(stateDirectory, "guide.md")
+	wantError := fmt.Sprintf(
+		"managed surfaces %q and %q resolve to the same path %s",
+		"AGENTS.md",
+		retiredGuideFile,
+		retiredPath,
+	)
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("Apply() error = %v, want %q", err, wantError)
+	}
+	retiredAfter, readErr := os.ReadFile(retiredPath)
+	if readErr != nil || !bytes.Equal(retiredAfter, legacyContent) {
+		t.Fatalf("retired guide changed before collision refusal: %q, %v", retiredAfter, readErr)
+	}
+	manifestAfter, readErr := os.ReadFile(manifestPath)
+	if readErr != nil || !bytes.Equal(manifestAfter, manifestBefore) {
+		t.Fatalf("manifest changed before collision refusal: %q, %v", manifestAfter, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(stateDirectory, "guide.txt")); !os.IsNotExist(statErr) {
+		t.Fatalf("new guide was written before collision refusal: %v", statErr)
+	}
+}
+
+//nolint:gocyclo // Keep the chained-symlink setup and preservation assertions together.
+func TestApplyRejectsRetiredGuideFileSymlinkBeforeWriting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		RunnerModes:     testRunnerModes(t),
+	}
+	if _, err = Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	legacyContent := []byte("legacy generated guide\n")
+	recordRetiredAgentGuide(t, dir, legacyContent)
+	retiredPath := filepath.Join(dir, retiredGuideFile)
+	sharedPath := filepath.Join(dir, "shared-guide")
+	if err = os.WriteFile(sharedPath, legacyContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Remove(retiredPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink("../shared-guide", retiredPath); err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(dir, "AGENTS.md")
+	if err = os.Remove(agentPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink(filepath.FromSlash(retiredGuideFile), agentPath); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dir, manifestFile)
+	manifestBefore, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Apply(options)
+	wantError := fmt.Sprintf("retired agent guide %s is not a regular file", retiredPath)
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("Apply() error = %v, want %q", err, wantError)
+	}
+	sharedAfter, readErr := os.ReadFile(sharedPath)
+	if readErr != nil || !bytes.Equal(sharedAfter, legacyContent) {
+		t.Fatalf("shared guide target changed before refusal: %q, %v", sharedAfter, readErr)
+	}
+	manifestAfter, readErr := os.ReadFile(manifestPath)
+	if readErr != nil || !bytes.Equal(manifestAfter, manifestBefore) {
+		t.Fatalf("manifest changed before refusal: %q, %v", manifestAfter, readErr)
+	}
+	if info, statErr := os.Lstat(retiredPath); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("retired guide symlink changed: %#v, %v", info, statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, guideFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("new guide was written before refusal: %v", statErr)
+	}
+}
+
+func recordRetiredAgentGuide(t *testing.T, dir string, content []byte) {
+	t.Helper()
+	manifest, _ := readManagedManifest(t, dir)
+	found := false
+	for index := range manifest.Surfaces {
+		if manifest.Surfaces[index].Kind != manifestKindAgentGuide {
+			continue
+		}
+		manifest.Surfaces[index] = newManifestSurface(
+			retiredGuideFile,
+			manifestKindAgentGuide,
+			content,
+		)
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("managed manifest has no agent guide")
+	}
+	retiredPath := filepath.Join(dir, retiredGuideFile)
+	if err := os.WriteFile(retiredPath, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, guideFile)); err != nil {
+		t.Fatal(err)
+	}
+	writeJSONFile(t, filepath.Join(dir, manifestFile), manifest)
 }
 
 // TestApplyCodexConfigRoundTripPreservesTerminatedForeignContent covers the
@@ -610,6 +981,49 @@ func TestApplyKeepsAliasedInstructionOfDeselectedAgent(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsAliasedAgentInstructionsWithDifferentContent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(dir, "shared-instructions")
+	if writeErr := os.WriteFile(shared, nil, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	for _, relativePath := range []string{"AGENTS.md", ".cursor/rules/just-mcp-work.mdc"} {
+		path := filepath.Join(dir, filepath.FromSlash(relativePath))
+		if mkdirErr := os.MkdirAll(filepath.Dir(path), 0o750); mkdirErr != nil {
+			t.Fatal(mkdirErr)
+		}
+		if linkErr := os.Symlink(shared, path); linkErr != nil {
+			t.Fatal(linkErr)
+		}
+	}
+
+	_, err = Apply(Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex", "cursor"},
+		RunnerModes:     testRunnerModes(t),
+	})
+	wantError := fmt.Sprintf(
+		"managed surfaces %q and %q resolve to the same path %s",
+		"AGENTS.md",
+		".cursor/rules/just-mcp-work.mdc",
+		shared,
+	)
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("Apply() error = %v, want %q", err, wantError)
+	}
+	data, readErr := os.ReadFile(shared)
+	if readErr != nil || len(data) != 0 {
+		t.Fatalf("shared agent target changed before collision refusal: %q, %v", data, readErr)
+	}
+}
+
 func TestApplyWriteMCPConfigFalseRemovesManagedConfigs(t *testing.T) {
 	dir := t.TempDir()
 	modes := testRunnerModes(t)
@@ -1029,6 +1443,7 @@ func TestApplyDryRunPlansCleanupWithoutWriting(t *testing.T) {
 		filepath.Join(dir, mcpConfig),
 		filepath.Join(dir, codexConfig),
 		filepath.Join(dir, claudeSettings),
+		resolvedTestPath(t, filepath.Join(dir, guideFile)),
 		policy.Path(dir),
 		resolvedTestPath(t, filepath.Join(dir, manifestFile)),
 	}
@@ -1166,6 +1581,7 @@ func TestApplyReportsPolicyAfterManagedConfigurations(t *testing.T) {
 		filepath.Join(dir, mcpConfig),
 		resolvedTestPath(t, filepath.Join(dir, codexConfig)),
 		resolvedTestPath(t, filepath.Join(dir, claudeSettings)),
+		resolvedTestPath(t, filepath.Join(dir, guideFile)),
 		resolvedTestPath(t, filepath.Join(dir, manifestFile)),
 		policy.Path(dir),
 	}
@@ -1314,15 +1730,32 @@ func resolvedTestPath(t *testing.T, path string) string {
 func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 	const qualifiedRoutingRule = "Route work through it whenever a receipt or a tail answers the " +
 		"question, and run directly only when the output you need is too large for a tail."
-	const unqualifiedRoutingRule = "Route work through it when the full output is not what you " +
-		"need, and run the command directly when it is."
-	flat := strings.Join(strings.Fields(Prompt(false)), " ")
-	if !strings.Contains(flat, qualifiedRoutingRule) {
-		t.Errorf("Prompt does not state the qualified routing rule: %s", flat)
+	const shortQualifiedRoutingRule = "Run a command directly only when the full output you need is too large for a tail."
+	unqualifiedRoutingRules := []string{
+		"Route work through it when the full output is not what you need, and run the command directly when it is.",
+		"Run a command directly when full output is the answer.",
 	}
-	if strings.Contains(flat, unqualifiedRoutingRule) {
-		t.Error("Prompt retains the unqualified routing rule")
+	for name, test := range map[string]struct {
+		qualified      string
+		agentGuidePath string
+	}{
+		"full prompt": {qualified: qualifiedRoutingRule},
+		"short prompt": {
+			agentGuidePath: filepath.Join(t.TempDir(), guideFile),
+			qualified:      shortQualifiedRoutingRule,
+		},
+	} {
+		flat := strings.Join(strings.Fields(Prompt(false, test.agentGuidePath)), " ")
+		if !strings.Contains(flat, test.qualified) {
+			t.Errorf("%s does not state the qualified routing rule: %s", name, flat)
+		}
+		for _, unqualified := range unqualifiedRoutingRules {
+			if strings.Contains(flat, unqualified) {
+				t.Errorf("%s retains the unqualified routing rule %q", name, unqualified)
+			}
+		}
 	}
+	flat := strings.Join(strings.Fields(Prompt(false, "")), " ")
 	for _, expected := range []string{
 		"just-mcp-work (JMW)",
 		"save tokens",
@@ -1412,8 +1845,8 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 		"too large for a tail",
 	}
 	for name, text := range map[string]string{
-		"plain prompt":  strings.Join(strings.Fields(Prompt(false)), " "),
-		"beta prompt":   strings.Join(strings.Fields(Prompt(true)), " "),
+		"plain prompt":  strings.Join(strings.Fields(Prompt(false, "")), " "),
+		"beta prompt":   strings.Join(strings.Fields(Prompt(true, "")), " "),
 		"managed block": strings.Join(strings.Fields(managedBlockText), " "),
 	} {
 		for _, expected := range shared {
@@ -1422,28 +1855,133 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 			}
 		}
 	}
+	guidePath := filepath.Join(t.TempDir(), guideFile)
+	short := strings.Join(strings.Fields(Prompt(false, guidePath)), " ")
+	if !strings.Contains(short, "too large for a tail") {
+		t.Errorf("short prompt does not carry the shared term %q", "too large for a tail")
+	}
 }
 
 func TestPromptSelectsBetaTestContract(t *testing.T) {
-	plain := Prompt(false)
-	if plain != promptText {
-		t.Fatalf("plain prompt changed: got %q, want promptText", plain)
+	guidePath := filepath.Join(t.TempDir(), guideFile)
+	for _, test := range []struct {
+		want           string
+		name           string
+		agentGuidePath string
+		betaTest       bool
+	}{
+		{name: "full", want: promptText},
+		{name: "short", agentGuidePath: guidePath, want: fmt.Sprintf(shortPromptText, guidePath)},
+		{
+			name:     "full beta",
+			betaTest: true,
+			want:     promptText + "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText,
+		},
+		{
+			name:           "short beta",
+			betaTest:       true,
+			agentGuidePath: guidePath,
+			want: fmt.Sprintf(shortPromptText, guidePath) +
+				"\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := Prompt(test.betaTest, test.agentGuidePath); got != test.want {
+				t.Fatalf(
+					"Prompt(%t, %q) = %q, want %q",
+					test.betaTest,
+					test.agentGuidePath,
+					got,
+					test.want,
+				)
+			}
+		})
 	}
+}
 
-	beta := Prompt(true)
-	if wantPrefix := promptText + "\n\nBETA TEST FEEDBACK\n"; !strings.HasPrefix(beta, wantPrefix) {
-		t.Fatalf("beta prompt does not start with promptText and its presentation header: %q", beta)
-	}
-	if servedCount, managedCount := strings.Count(beta, betaTestManagedBlockText),
-		strings.Count(canonicalBlock(true), betaTestManagedBlockText); servedCount != 1 || managedCount != 1 {
+// TestShortPromptCarriesTheAlwaysOnContract bounds the text every session pays
+// for. The budget constrains the constant, not the served string: the guide path
+// is required content of unknown length, so a workspace whose root is longer than
+// guidePathBudgetBytes exceeds maxPromptBytes by exactly that excess and nothing
+// refuses it. What this pins is that the wording leaves that much room.
+func TestShortPromptCarriesTheAlwaysOnContract(t *testing.T) {
+	const (
+		maxPromptBytes       = 1000
+		guidePathBudgetBytes = 128
+	)
+	guidePath := "/" + strings.Repeat("w", guidePathBudgetBytes-1)
+	prompt := Prompt(false, guidePath)
+	if len(prompt) > maxPromptBytes {
 		t.Fatalf(
-			"beta contract counts = served %d, managed %d, want one in both channels",
-			servedCount,
-			managedCount,
+			"short prompt length with a %d-byte guide path = %d, want at most %d; "+
+				"shorten the wording rather than the path budget",
+			guidePathBudgetBytes,
+			len(prompt),
+			maxPromptBytes,
 		)
 	}
-	if strings.Contains(plain, betaTestManagedBlockText) {
-		t.Fatal("plain prompt contains the beta-test paragraph")
+	for _, expected := range []string{
+		"JMW is this workspace's task runner",
+		"saves context budget",
+		"list_tasks then run_task or start_task",
+		"Trust a green receipt; do not fetch logs of a successful run.",
+		"read stdout_tail/stderr_tail first, then a byte range if needed.",
+		"Status: running with a run_id is normal",
+		"wait_run or get_run_status; never launch the task twice.",
+		"full output you need is too large for a tail",
+		"withheld it through a runner mode",
+		"run_shell_command, start_shell_command, or another shell path.",
+		"sub-agents and other executors.",
+		guidePath,
+		"read it when working with tasks.",
+	} {
+		if !strings.Contains(prompt, expected) {
+			t.Errorf("short prompt does not mention %q: %s", expected, prompt)
+		}
+	}
+}
+
+func TestPromptKeepsWindowsGuidePathVerbatim(t *testing.T) {
+	const guidePath = `C:\Users\me\ws\.just-mcp-work\guide.txt`
+	prompt := Prompt(false, guidePath)
+	if !strings.Contains(prompt, guidePath) {
+		t.Fatalf("short prompt does not contain raw Windows guide path %q: %s", guidePath, prompt)
+	}
+	if strings.Contains(prompt, `C:\\Users`) {
+		t.Fatalf("short prompt escaped Windows guide path separators: %s", prompt)
+	}
+}
+
+// TestPromptDelimitsAGuidePathContainingSpaces keeps the pointer parseable. The
+// path is served raw, so only the quotes around it say where it ends; a home
+// directory with a space in it is ordinary on macOS and Windows.
+func TestPromptDelimitsAGuidePathContainingSpaces(t *testing.T) {
+	const guidePath = "/Users/me/My Projects/app/.just-mcp-work/guide.txt"
+	if prompt := Prompt(false, guidePath); !strings.Contains(prompt, `"`+guidePath+`";`) {
+		t.Fatalf("short prompt does not delimit a guide path containing spaces: %s", prompt)
+	}
+}
+
+func TestPromptReferenceCarriesMovedToolDetails(t *testing.T) {
+	flat := strings.Join(strings.Fields(promptText), " ")
+	for _, expected := range []string{
+		"returned rel_path as project_path for task tools",
+		"first 160 runes of the first description line",
+		"drops runner metadata and run statistics",
+		"limit defaults to 50 and has a maximum of 200",
+		"exclusive server-emitted next_cursor",
+		"truncated and next_cursor explicitly report continuation",
+		"names, name_prefix, and query are mutually exclusive",
+		"visibility is public, private, or all",
+		"tail_bytes is bytes from each stream's end",
+		"working_directory is workspace-relative and defaults to the workspace root.",
+		"do not edit build files unless asked",
+		"default limit of 65536 bytes and a maximum of 1048576 bytes",
+		"Receipt fields include status, exit_code, message, run_id, duration_ms, promoted",
+	} {
+		if !strings.Contains(flat, expected) {
+			t.Errorf("prompt reference does not mention %q", expected)
+		}
 	}
 }
 
@@ -1506,7 +2044,7 @@ func TestApplyUpdatesEarlierManagedPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if len(result.Paths) != 3 || !containsPath(result.Paths, policy.Path(dir)) ||
+	if len(result.Paths) != 4 || !containsPath(result.Paths, policy.Path(dir)) ||
 		!containsPath(result.Paths, resolvedTestPath(t, filepath.Join(dir, manifestFile))) {
 		t.Fatalf("updated paths = %#v", result.Paths)
 	}
@@ -1798,7 +2336,7 @@ func TestApplyKeepsCRLFLineEndings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Paths) != len(files)+2 || !containsPath(first.Paths, policy.Path(dir)) ||
+	if len(first.Paths) != len(files)+3 || !containsPath(first.Paths, policy.Path(dir)) ||
 		!containsPath(first.Paths, resolvedTestPath(t, filepath.Join(dir, manifestFile))) {
 		t.Fatalf("apply changed %v, want all files, policy, and manifest", first.Paths)
 	}
@@ -2992,6 +3530,246 @@ func TestApplyRejectsEscapingCodexConfigSymlinkWithoutChanges(t *testing.T) {
 	}
 }
 
+func TestApplyRejectsEscapingAgentGuideSymlinkBeforeWriting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "guide.md")
+	before := []byte("outside content\n")
+	if err := os.WriteFile(outside, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guidePath := filepath.Join(dir, guideFile)
+	if err := os.MkdirAll(filepath.Dir(guidePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, guidePath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Apply(Options{
+		Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+	})
+	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace scope") {
+		t.Fatalf("Apply error = %v, want an escaping agent guide error", err)
+	}
+	// #nosec G304 -- outside is created in this test's temporary directory.
+	after, readErr := os.ReadFile(outside)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("escaping guide target changed before preflight completed: %q, %v", after, readErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "AGENTS.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("agent instructions changed before the guide path rejection: %v", statErr)
+	}
+	if _, statErr := os.Stat(policy.Path(dir)); !os.IsNotExist(statErr) {
+		t.Fatalf("policy changed before the guide path rejection: %v", statErr)
+	}
+}
+
+//nolint:gocyclo // Both collision surfaces share one complete no-write regression.
+func TestApplyRejectsManagedSurfacePathCollisionBeforeWriting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	for _, collisionSurface := range []string{guideFile, manifestFile} {
+		t.Run(collisionSurface, func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			agentPath := filepath.Join(dir, "AGENTS.md")
+			if writeErr := os.WriteFile(agentPath, nil, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			collisionPath := filepath.Join(dir, filepath.FromSlash(collisionSurface))
+			if mkdirErr := os.MkdirAll(filepath.Dir(collisionPath), 0o750); mkdirErr != nil {
+				t.Fatal(mkdirErr)
+			}
+			if linkErr := os.Symlink("../AGENTS.md", collisionPath); linkErr != nil {
+				t.Fatal(linkErr)
+			}
+
+			_, err = Apply(Options{
+				ShellPermission: ShellPermissionAsk,
+				Dir:             dir,
+				Agents:          []string{"codex"},
+				RunnerModes:     testRunnerModes(t),
+			})
+			wantError := fmt.Sprintf(
+				"managed surfaces %q and %q resolve to the same path %s",
+				"AGENTS.md",
+				collisionSurface,
+				agentPath,
+			)
+			if err == nil || err.Error() != wantError {
+				t.Fatalf("Apply() error = %v, want %q", err, wantError)
+			}
+			data, readErr := os.ReadFile(agentPath)
+			if readErr != nil || len(data) != 0 {
+				t.Fatalf("AGENTS.md changed before collision refusal: %q, %v", data, readErr)
+			}
+			if info, statErr := os.Lstat(collisionPath); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("collision symlink changed: %#v, %v", info, statErr)
+			}
+			if _, statErr := os.Stat(policy.Path(dir)); !os.IsNotExist(statErr) {
+				t.Fatalf("policy was written before collision refusal: %v", statErr)
+			}
+			for _, untouched := range []string{guideFile, manifestFile} {
+				if untouched == collisionSurface {
+					continue
+				}
+				if _, statErr := os.Stat(filepath.Join(dir, untouched)); !os.IsNotExist(statErr) {
+					t.Fatalf("%s was written before collision refusal: %v", untouched, statErr)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyRejectsReverseManagedSurfacePathCollisionBeforeWriting(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	for _, collisionSurface := range []string{guideFile, manifestFile} {
+		t.Run(collisionSurface, func(t *testing.T) {
+			dir, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			collisionPath := filepath.Join(dir, filepath.FromSlash(collisionSurface))
+			if mkdirErr := os.MkdirAll(filepath.Dir(collisionPath), 0o750); mkdirErr != nil {
+				t.Fatal(mkdirErr)
+			}
+			if writeErr := os.WriteFile(collisionPath, nil, 0o600); writeErr != nil {
+				t.Fatal(writeErr)
+			}
+			agentPath := filepath.Join(dir, "AGENTS.md")
+			if linkErr := os.Symlink(filepath.FromSlash(collisionSurface), agentPath); linkErr != nil {
+				t.Fatal(linkErr)
+			}
+
+			_, err = Apply(Options{
+				ShellPermission: ShellPermissionAsk,
+				Dir:             dir,
+				Agents:          []string{"codex"},
+				RunnerModes:     testRunnerModes(t),
+			})
+			wantError := fmt.Sprintf(
+				"managed surfaces %q and %q resolve to the same path %s",
+				"AGENTS.md",
+				collisionSurface,
+				collisionPath,
+			)
+			if err == nil || err.Error() != wantError {
+				t.Fatalf("Apply() error = %v, want %q", err, wantError)
+			}
+			data, readErr := os.ReadFile(collisionPath)
+			if readErr != nil || len(data) != 0 {
+				t.Fatalf("collision target changed before refusal: %q, %v", data, readErr)
+			}
+			if info, statErr := os.Lstat(agentPath); statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+				t.Fatalf("agent symlink changed: %#v, %v", info, statErr)
+			}
+			if _, statErr := os.Stat(policy.Path(dir)); !os.IsNotExist(statErr) {
+				t.Fatalf("policy was written before collision refusal: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestApplyRejectsCollisionWithUnchangedManagedSurface(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPath := filepath.Join(dir, "AGENTS.md")
+	before := []byte(canonicalBlock(false))
+	if writeErr := os.WriteFile(agentPath, before, 0o600); writeErr != nil {
+		t.Fatal(writeErr)
+	}
+	guidePath := filepath.Join(dir, filepath.FromSlash(guideFile))
+	if mkdirErr := os.MkdirAll(filepath.Dir(guidePath), 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	if linkErr := os.Symlink("../AGENTS.md", guidePath); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+
+	_, err = Apply(Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		RunnerModes:     testRunnerModes(t),
+	})
+	wantError := fmt.Sprintf(
+		"managed surfaces %q and %q resolve to the same path %s",
+		"AGENTS.md",
+		guideFile,
+		agentPath,
+	)
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("Apply() error = %v, want %q", err, wantError)
+	}
+	after, readErr := os.ReadFile(agentPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("unchanged managed surface was overwritten: %q, %v", after, readErr)
+	}
+}
+
+func TestApplyRejectsPolicyCollisionThroughSymlinkedWorkspace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	realScope := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(realScope, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	realScope, err := filepath.EvalSymlinks(realScope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkedScope := filepath.Join(t.TempDir(), "workspace-link")
+	if linkErr := os.Symlink(realScope, linkedScope); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+	modes := testRunnerModes(t)
+	if saveErr := policy.Save(realScope, modes); saveErr != nil {
+		t.Fatal(saveErr)
+	}
+	policyPath := policy.Path(realScope)
+	before, err := os.ReadFile(policyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkErr := os.Symlink(filepath.Base(policyPath), filepath.Join(realScope, "AGENTS.md")); linkErr != nil {
+		t.Fatal(linkErr)
+	}
+
+	_, err = Apply(Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             linkedScope,
+		Agents:          []string{"codex"},
+		RunnerModes:     modes,
+	})
+	wantError := fmt.Sprintf(
+		"managed surfaces %q and %q resolve to the same path %s",
+		"AGENTS.md",
+		filepath.Base(policyPath),
+		policyPath,
+	)
+	if err == nil || err.Error() != wantError {
+		t.Fatalf("Apply() error = %v, want %q", err, wantError)
+	}
+	after, readErr := os.ReadFile(policyPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("policy changed before collision refusal: %q, %v", after, readErr)
+	}
+}
+
 func TestApplyRejectsInvalidCodexConfigSymlinks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("creating symlinks requires privileges on Windows")
@@ -3400,6 +4178,18 @@ func assertFileMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("%s mode = %o, want %o", path, got, want)
 	}
+}
+
+func assertSameFileMode(t *testing.T, path, referencePath string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(referencePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileMode(t, path, info.Mode().Perm())
 }
 
 func containsPath(paths []string, want string) bool {

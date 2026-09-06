@@ -196,7 +196,7 @@ func serve(args []string) error {
 			policy.Path(root),
 		)
 	}
-	betaTest, verifyErr := agentinit.VerifyManagedSurfaces(root)
+	managedSurfaces, verifyErr := agentinit.VerifyManagedSurfaces(root)
 	if verifyErr != nil {
 		return fmt.Errorf("verify managed surfaces: %w", verifyErr)
 	}
@@ -221,7 +221,8 @@ func serve(args []string) error {
 		registry,
 		store,
 		mcpserver.Config{
-			BetaTest:         betaTest,
+			BetaTest:         managedSurfaces.BetaTest,
+			AgentGuidePath:   managedSurfaces.AgentGuidePath,
 			Timeout:          options.Timeout,
 			TimeoutUnlimited: options.TimeoutUnlimited,
 			SyncDeadline:     options.SyncDeadline,

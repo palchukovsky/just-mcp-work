@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -78,6 +79,7 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 		{path: mcpConfig, kind: manifestKindMCPConfig},
 		{path: codexConfig, kind: manifestKindCodexConfig},
 		{path: claudeSettings, kind: manifestKindClaudeSettings},
+		{path: guideFile, kind: manifestKindAgentGuide},
 	}
 	if len(manifest.Surfaces) != len(want) {
 		t.Fatalf("manifest surfaces = %#v, want %d entries", manifest.Surfaces, len(want))
@@ -131,6 +133,10 @@ func TestApplyDryRunPlansManifestWithoutWriting(t *testing.T) {
 		result.Paths[len(result.Paths)-1] != policy.Path(dir) {
 		t.Fatalf("dry run paths = %#v, want manifest then policy last", result.Paths)
 	}
+	guidePath := filepath.Join(resolvedDirectory, guideFile)
+	if !containsPath(result.Paths, guidePath) {
+		t.Fatalf("dry run paths = %#v, want agent guide %s", result.Paths, guidePath)
+	}
 	for _, path := range result.Paths {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
 			t.Fatalf("dry run wrote %s: %v", path, statErr)
@@ -181,6 +187,7 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 		{path: "AGENTS.md", kind: manifestKindAgentInstructions},
 		{path: mcpConfig, kind: manifestKindMCPConfig},
 		{path: codexConfig, kind: manifestKindCodexConfig},
+		{path: guideFile, kind: manifestKindAgentGuide},
 		{path: claudeSettings, kind: manifestKindClaudeSettings},
 	}
 	assertManifestSurfaces(t, manifest.Surfaces, want)
@@ -212,6 +219,57 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dir, claudeSettings)); statErr != nil {
 		t.Fatalf("deselected Claude settings were removed: %v", statErr)
 	}
+}
+
+func TestApplyDoesNotResolveCarriedClaudeSettingsForDeselectedAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	modes := testRunnerModes(t)
+	if _, err = Apply(Options{
+		ShellPermission:   ShellPermissionAsk,
+		Dir:               dir,
+		Agents:            []string{"claude", "codex"},
+		RunnerModes:       modes,
+		ClaudePermissions: ClaudePermissionsYes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(dir, filepath.FromSlash(claudeSettings))
+	if err = os.Remove(settingsPath); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Symlink("missing-settings.json", settingsPath); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := Apply(Options{
+		ShellPermission: ShellPermissionAsk,
+		Dir:             dir,
+		Agents:          []string{"codex"},
+		RunnerModes:     modes,
+	})
+	if err != nil {
+		t.Fatalf("Apply() resolved carried Claude settings for a deselected agent: %v", err)
+	}
+	if containsPath(result.Paths, settingsPath) {
+		t.Fatalf("Apply() planned a carried Claude settings edit: %#v", result.Paths)
+	}
+	info, err := os.Lstat(settingsPath)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("carried Claude settings symlink changed: %#v, %v", info, err)
+	}
+	manifest, _ := readManagedManifest(t, dir)
+	for _, surface := range manifest.Surfaces {
+		if surface.Kind == manifestKindClaudeSettings && surface.Path == claudeSettings {
+			return
+		}
+	}
+	t.Fatalf("manifest dropped carried Claude settings: %#v", manifest.Surfaces)
 }
 
 func TestApplyRejectsShellPermissionChangeWithExcludedRecordedSurface(t *testing.T) {
@@ -477,6 +535,7 @@ func TestApplyCarriesShellPermissionAcrossSurfaceFreeRun(t *testing.T) {
 		kind string
 	}{
 		{path: "AGENTS.md", kind: manifestKindAgentInstructions},
+		{path: guideFile, kind: manifestKindAgentGuide},
 		{path: claudeSettings, kind: manifestKindClaudeSettings},
 	})
 
@@ -540,7 +599,10 @@ func TestApplyWriteMCPConfigFalseOmitsConfigSurfaces(t *testing.T) {
 	assertManifestSurfaces(t, manifest.Surfaces, []struct {
 		path string
 		kind string
-	}{{path: "AGENTS.md", kind: manifestKindAgentInstructions}})
+	}{
+		{path: "AGENTS.md", kind: manifestKindAgentInstructions},
+		{path: guideFile, kind: manifestKindAgentGuide},
+	})
 	for _, relative := range []string{mcpConfig, codexConfig} {
 		if _, statErr := os.Stat(filepath.Join(dir, relative)); !os.IsNotExist(statErr) {
 			t.Fatalf("removed config %s still exists: %v", relative, statErr)
@@ -671,7 +733,10 @@ func TestManifestOmitsRemovedOrDeclinedClaudePermissions(t *testing.T) {
 			assertManifestSurfaces(t, manifest.Surfaces, []struct {
 				path string
 				kind string
-			}{{path: "CLAUDE.md", kind: manifestKindAgentInstructions}})
+			}{
+				{path: "CLAUDE.md", kind: manifestKindAgentInstructions},
+				{path: guideFile, kind: manifestKindAgentGuide},
+			})
 		})
 	}
 }
@@ -755,6 +820,8 @@ func expectedSurfaceHash(t *testing.T, dir string, surface manifestSurface) stri
 	switch surface.Kind {
 	case manifestKindAgentInstructions:
 		fragment = blockFragmentForTest(t, data, managedBlockRange)
+	case manifestKindAgentGuide:
+		fragment = data
 	case manifestKindCodexConfig:
 		fragment = blockFragmentForTest(t, data, codexBlockRange)
 	case manifestKindMCPConfig:
@@ -884,6 +951,17 @@ func TestApplyUsesResolvedManagedManifestPath(t *testing.T) {
 	if _, readErr := os.ReadFile(resolvedManifest); readErr != nil {
 		t.Fatalf("read resolved manifest: %v", readErr)
 	}
+	resolvedGuide := resolvedTestPath(
+		t,
+		filepath.Join(stateDirectory, filepath.Base(guideFile)),
+	)
+	if !containsPath(result.Paths, resolvedGuide) {
+		t.Fatalf("Apply() paths = %#v, want resolved guide %s", result.Paths, resolvedGuide)
+	}
+	guide, readErr := os.ReadFile(resolvedGuide)
+	if readErr != nil || string(guide) != promptText+"\n" {
+		t.Fatalf("resolved guide = %q, %v, want promptText plus newline", guide, readErr)
+	}
 
 	second, err := Apply(options)
 	if err != nil {
@@ -1003,11 +1081,11 @@ func TestVerifyManagedSurfacesAcceptsAndRejectsBetaBlock(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	betaTest, err := VerifyManagedSurfaces(root)
+	managedSurfaces, err := VerifyManagedSurfaces(root)
 	if err != nil {
 		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
 	}
-	if !betaTest {
+	if !managedSurfaces.BetaTest {
 		t.Fatal("VerifyManagedSurfaces() beta test = false, want true")
 	}
 	path := filepath.Join(root, "AGENTS.md")
@@ -1057,14 +1135,14 @@ func TestVerifyManagedSurfacesRejectsSwitchedCanonicalBlocks(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			betaTest, err := VerifyManagedSurfaces(root)
+			managedSurfaces, err := VerifyManagedSurfaces(root)
 			if err != nil {
 				t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
 			}
-			if betaTest != test.betaTest {
+			if managedSurfaces.BetaTest != test.betaTest {
 				t.Fatalf(
 					"VerifyManagedSurfaces() beta test = %t, want %t",
-					betaTest,
+					managedSurfaces.BetaTest,
 					test.betaTest,
 				)
 			}
@@ -1083,12 +1161,13 @@ func TestVerifyManagedSurfacesRejectsSwitchedCanonicalBlocks(t *testing.T) {
 func TestVerifyManagedSurfacesAcceptsFreshWorkspaceAndNoManifest(t *testing.T) {
 	t.Run("fresh workspace", func(t *testing.T) {
 		root := applyVerificationWorkspace(t)
-		betaTest, err := VerifyManagedSurfaces(root)
+		managedSurfaces, err := VerifyManagedSurfaces(root)
 		if err != nil {
 			t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
 		}
-		if betaTest {
-			t.Fatal("VerifyManagedSurfaces() beta test = true, want false")
+		wantGuidePath := resolvedTestPath(t, filepath.Join(root, guideFile))
+		if managedSurfaces.BetaTest || managedSurfaces.AgentGuidePath != wantGuidePath {
+			t.Fatalf("VerifyManagedSurfaces() = %#v, want plain mode with a guide", managedSurfaces)
 		}
 	})
 	t.Run("managed block without manifest", func(t *testing.T) {
@@ -1100,12 +1179,12 @@ func TestVerifyManagedSurfacesAcceptsFreshWorkspaceAndNoManifest(t *testing.T) {
 		); err != nil {
 			t.Fatal(err)
 		}
-		betaTest, err := VerifyManagedSurfaces(root)
+		managedSurfaces, err := VerifyManagedSurfaces(root)
 		if err != nil {
 			t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
 		}
-		if betaTest {
-			t.Fatal("VerifyManagedSurfaces() beta test = true without manifest, want false")
+		if managedSurfaces.BetaTest || managedSurfaces.AgentGuidePath != "" {
+			t.Fatalf("VerifyManagedSurfaces() = %#v, want no modes without a manifest", managedSurfaces)
 		}
 	})
 }
@@ -1120,11 +1199,11 @@ func TestVerifyManagedSurfacesTreatsManifestWithoutBetaTestAsPlain(t *testing.T)
 	}
 	writeJSONFile(t, filepath.Join(root, manifestFile), legacyDocument)
 
-	betaTest, err := VerifyManagedSurfaces(root)
+	managedSurfaces, err := VerifyManagedSurfaces(root)
 	if err != nil {
 		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
 	}
-	if betaTest {
+	if managedSurfaces.BetaTest {
 		t.Fatal("VerifyManagedSurfaces() beta test = true without beta_test field, want false")
 	}
 }
@@ -1248,6 +1327,61 @@ func TestVerifyManagedSurfacesRejectsUnknownShellPermission(t *testing.T) {
 			"VerifyManagedSurfaces() error = %v, want unknown shell permission and recovery",
 			err,
 		)
+	}
+}
+
+func TestVerifyManagedSurfacesAcceptsManifestWithoutAgentGuide(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	surfaces := make([]manifestSurface, 0, len(manifest.Surfaces)-1)
+	for _, surface := range manifest.Surfaces {
+		if surface.Kind != manifestKindAgentGuide {
+			surfaces = append(surfaces, surface)
+		}
+	}
+	if len(surfaces) != len(manifest.Surfaces)-1 {
+		t.Fatalf("removed %d guide surfaces, want one", len(manifest.Surfaces)-len(surfaces))
+	}
+	manifest.Surfaces = surfaces
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+	if err := os.Remove(filepath.Join(root, guideFile)); err != nil {
+		t.Fatal(err)
+	}
+
+	managedSurfaces, err := VerifyManagedSurfaces(root)
+	if err != nil {
+		t.Fatalf("VerifyManagedSurfaces() rejected pre-guide manifest: %v", err)
+	}
+	if managedSurfaces.AgentGuidePath != "" {
+		t.Fatalf("VerifyManagedSurfaces() = %#v, want no guide for a pre-guide manifest", managedSurfaces)
+	}
+}
+
+func TestVerifyManagedSurfacesRequiresAgentGuideAtCanonicalPath(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	for index := range manifest.Surfaces {
+		if manifest.Surfaces[index].Kind != manifestKindAgentGuide {
+			continue
+		}
+		manifest.Surfaces[index].Path = ".just-mcp-work/other-guide.md"
+		if err := os.WriteFile(
+			filepath.Join(root, filepath.FromSlash(manifest.Surfaces[index].Path)),
+			[]byte(promptText+"\n"),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		break
+	}
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+
+	managedSurfaces, err := VerifyManagedSurfaces(root)
+	if err != nil {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want nil", err)
+	}
+	if managedSurfaces.AgentGuidePath != "" {
+		t.Fatalf("VerifyManagedSurfaces() = %#v, want no guide", managedSurfaces)
 	}
 }
 
@@ -1398,6 +1532,22 @@ func TestVerifyManagedSurfacesRejectsEditedMissingAndDeletedContent(t *testing.T
 			wantGuidance: "keep your own text outside them",
 		},
 		{
+			name:         "edited agent guide",
+			relativePath: guideFile,
+			change: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.WriteFile(
+					filepath.Join(root, guideFile),
+					[]byte("truncated\n"),
+					0o600,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantText:     "was edited",
+			wantGuidance: "owns that whole file",
+		},
+		{
 			name:         "edited Codex block",
 			relativePath: codexConfig,
 			change: func(t *testing.T, root string) {
@@ -1497,6 +1647,17 @@ func TestVerifyManagedSurfacesRejectsEditedMissingAndDeletedContent(t *testing.T
 			change: func(t *testing.T, root string) {
 				t.Helper()
 				if err := os.Remove(filepath.Join(root, "AGENTS.md")); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantText: "is missing",
+		},
+		{
+			name:         "deleted agent guide",
+			relativePath: guideFile,
+			change: func(t *testing.T, root string) {
+				t.Helper()
+				if err := os.Remove(filepath.Join(root, guideFile)); err != nil {
 					t.Fatal(err)
 				}
 			},

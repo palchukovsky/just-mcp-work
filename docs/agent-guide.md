@@ -1,8 +1,11 @@
 # Agent guide
 
 How `just-mcp-work` (JMW) models a workspace, what its MCP tools do, and how a
-coding agent should drive them. The server ships short usage rules in its MCP
-`instructions` field; this page is the long form behind them.
+coding agent should drive them. The server has two forms of usage rules in its
+MCP `instructions` field: with a verified `.just-mcp-work/guide.txt`, it serves
+the short rules that must fire unprompted and points to that file by its
+verified absolute path; without a verified guide path, it serves the full usage
+text. This page is the project's public long form.
 
 - [What the server is for](#what-the-server-is-for)
 - [The object model](#the-object-model)
@@ -46,7 +49,7 @@ by the next.
 ```mermaid
 flowchart TD
     W["Workspace root<br/>--root, default cwd"]
-    P["Project<br/>project_path, e.g. services/api"]
+    P["Project<br/>rel_path -> project_path<br/>e.g. services/api"]
     R["Runner<br/>just | make | cmake | docker | go | agent"]
     T["Task<br/>task_id = runner:task"]
     N["Run<br/>run_id, UUIDv7"]
@@ -62,9 +65,10 @@ flowchart TD
 
 - **Workspace** - one root directory, fixed at server start. Nothing above it
   is discovered, read, or run.
-- **Project** - a directory holding at least one runner, addressed by
-  `project_path`: workspace-relative, slash-separated, the root itself being
-  `.`. Produced by `list_projects`.
+- **Project** - a directory holding at least one runner. `list_projects`
+  returns its workspace-relative, slash-separated path as `rel_path`, with `.`
+  for the root itself. Pass that value unchanged as `project_path` to
+  `list_tasks`, `run_task`, or `start_task`.
 - **Runner** - a backend detected in that directory that parses project data or
   provides a synthesized task table: `just`, `make`, `cmake`, `docker`, `go`,
   or `agent`.
@@ -220,13 +224,38 @@ Managed MCP and Codex server arguments are `serve --root <dir>` and carry no
 runner selection. The policy, not the server arguments, defines the authorized
 task surface an agent sees.
 
-`init` also records the managed configuration it wrote in JMW's own
-`.just-mcp-work/` state directory. At startup, `serve` checks that the recorded
-configuration is still present and unchanged. If that record is absent, there
-is no check and startup behaves as it did before the record existed. In block
-files, JMW owns the text between its managed markers. In JSON files, it owns the
-`just-mcp-work` server entry and every JMW-prefixed permission entry it
-generates; foreign servers and permission entries remain local content.
+`init` also writes `.just-mcp-work/guide.txt`, the generated reference used by an
+agent at work, and records it with the other managed surfaces. JMW owns that
+whole file. At startup, `serve` checks that every recorded surface is still
+present and unchanged and that the current binary would generate the recorded
+content. If the guide is edited, removed, or no longer matches the binary,
+`serve` refuses to start; run `just-mcp-work init --dir "<root>"` to regenerate
+the managed surfaces. If the record is absent, there is no check and startup
+behaves as it did before the record existed. A verified guide gives `serve` its
+absolute path verbatim for the short MCP instructions; no verified path means
+the MCP instructions carry the full guide instead.
+
+An older verified manifest that records only `.just-mcp-work/guide.md` still
+checks that surface against the current binary. Changed generated content makes
+`serve` refuse with an instruction to rerun `init`; matching content supplies no
+current guide path, so `serve` uses the full instructions. The next successful
+`init` removes that recorded regular file as it writes `guide.txt` and updates
+the schema-compatible manifest. An unrecorded file at the old path is left
+untouched. A non-regular recorded legacy path, including a file symlink, is
+rejected before any write so the migration cannot break another managed path's
+symlink chain.
+
+After planning, `init` compares the resolved collision paths of every managed
+edit intent, including unchanged planned edits.
+If two surfaces reach the same path, preflight names both logical surfaces and
+the common path, then fails before dry-run output or any write. Aliased agent
+instruction files are allowed only when both plans produce exactly the same
+content and removal action; target-specific headers therefore cannot silently
+replace each other.
+
+In block files, JMW owns the text between its managed markers. In JSON files,
+it owns the `just-mcp-work` server entry and every JMW-prefixed permission entry
+it generates; foreign servers and permission entries remain local content.
 
 `init --runner-mode <name>=<mode>` remains repeatable for answering runner
 questions non-interactively. `serve --runner-mode` is retired: it is parsed
@@ -272,9 +301,10 @@ Just, Make, CMake, and Docker are still unreviewed: they offer their existing
 unrestricted surface or nothing.
 
 **A task can be absent on purpose.** When a task you expected is not in the
-listing, the operator may have withheld its runner. Never reconstruct it
-through `run_shell_command`, `start_shell_command`, or any other shell path:
-that defeats the only server-side authorization mechanism there is. Modes
+listing, the operator may have withheld its runner. Do not edit build files
+unless asked. In particular, never reconstruct a withheld task through
+`run_shell_command`, `start_shell_command`, any other shell path, or a build-file
+edit: that defeats the only server-side authorization mechanism there is. Modes
 reduce the exposed surface; they are not a sandbox. See
 [SECURITY.md](../SECURITY.md).
 
@@ -285,12 +315,14 @@ flowchart TD
     A["run_task"] --> B{"finished before<br/>max_wait_ms?"}
     B -->|yes| C["finished receipt<br/>ok / nonzero / timeout"]
     B -->|no| D["running receipt<br/>promoted: true + run_id"]
-    E["start_task"] --> D
+    E["start_task"] --> I["running receipt<br/>run_id"]
     D --> F["wait_run / get_run_status"]
+    I --> F
     F --> G{"completed?"}
     G -->|no| F
     G -->|yes| C
     D -.->|abandon it| H["stop_run"]
+    I -.->|abandon it| H
 ```
 
 `run_task` waits up to `max_wait_ms`, which defaults to the server's
@@ -373,7 +405,8 @@ same task with any arguments. Both report `runs`, `measured_runs`, `last`,
 Discovery:
 
 - **`list_projects`** - what can be run in this workspace. Inputs: `path`,
-  `max_depth`, `include_hidden`, `runners`.
+  `max_depth`, `include_hidden`, `runners`. Each result's `rel_path` is the
+  `project_path` accepted by project-scoped tools.
 - **`list_tasks`** - what can be run in one project. Inputs: `project_path`,
   `runner`, one of `names` / `name_prefix` / `query`, `visibility`, `detail`,
   `include_stats`, `include_metadata`, `limit`, `cursor`.
@@ -445,10 +478,10 @@ counters describe the full task catalog selection.
 ### Reading output
 
 `get_run_logs` pages raw bytes of one stream. `stream` is `stdout` or
-`stderr`; `offset` and `limit` are byte counts, the limit defaulting to 65536.
-The response returns `next_offset` to resume from. The default
-`encoding: utf8` refuses a range that is not complete valid UTF-8 - move the
-range, or ask for `base64`. Reach for this tool only when the tails did not
+`stderr`; `offset` and `limit` are byte counts. `limit` defaults to 65536 and
+may not exceed 1048576. The response returns `next_offset` to resume from. The
+default `encoding: utf8` refuses a range that is not complete valid UTF-8 - move
+the range, or ask for `base64`. Reach for this tool only when the tails did not
 explain the failure.
 
 ### Listing history
@@ -487,7 +520,9 @@ usually waiting on something, not hung.
 workspace-relative `working_directory`, default `.`, and only when a compact
 receipt or a `tail_bytes` output slice is worth more than the full output. Shell
 runs land in the same ledger under the task ID `shell:command`, so `list_runs`
-and `get_run_logs` work on them too.
+and `get_run_logs` work on them too. This is for genuinely ad-hoc work, not a
+task hidden by a runner mode; do not edit a build file to expose or recreate
+such a task.
 
 For a long block you will run more than once in one server session, define it
 once with `define_shell_block` and repeat it by `block_id`; that keeps the
@@ -552,13 +587,20 @@ guidance. Use
 - `managed manifest <path> is unusable` - a recorded surface path is unsafe or
   cannot be contained within the workspace. Run `just-mcp-work init --dir
   "<root>"`.
+- `managed surfaces "<first>" and "<second>" resolve to the same path <path>` -
+  two actual planned edits collide. Separate the managed targets, then run
+  `just-mcp-work init --dir "<root>"` again.
+- `retired agent guide <path> is not a regular file` - replace or remove the
+  non-regular legacy path deliberately, then run `just-mcp-work init --dir
+  "<root>"` again.
 - `managed configuration in <path> is malformed` - JMW cannot parse the owned
   fragment and reports the underlying cause. Fix that cause, then run
   `just-mcp-work init --dir "<root>"`.
 - `managed configuration in <path> was edited` - JMW-owned content changed.
-  Keep local text outside managed markers in block files; in JSON files, keep
-  local servers and permissions separate from the entries JMW generates. Then
-  run `just-mcp-work init --dir "<root>"`.
+  The guide at `.just-mcp-work/guide.txt` is wholly owned; keep local text
+  outside managed markers in block files, and keep local servers and permissions
+  separate from the entries JMW generates in JSON files. Then run
+  `just-mcp-work init --dir "<root>"`.
 - `managed configuration in <path> is missing` - a file or the JMW-owned
   fragment in it was removed. Run `just-mcp-work init --dir "<root>"`.
 - `generated configuration changed since it was written` - the current JMW
@@ -591,6 +633,7 @@ configuration for the selected agents, and writes the runner policy. The
 <workspace root>/.just-mcp-work.json  runner policy; selects runners
 <workspace root>/.just-mcp-work/
 ├── managed.json              init record checked when serve starts
+├── guide.txt                 generated agent reference
 ├── version.json              update-check state
 └── log/
     └── <run_id>/
