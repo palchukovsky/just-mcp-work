@@ -17,7 +17,6 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 
 $destinationPath = [System.IO.Path]::GetFullPath($Destination)
 $toolchainBin = Join-Path $destinationPath 'w64devkit\bin'
@@ -54,7 +53,20 @@ if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
     Invoke-WebRequest -UseBasicParsing -Uri $downloadUri -OutFile $archive
 }
 
-$actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+$hashAlgorithm = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $archiveStream = [System.IO.File]::OpenRead($archive)
+    try {
+        $hashBytes = $hashAlgorithm.ComputeHash($archiveStream)
+    }
+    finally {
+        $archiveStream.Dispose()
+    }
+}
+finally {
+    $hashAlgorithm.Dispose()
+}
+$actualHash = [System.BitConverter]::ToString($hashBytes).Replace('-', '').ToLowerInvariant()
 if ($actualHash -ne $Sha256.ToLowerInvariant()) {
     throw "w64devkit SHA256 mismatch: got $actualHash"
 }
