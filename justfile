@@ -103,7 +103,7 @@ release kind: verify
     {{ python }} scripts/dev.py release {{ kind }}
 
 # Run the release pipeline for a prospective version without creating a tag.
-release-dry kind="patch": verify
+release-dry kind="patch":
     {{ python }} scripts/dev.py release {{ kind }} --dry-run
 
 # Build and initialize agent-facing workspace files.
