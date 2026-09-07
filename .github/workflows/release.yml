@@ -20,8 +20,12 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    uses: ./.github/workflows/verify.yml
+
   release:
     name: Package and release
+    needs: verify
     runs-on: ubuntu-latest
     env:
       JMW_VERSION: ${{ inputs.version || github.ref_name }}
@@ -46,12 +50,6 @@ jobs:
 
       - name: Set up just
         uses: extractions/setup-just@v3
-
-      - name: Set up verification tools
-        run: just setup
-
-      - name: Verify
-        run: just verify
 
       - name: Package
         run: just package
