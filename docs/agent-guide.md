@@ -584,6 +584,14 @@ guidance. Use
   started it, and only that process can stop it.
 - `max_wait_ms must be between 0 and 600000` - `wait_run` accepts at most ten
   minutes per call. Call it again; the run keeps going.
+- The MCP client reports that the server closed the connection or exited during
+  startup - `serve` refused to start. Read
+  `<root>/.just-mcp-work/log/startup-error.json`: `error` is the refusal, `args`
+  the arguments `serve` received, `root` the directory the record was written
+  under, and `time` when. Before `--root` is parsed, the record is under
+  `JMW_ROOT` or the server's working directory. A successful start from any
+  client removes it; the next refusal writes it again. Arguments are recorded
+  verbatim, so do not put secrets on `serve`'s command line.
 - `--runner-mode is no longer accepted by serve; the runner policy now lives in
   <path>; run just-mcp-work init to write it` - an old managed configuration is
   still passing the retired flag. Run `init` to rewrite it.
@@ -648,6 +656,7 @@ configuration for the selected agents, and writes the runner policy. The
 ├── guide.txt                 generated agent reference
 ├── version.json              update-check state
 └── log/
+    ├── startup-error.json    latest serve startup refusal
     └── <run_id>/
         ├── meta.json         status, exit code, timings, PIDs
         ├── stdout.log        raw stream

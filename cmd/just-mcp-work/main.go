@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -77,6 +78,25 @@ type serveOptions struct {
 	Exclude           []string
 	RetiredRunnerMode bool
 	HelpOnly          bool
+	FlagsParsed       bool
+}
+
+func (options serveOptions) startupFailureOptions() map[string]string {
+	if !options.FlagsParsed {
+		return nil
+	}
+	result := map[string]string{
+		"root_explicit":     strconv.FormatBool(options.RootExplicit),
+		"timeout":           options.Timeout.String(),
+		"timeout_unlimited": strconv.FormatBool(options.TimeoutUnlimited),
+		"sync_deadline":     options.SyncDeadline.String(),
+		"retention":         options.Retention.String(),
+		"exclude":           strings.Join(options.Exclude, ","),
+	}
+	if options.AIProfile.ID != "" {
+		result["ai_profile"] = options.AIProfile.ID
+	}
+	return result
 }
 
 type runnerModeFlag []runner.Selection
@@ -100,7 +120,7 @@ func (f *runnerModeFlag) Set(value string) error {
 	return nil
 }
 
-func parseServeOptions(args []string) (serveOptions, error) {
+func parseServeOptions(args []string) (serveOptions, string, error) {
 	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	rootFromEnvironment := os.Getenv("JMW_ROOT") != ""
@@ -149,18 +169,9 @@ func parseServeOptions(args []string) (serveOptions, error) {
 	}
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			return serveOptions{HelpOnly: true}, nil
+			return serveOptions{HelpOnly: true}, *root, nil
 		}
-		return serveOptions{}, fmt.Errorf("parse serve flags: %w", err)
-	}
-	if flags.NArg() != 0 {
-		return serveOptions{}, fmt.Errorf("serve accepts no positional arguments")
-	}
-	if *timeout < 0 {
-		return serveOptions{}, fmt.Errorf("timeout must not be negative")
-	}
-	if *timeout > 0 && *timeout < time.Millisecond {
-		return serveOptions{}, fmt.Errorf("timeout must be zero or at least 1ms")
+		return serveOptions{}, *root, fmt.Errorf("parse serve flags: %w", err)
 	}
 	rootExplicit := rootFromEnvironment
 	aiExplicit := false
@@ -172,29 +183,63 @@ func parseServeOptions(args []string) (serveOptions, error) {
 			aiExplicit = true
 		}
 	})
-	aiProfile := aiprofile.Unknown()
-	if aiExplicit {
-		declaredProfile, profileErr := aiprofile.Parse(*ai)
-		if profileErr != nil {
-			return serveOptions{}, fmt.Errorf("parse --ai: %w", profileErr)
-		}
-		aiProfile = declaredProfile
-	}
-	return serveOptions{
+	options := serveOptions{
 		Root:              *root,
 		RootExplicit:      rootExplicit,
-		AIProfile:         aiProfile,
+		AIProfile:         aiprofile.Unknown(),
 		Timeout:           *timeout,
 		TimeoutUnlimited:  *timeout == 0,
 		SyncDeadline:      *syncDeadline,
 		Retention:         *retention,
 		Exclude:           splitCSV(*exclude),
 		RetiredRunnerMode: retiredRunnerMode,
-	}, nil
+		FlagsParsed:       true,
+	}
+	if flags.NArg() != 0 {
+		return options, *root, fmt.Errorf("serve accepts no positional arguments")
+	}
+	if *timeout < 0 {
+		return options, *root, fmt.Errorf("timeout must not be negative")
+	}
+	if *timeout > 0 && *timeout < time.Millisecond {
+		return options, *root, fmt.Errorf("timeout must be zero or at least 1ms")
+	}
+	if aiExplicit {
+		declaredProfile, profileErr := aiprofile.Parse(*ai)
+		if profileErr != nil {
+			options.AIProfile = aiprofile.Profile{}
+			return options, *root, fmt.Errorf("parse --ai: %w", profileErr)
+		}
+		options.AIProfile = declaredProfile
+	}
+	return options, *root, nil
 }
 
-func serve(args []string) error {
-	options, err := parseServeOptions(args)
+func serve(args []string) (resultErr error) {
+	options, startupRoot, err := parseServeOptions(args)
+	startupOptions := options.startupFailureOptions()
+	startupInProgress := true
+	defer func() {
+		if resultErr == nil || !startupInProgress {
+			return
+		}
+		failure := runstore.StartupFailure{
+			Time:    time.Now().UTC(),
+			Version: version.Current().Display(),
+			Commit:  version.Commit,
+			Args:    append([]string(nil), args...),
+			Root:    startupRoot,
+			Options: startupOptions,
+			Error:   resultErr.Error(),
+		}
+		if writeErr := runstore.WriteStartupFailure(startupRoot, failure); writeErr != nil {
+			fmt.Fprintln(
+				os.Stderr,
+				"just-mcp-work: could not write startup failure record:",
+				writeErr,
+			)
+		}
+	}()
 	if err != nil {
 		return err
 	}
@@ -206,6 +251,9 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Before resolution, failures use an already-parsed --root, else JMW_ROOT, else ".".
+	// Afterwards they use root, so an earlier refusal may differ from what a later start clears.
+	startupRoot = root
 	if options.RetiredRunnerMode {
 		return fmt.Errorf(
 			"--runner-mode is no longer accepted by serve; the runner policy now lives in %s; "+
@@ -258,6 +306,12 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("create MCP server: %w", err)
 	}
+	startupInProgress = false
+	// Stale-record removal is best-effort and must not prevent a successful startup.
+	if removeErr := store.RemoveStartupFailure(); removeErr != nil {
+		logger.Warn("could not remove stale startup failure", "error", removeErr)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return serverRunError(ctx, server.Run(ctx))

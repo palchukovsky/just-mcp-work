@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -27,6 +28,8 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
+	"github.com/palchukovsky/just-mcp-work/internal/runstore"
+	"github.com/palchukovsky/just-mcp-work/internal/version"
 )
 
 func TestRunPrintsVersionWithFlagAlias(t *testing.T) {
@@ -211,41 +214,8 @@ func TestServeUsesVerifiedAgentGuideForInstructions(t *testing.T) {
 			if !test.agentGuide {
 				removeAgentGuideSurface(t, root)
 			}
-
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			//nolint:gosec // The test intentionally reexecutes the current test binary.
-			command := exec.CommandContext(
-				ctx,
-				os.Args[0],
-				"-test.run=^TestServeMCPHelperProcess$",
-			)
-			command.Env = append(
-				os.Environ(),
-				"JMW_TEST_HELPER_PROCESS=serve-mcp",
-				"JMW_TEST_SERVE_ROOT="+root,
-				"JMW_TEST_SERVE_AI="+test.ai,
-			)
-			stdin, err := command.StdinPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			stdout, err := command.StdoutPipe()
-			if err != nil {
-				t.Fatal(err)
-			}
-			var stderr strings.Builder
-			command.Stderr = &stderr
-			if err = command.Start(); err != nil {
-				t.Fatal(err)
-			}
-
-			client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v1"}, nil)
-			session, err := client.Connect(ctx, &mcp.IOTransport{Reader: stdout, Writer: stdin}, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			instructions := session.InitializeResult().Instructions
+			writeStaleStartupFailure(t, root)
+			instructions, stderr := runServeMCP(t, root, test.ai)
 			resolvedRoot, err := filepath.EvalSymlinks(root)
 			if err != nil {
 				t.Fatal(err)
@@ -255,11 +225,14 @@ func TestServeUsesVerifiedAgentGuideForInstructions(t *testing.T) {
 			if gotGuide != test.agentGuide {
 				t.Fatalf("served guide pointer = %t, want %t: %s", gotGuide, test.agentGuide, instructions)
 			}
-			if err := stdin.Close(); err != nil {
-				t.Fatal(err)
-			}
-			if err := command.Wait(); err != nil {
-				t.Fatalf("serve helper failed: %v: %s", err, stderr.String())
+			startupFailurePath := filepath.Join(
+				root,
+				".just-mcp-work",
+				"log",
+				"startup-error.json",
+			)
+			if _, err := os.Stat(startupFailurePath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("successful serve left startup failure: %v", err)
 			}
 			wantFamily := "unknown"
 			if test.ai != "" {
@@ -272,27 +245,166 @@ func TestServeUsesVerifiedAgentGuideForInstructions(t *testing.T) {
 				"profile_version=1",
 				"transport=mcp-stdio",
 			} {
-				if !strings.Contains(stderr.String(), want) {
-					t.Fatalf("serve diagnostics do not contain %q: %s", want, stderr.String())
+				if !strings.Contains(stderr, want) {
+					t.Fatalf("serve diagnostics do not contain %q: %s", want, stderr)
 				}
 			}
 		})
 	}
 }
 
-func TestServeMCPHelperProcess(_ *testing.T) {
-	if os.Getenv("JMW_TEST_HELPER_PROCESS") != "serve-mcp" {
+func runServeMCP(t *testing.T, root, ai string) (string, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	//nolint:gosec // The test intentionally reexecutes the current test binary.
+	command := exec.CommandContext(
+		ctx,
+		os.Args[0],
+		"-test.run=^TestServeMCPHelperProcess$",
+	)
+	command.Env = append(
+		os.Environ(),
+		"JMW_TEST_HELPER_PROCESS=serve-mcp",
+		"JMW_TEST_SERVE_ROOT="+root,
+		"JMW_TEST_SERVE_AI="+ai,
+	)
+	stdin, err := command.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	if err = command.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	client := mcp.NewClient(
+		&mcp.Implementation{Name: "test-client", Version: "v1"},
+		nil,
+	)
+	session, err := client.Connect(
+		ctx,
+		&mcp.IOTransport{Reader: stdout, Writer: stdin},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instructions := session.InitializeResult().Instructions
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err != nil {
+		t.Fatalf("serve helper failed: %v: %s", err, stderr.String())
+	}
+	return instructions, stderr.String()
+}
+
+func TestServeContinuesWhenStartupFailureRemovalFails(t *testing.T) {
+	root := t.TempDir()
+	initializeWorkspaceMode(t, root, false)
+	startupFailurePath := filepath.Join(
+		root,
+		".just-mcp-work",
+		"log",
+		"startup-error.json",
+	)
+	if err := os.MkdirAll(filepath.Dir(startupFailurePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(startupFailurePath, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(startupFailurePath, "keep")
+	if err := os.WriteFile(keepPath, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr := runServeMCP(t, root, "")
+	if !strings.Contains(
+		stderr,
+		"level=WARN msg=\"could not remove stale startup failure\"",
+	) {
+		t.Fatalf("startup failure removal warning missing from stderr: %s", stderr)
+	}
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Fatalf("failed removal changed startup failure directory: %v", err)
+	}
+}
+
+func TestServeMCPHelperProcess(t *testing.T) {
+	mode := os.Getenv("JMW_TEST_HELPER_PROCESS")
+	if mode == "" {
 		return
 	}
-	args := []string{"--root", os.Getenv("JMW_TEST_SERVE_ROOT")}
-	if ai := os.Getenv("JMW_TEST_SERVE_AI"); ai != "" {
-		args = append(args, "--ai", ai)
+	root := os.Getenv("JMW_TEST_SERVE_ROOT")
+	switch mode {
+	case "serve-mcp":
+		args := []string{"--root", root}
+		if ai := os.Getenv("JMW_TEST_SERVE_AI"); ai != "" {
+			args = append(args, "--ai", ai)
+		}
+		if err := serve(args); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		os.Exit(0)
+	case "main-retired-runner-mode":
+		os.Args = []string{
+			os.Args[0],
+			"serve",
+			"--root",
+			root,
+			"--runner-mode",
+			"just=all",
+		}
+		main()
+		t.Fatal("main returned after a startup refusal")
+	default:
+		t.Fatalf("unknown helper mode %q", mode)
 	}
-	if err := serve(args); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+}
+
+func TestServeMainRejectsRetiredRunnerModeWithExitOne(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("JMW_TIMEOUT", "")
+	t.Setenv("JMW_SYNC_DEADLINE", "")
+	t.Setenv("JMW_RETENTION", "")
+	t.Setenv("JMW_TEST_HELPER_PROCESS", "main-retired-runner-mode")
+	t.Setenv("JMW_TEST_SERVE_ROOT", root)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	//nolint:gosec // The test intentionally reexecutes the current test binary.
+	command := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestServeMCPHelperProcess$")
+	command.Env = os.Environ()
+	var stderr strings.Builder
+	command.Stderr = &stderr
+	err := command.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("serve process error = %v, want *exec.ExitError", err)
 	}
-	os.Exit(0)
+	if got := exitErr.ExitCode(); got != 1 {
+		t.Fatalf("serve process exit code = %d, want 1", got)
+	}
+	want := fmt.Sprintf(
+		"--runner-mode is no longer accepted by serve; the runner policy now lives in %s; "+
+			"run just-mcp-work init to write it",
+		policy.Path(root),
+	)
+	if !strings.Contains(stderr.String(), "just-mcp-work: "+want) {
+		t.Fatalf("serve process stderr = %q, want diagnostic %q", stderr.String(), want)
+	}
+	failure := readStartupFailureRecord(t, root)
+	if failure.Error != want {
+		t.Fatalf("recorded startup error = %q, want %q", failure.Error, want)
+	}
 }
 
 func removeAgentGuideSurface(t *testing.T, root string) {
@@ -1397,56 +1509,81 @@ func captureStdout(t *testing.T, fn func()) string {
 	return string(data)
 }
 
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	original := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = original
+	}()
+	fn()
+	if closeErr := writer.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	data, readErr := io.ReadAll(reader)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if closeErr := reader.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	return string(data)
+}
+
 func TestParseServeOptionsResolvesDeadlinePrecedence(t *testing.T) {
 	t.Setenv("JMW_SYNC_DEADLINE", "90s")
-	options, err := parseServeOptions(nil)
+	options, _, err := parseServeOptions(nil)
 	if err != nil || options.SyncDeadline != 90*time.Second {
 		t.Fatalf("environment deadline = %v, %v, want 90s", options.SyncDeadline, err)
 	}
-	options, err = parseServeOptions([]string{"--sync-deadline", "5s"})
+	options, _, err = parseServeOptions([]string{"--sync-deadline", "5s"})
 	if err != nil || options.SyncDeadline != 5*time.Second {
 		t.Fatalf("flag deadline = %v, %v, want 5s", options.SyncDeadline, err)
 	}
 	t.Setenv("JMW_SYNC_DEADLINE", "not-a-duration")
-	options, err = parseServeOptions(nil)
+	options, _, err = parseServeOptions(nil)
 	if err != nil || options.SyncDeadline != time.Minute {
 		t.Fatalf("fallback deadline = %v, %v, want 1m", options.SyncDeadline, err)
 	}
-	if _, err := parseServeOptions([]string{"unexpected"}); err == nil {
+	if _, _, err := parseServeOptions([]string{"unexpected"}); err == nil {
 		t.Fatal("positional arguments must be rejected")
 	}
 }
 
 func TestParseServeOptionsTracksExplicitRoot(t *testing.T) {
 	t.Setenv("JMW_ROOT", "")
-	options, err := parseServeOptions(nil)
+	options, _, err := parseServeOptions(nil)
 	if err != nil || options.RootExplicit {
 		t.Fatalf("default root options = %#v, %v", options, err)
 	}
-	options, err = parseServeOptions([]string{"--root", "."})
+	options, _, err = parseServeOptions([]string{"--root", "."})
 	if err != nil || !options.RootExplicit {
 		t.Fatalf("flag root options = %#v, %v", options, err)
 	}
 	t.Setenv("JMW_ROOT", t.TempDir())
-	options, err = parseServeOptions(nil)
+	options, _, err = parseServeOptions(nil)
 	if err != nil || !options.RootExplicit {
 		t.Fatalf("environment root options = %#v, %v", options, err)
 	}
 }
 
 func TestParseServeOptionsSelectsAIProfile(t *testing.T) {
-	options, err := parseServeOptions(nil)
+	options, _, err := parseServeOptions(nil)
 	if err != nil || options.AIProfile != aiprofile.Unknown() {
 		t.Fatalf("default AI profile = %#v, %v, want unknown", options.AIProfile, err)
 	}
 	for _, family := range []string{"codex", "claude"} {
-		options, err = parseServeOptions([]string{"--ai", family})
+		options, _, err = parseServeOptions([]string{"--ai", family})
 		if err != nil || string(options.AIProfile.Family) != family {
 			t.Fatalf("--ai %s profile = %#v, %v", family, options.AIProfile, err)
 		}
 	}
 	for _, family := range []string{"", "unknown", "Codex", "gemini"} {
-		if _, err = parseServeOptions([]string{"--ai", family}); err == nil {
+		if _, _, err = parseServeOptions([]string{"--ai", family}); err == nil {
 			t.Fatalf("--ai %q was accepted", family)
 		}
 	}
@@ -1506,19 +1643,22 @@ func TestResolveServeRootReportsMalformedActiveMarker(t *testing.T) {
 }
 
 func TestParseServeOptionsAllowsUnlimitedTimeout(t *testing.T) {
-	options, err := parseServeOptions([]string{"--timeout", "0"})
+	options, _, err := parseServeOptions([]string{"--timeout", "0"})
 	if err != nil || !options.TimeoutUnlimited || options.Timeout != 0 {
 		t.Fatalf("zero timeout options = %#v, %v", options, err)
 	}
-	if _, err := parseServeOptions([]string{"--timeout", "-1s"}); err == nil {
+	if _, _, err := parseServeOptions([]string{"--timeout", "-1s"}); err == nil {
 		t.Fatal("negative timeout must be rejected")
 	}
-	if _, err := parseServeOptions([]string{"--timeout", "500us"}); err == nil {
+	if _, _, err := parseServeOptions([]string{"--timeout", "500us"}); err == nil {
 		t.Fatal("sub-millisecond timeout must be rejected")
 	}
 }
 
 func TestServeRejectsRetiredRunnerModeWithMigrationMessage(t *testing.T) {
+	t.Setenv("JMW_TIMEOUT", "")
+	t.Setenv("JMW_SYNC_DEADLINE", "")
+	t.Setenv("JMW_RETENTION", "")
 	root := t.TempDir()
 	manifestPath := filepath.Join(root, ".just-mcp-work", "managed.json")
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
@@ -1527,12 +1667,266 @@ func TestServeRejectsRetiredRunnerModeWithMigrationMessage(t *testing.T) {
 	if err := os.WriteFile(manifestPath, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	args := []string{"--root", root, "--runner-mode", "just=all"}
+	want := fmt.Sprintf(
+		"--runner-mode is no longer accepted by serve; the runner policy now lives in %s; "+
+			"run just-mcp-work init to write it",
+		policy.Path(root),
+	)
 
-	err := serve([]string{"--root", root, "--runner-mode", "go=safe"})
-	if err == nil || !strings.Contains(err.Error(), "no longer accepted by serve") ||
-		!strings.Contains(err.Error(), policy.Path(root)) ||
-		!strings.Contains(err.Error(), "run just-mcp-work init") {
-		t.Fatalf("serve retired runner-mode error = %v, want policy migration guidance", err)
+	err := serve(args)
+	if err == nil || err.Error() != want {
+		t.Fatalf("serve retired runner-mode error = %q, want %q", err, want)
+	}
+	failure := readStartupFailureRecord(t, root)
+	if failure.Error != want {
+		t.Fatalf("recorded startup error = %q, want %q", failure.Error, want)
+	}
+	if failure.Root != root {
+		t.Errorf("recorded root = %q, want %q", failure.Root, root)
+	}
+	if !slices.Equal(failure.Args, args) {
+		t.Errorf("recorded args = %q, want %q", failure.Args, args)
+	}
+	wantOptions := map[string]string{
+		"root_explicit":     "true",
+		"ai_profile":        "jmw/unknown",
+		"timeout":           "15m0s",
+		"timeout_unlimited": "false",
+		"sync_deadline":     "1m0s",
+		"retention":         "72h0m0s",
+		"exclude":           "",
+	}
+	if !reflect.DeepEqual(failure.Options, wantOptions) {
+		t.Errorf("recorded options = %#v, want %#v", failure.Options, wantOptions)
+	}
+	if failure.Time.IsZero() {
+		t.Error("recorded startup failure has zero time")
+	}
+	if failure.Version != version.Current().Display() || failure.Commit != version.Commit {
+		t.Errorf(
+			"recorded build = %q (%q), want %q (%q)",
+			failure.Version,
+			failure.Commit,
+			version.Current().Display(),
+			version.Commit,
+		)
+	}
+}
+
+func TestServeStartupFailureRecordsResolvedOptions(t *testing.T) {
+	root := t.TempDir()
+	args := []string{
+		"--root", root,
+		"--ai", "codex",
+		"--timeout", "0",
+		"--sync-deadline", "2s",
+		"--retention", "3h",
+		"--exclude", "vendor,tmp/*",
+		"--runner-mode", "just=all",
+	}
+	if err := serve(args); err == nil {
+		t.Fatal("serve accepted retired --runner-mode")
+	}
+	failure := readStartupFailureRecord(t, root)
+	want := map[string]string{
+		"root_explicit":     "true",
+		"ai_profile":        "jmw/codex",
+		"timeout":           "0s",
+		"timeout_unlimited": "true",
+		"sync_deadline":     "2s",
+		"retention":         "3h0m0s",
+		"exclude":           "vendor,tmp/*",
+	}
+	if !reflect.DeepEqual(failure.Options, want) {
+		t.Fatalf("recorded options = %#v, want %#v", failure.Options, want)
+	}
+}
+
+func TestServeStartupFailureRecordsNegativeTimeoutOptions(t *testing.T) {
+	t.Setenv("JMW_TIMEOUT", "")
+	t.Setenv("JMW_SYNC_DEADLINE", "")
+	t.Setenv("JMW_RETENTION", "")
+	t.Setenv("JMW_TIMEOUT", "-1s")
+	root := t.TempDir()
+
+	err := serve([]string{"--root", root})
+	if err == nil || err.Error() != "timeout must not be negative" {
+		t.Fatalf("serve negative timeout error = %q, want %q", err, "timeout must not be negative")
+	}
+	failure := readStartupFailureRecord(t, root)
+	if got := failure.Options["timeout"]; got != "-1s" {
+		t.Fatalf("recorded timeout option = %q, want %q", got, "-1s")
+	}
+}
+
+func TestServeStartupFailureOmitsInvalidAIProfileOption(t *testing.T) {
+	t.Setenv("JMW_TIMEOUT", "")
+	t.Setenv("JMW_SYNC_DEADLINE", "")
+	t.Setenv("JMW_RETENTION", "")
+	root := t.TempDir()
+
+	if err := serve([]string{"--root", root, "--ai", "invalid"}); err == nil {
+		t.Fatal("serve accepted an invalid --ai value")
+	}
+	failure := readStartupFailureRecord(t, root)
+	want := map[string]string{
+		"root_explicit":     "true",
+		"timeout":           "15m0s",
+		"timeout_unlimited": "false",
+		"sync_deadline":     "1m0s",
+		"retention":         "72h0m0s",
+		"exclude":           "",
+	}
+	if !reflect.DeepEqual(failure.Options, want) {
+		t.Fatalf("recorded options = %#v, want %#v", failure.Options, want)
+	}
+}
+
+func TestServeStartupFailureRecordsOptionsForPositionalArgument(t *testing.T) {
+	t.Setenv("JMW_TIMEOUT", "")
+	t.Setenv("JMW_SYNC_DEADLINE", "")
+	t.Setenv("JMW_RETENTION", "")
+	root := t.TempDir()
+
+	err := serve([]string{"--root", root, "unexpected"})
+	if err == nil || err.Error() != "serve accepts no positional arguments" {
+		t.Fatalf(
+			"serve positional-argument error = %q, want %q",
+			err,
+			"serve accepts no positional arguments",
+		)
+	}
+	failure := readStartupFailureRecord(t, root)
+	want := map[string]string{
+		"root_explicit":     "true",
+		"ai_profile":        "jmw/unknown",
+		"timeout":           "15m0s",
+		"timeout_unlimited": "false",
+		"sync_deadline":     "1m0s",
+		"retention":         "72h0m0s",
+		"exclude":           "",
+	}
+	if !reflect.DeepEqual(failure.Options, want) {
+		t.Fatalf("recorded options = %#v, want %#v", failure.Options, want)
+	}
+}
+
+func TestServeWritesStartupFailureForFlagParseError(t *testing.T) {
+	root := t.TempDir()
+	args := []string{"--root", root, "--undefined"}
+	err := serve(args)
+	if err == nil {
+		t.Fatal("serve accepted an undefined flag")
+	}
+	failure := readStartupFailureRecord(t, root)
+	if failure.Error != err.Error() {
+		t.Fatalf("recorded startup error = %q, want %q", failure.Error, err)
+	}
+	if failure.Root != root {
+		t.Errorf("recorded root = %q, want %q", failure.Root, root)
+	}
+	if !slices.Equal(failure.Args, args) {
+		t.Errorf("recorded args = %q, want %q", failure.Args, args)
+	}
+	if failure.Options != nil {
+		t.Fatalf("flag-parse failure options = %#v, want nil", failure.Options)
+	}
+	path := filepath.Join(root, ".just-mcp-work", "log", "startup-error.json")
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if bytes.Contains(data, []byte(`"options"`)) {
+		t.Fatalf("flag-parse failure JSON contains options: %s", data)
+	}
+}
+
+func TestParseServeOptionsReportsBestKnownRootOnFailure(t *testing.T) {
+	t.Setenv("JMW_ROOT", "")
+	_, root, err := parseServeOptions([]string{"--undefined"})
+	if err == nil || root != "." {
+		t.Fatalf("default failure root = %q, %v", root, err)
+	}
+
+	environmentRoot := t.TempDir()
+	t.Setenv("JMW_ROOT", environmentRoot)
+	_, root, err = parseServeOptions([]string{"--undefined", "--root", "unparsed"})
+	if err == nil || root != environmentRoot {
+		t.Fatalf("environment failure root = %q, %v", root, err)
+	}
+
+	flagRoot := t.TempDir()
+	_, root, err = parseServeOptions([]string{"--root", flagRoot, "--undefined"})
+	if err == nil || root != flagRoot {
+		t.Fatalf("parsed flag failure root = %q, %v", root, err)
+	}
+}
+
+func TestServeHelpDoesNotWriteStartupFailure(t *testing.T) {
+	root := t.TempDir()
+	if err := serve([]string{"--root", root, "--help"}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".just-mcp-work", "log", "startup-error.json")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("serve --help wrote a startup failure: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".just-mcp-work")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("serve --help created state directories: %v", err)
+	}
+}
+
+func TestServeRecordWriteFailureDoesNotMaskStartupError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation may require elevated privileges on Windows")
+	}
+	root := t.TempDir()
+	target := t.TempDir()
+	if err := os.Symlink(target, filepath.Join(root, ".just-mcp-work")); err != nil {
+		t.Fatal(err)
+	}
+	want := fmt.Sprintf(
+		"--runner-mode is no longer accepted by serve; the runner policy now lives in %s; "+
+			"run just-mcp-work init to write it",
+		policy.Path(root),
+	)
+	var serveErr error
+	output := captureStderr(t, func() {
+		serveErr = serve([]string{"--root", root, "--runner-mode", "just=all"})
+	})
+	if serveErr == nil || serveErr.Error() != want {
+		t.Fatalf("serve error = %q, want %q", serveErr, want)
+	}
+	if !strings.Contains(output, "just-mcp-work: could not write startup failure record:") {
+		t.Fatalf("record-write diagnostic missing from stderr: %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(target, "log", "startup-error.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup failure was written through symlink: %v", err)
+	}
+}
+
+func readStartupFailureRecord(t *testing.T, root string) runstore.StartupFailure {
+	t.Helper()
+	path := filepath.Join(root, ".just-mcp-work", "log", "startup-error.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure runstore.StartupFailure
+	if err := json.Unmarshal(data, &failure); err != nil {
+		t.Fatal(err)
+	}
+	return failure
+}
+
+func writeStaleStartupFailure(t *testing.T, root string) {
+	t.Helper()
+	if err := runstore.WriteStartupFailure(
+		root,
+		runstore.StartupFailure{Error: "stale refusal"},
+	); err != nil {
+		t.Fatal(err)
 	}
 }
 
