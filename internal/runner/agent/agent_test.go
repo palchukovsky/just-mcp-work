@@ -211,11 +211,126 @@ func TestBuildCommandUsesExactArgv(t *testing.T) {
 	}
 }
 
+func TestBuildScopedCommandUsesScopedPrefixFromTaskTable(t *testing.T) {
+	dir := t.TempDir()
+	writeGitFile(t, dir)
+	r := newRunner(taskSpecs("", ""))
+
+	codex := taskByID(t, r, "agent:codex")
+	scopedCodex, err := r.BuildScopedCommand(
+		context.Background(),
+		dir,
+		codex,
+		[]string{"fix the test", "gpt-5", "high"},
+	)
+	if err != nil {
+		t.Fatalf("BuildScopedCommand(codex): %v", err)
+	}
+	wantCodex := []string{
+		"codex", "exec", "--sandbox", "danger-full-access",
+		"-m", "gpt-5", "-c", "model_reasoning_effort=high", "--", "fix the test",
+	}
+	if !reflect.DeepEqual(scopedCodex.Args, wantCodex) {
+		t.Fatalf("scoped codex args = %#v, want %#v", scopedCodex.Args, wantCodex)
+	}
+
+	claude := taskByID(t, r, "agent:claude")
+	args := []string{"fix the test", "sonnet", "high"}
+	unscopedClaude, err := r.BuildCommand(context.Background(), dir, claude, args)
+	if err != nil {
+		t.Fatalf("BuildCommand(claude): %v", err)
+	}
+	scopedClaude, err := r.BuildScopedCommand(context.Background(), dir, claude, args)
+	if err != nil {
+		t.Fatalf("BuildScopedCommand(claude): %v", err)
+	}
+	if !reflect.DeepEqual(scopedClaude.Args, unscopedClaude.Args) {
+		t.Fatalf(
+			"scoped claude args = %#v, want unscoped args %#v",
+			scopedClaude.Args,
+			unscopedClaude.Args,
+		)
+	}
+}
+
+func TestTaskWriteScopeUsesCLIStateDirectoryRule(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(taskSpecs(os.Args[0], os.Args[0]))
+	for _, test := range []struct {
+		name  string
+		id    string
+		env   string
+		value string
+		want  string
+		unset bool
+	}{
+		{
+			name:  "codex override",
+			id:    "agent:codex",
+			env:   "CODEX_HOME",
+			value: "relative-codex-home",
+			want:  "relative-codex-home",
+		},
+		{
+			name: "codex empty override",
+			id:   "agent:codex",
+			env:  "CODEX_HOME",
+			want: filepath.Join(home, ".codex"),
+		},
+		{
+			name:  "codex unset override",
+			id:    "agent:codex",
+			env:   "CODEX_HOME",
+			unset: true,
+			want:  filepath.Join(home, ".codex"),
+		},
+		{
+			name:  "claude override",
+			id:    "agent:claude",
+			env:   "CLAUDE_CONFIG_DIR",
+			value: "relative-claude-home",
+			want:  "relative-claude-home",
+		},
+		{
+			name: "claude empty override",
+			id:   "agent:claude",
+			env:  "CLAUDE_CONFIG_DIR",
+			want: filepath.Join(home, ".claude"),
+		},
+		{
+			name:  "claude unset override",
+			id:    "agent:claude",
+			env:   "CLAUDE_CONFIG_DIR",
+			unset: true,
+			want:  filepath.Join(home, ".claude"),
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv(test.env, test.value)
+			if test.unset {
+				if unsetErr := os.Unsetenv(test.env); unsetErr != nil {
+					t.Fatal(unsetErr)
+				}
+			}
+			got, scopeErr := r.TaskWriteScope(taskByID(t, r, test.id))
+			want := []string{test.want}
+			if scopeErr != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("TaskWriteScope(%q) = %q, %v; want %q", test.id, got, scopeErr, want)
+			}
+		})
+	}
+}
+
 func TestCommandRenderingComesFromTaskTable(t *testing.T) {
 	empty := ""
 	spec := taskSpec{
 		id:          "fixture",
 		binary:      "fixture-agent",
+		stateDir:    ".fixture-agent",
+		stateDirEnv: "FIXTURE_AGENT_HOME",
 		name:        "fixture",
 		description: "Run the fixture agent.",
 		argv:        []string{"run"},
@@ -296,6 +411,8 @@ func TestInvalidTaskTablesAreRejectedAtResolve(t *testing.T) {
 	valid := taskSpecs("codex", "claude")
 	missingRenderer := cloneTaskSpecs(valid)
 	missingRenderer[0].params[1].argv = nil
+	missingStateDirEnv := cloneTaskSpecs(valid)
+	missingStateDirEnv[0].stateDirEnv = ""
 	for _, test := range []struct {
 		name  string
 		specs []taskSpec
@@ -303,6 +420,7 @@ func TestInvalidTaskTablesAreRejectedAtResolve(t *testing.T) {
 		{"empty", nil},
 		{"duplicate id", append(valid, valid[0])},
 		{"missing binary", []taskSpec{{id: "codex", name: "codex", description: "run", argv: []string{"exec"}, params: valid[0].params}}},
+		{"missing state directory override", missingStateDirEnv[:1]},
 		{"missing prompt", []taskSpec{{id: "codex", binary: "codex", name: "codex", description: "run", argv: []string{"exec"}, params: []taskParam{{Param: runner.Param{Name: "model", Kind: runner.ParamSingular}}}}}},
 		{"missing parameter renderer", missingRenderer[:1]},
 	} {

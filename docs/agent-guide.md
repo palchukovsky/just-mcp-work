@@ -15,6 +15,7 @@ public long form.
 - [Task identity per runner](#task-identity-per-runner)
 - [Runner modes](#runner-modes)
 - [The run lifecycle](#the-run-lifecycle)
+- [Restricting a run's writes](#restricting-a-runs-writes)
 - [Tool reference](#tool-reference)
 - [Choosing the right call](#choosing-the-right-call)
 - [Failure modes](#failure-modes)
@@ -302,9 +303,9 @@ adds `go:fmt`, `go:mod:tidy`, and the unrestricted `go:any`. `disabled` does
 not construct the runner at all, so nothing Go-related is discovered or run.
 In agent `safe` mode, only the fixed Codex and Claude tasks accept their three
 declared values; there is no `all` mode to widen the surface. This reduces the
-command surface, not the trust boundary: the launched agent is not sandboxed
-and inherits the operator's permissions in the checkout. `disabled` does not
-construct the agent runner.
+command surface, not the trust boundary. Without `write_scope`, the launched
+agent inherits the operator's permissions and unrestricted filesystem access
+in the checkout. `disabled` does not construct the agent runner.
 Just, Make, CMake, and Docker are still unreviewed: they offer their existing
 unrestricted surface or nothing.
 
@@ -314,7 +315,8 @@ unless asked. In particular, never reconstruct a withheld task through
 `run_shell_command`, `start_shell_command`, any other shell path, or a build-file
 edit: that defeats the only server-side authorization mechanism there is. Modes
 reduce the exposed surface; they are not a sandbox. See
-[SECURITY.md](../SECURITY.md).
+[SECURITY.md](../SECURITY.md). A per-launch `write_scope` is independent of
+runner modes.
 
 ## The run lifecycle
 
@@ -380,6 +382,9 @@ normal receipt with an explanation in `message`, not as a tool error.
 - **Status calls.** `get_run_status`, `wait_run`, and `stop_run` read tails
   from disk: `tail_bytes` per stream, default 4096 unlike the run tools above,
   maximum 65536, `0` disables them.
+- **Write scope.** A scoped receipt carries the effective absolute paths as
+  `write_scope`. The same list is persisted in the run's `meta.json`. Unscoped
+  runs omit the field.
 
 Live receipts and status calls carry lifecycle detail worth reading before you
 act: `completed`, `process_alive`, `owned_by_this_server`,
@@ -410,6 +415,46 @@ same task with any arguments. Both report `runs`, `measured_runs`, `last`,
 - When the client sends a progress token, a synchronous run emits progress
   notifications every 10 seconds.
 
+## Restricting a run's writes
+
+Pass `write_scope` to `run_task`, `start_task`, `run_shell_command`, or
+`start_shell_command` as a list of paths relative to `worktree_root`, the same
+base used by `project_path` and `working_directory`. It applies to that launch
+only and may accompany `block_id`; `define_shell_block` does not retain it.
+Omitting the parameter or sending `null` leaves the run unrestricted and adds
+no receipt or metadata field.
+
+JMW rejects an empty list, a blank or absolute entry, parent traversal outside
+the root, an existing path prefix whose symlink resolves outside the root, and
+a declared path whose final component is itself a symbolic link. Declare the
+symbolic link's target instead. These failures are MCP errors before a run is
+recorded. For an accepted scope, JMW adds the process temporary directory
+(`TMPDIR` when set, otherwise `/tmp`) and the corresponding agent state
+directory: `CODEX_HOME` or `~/.codex` for `agent:codex`, and
+`CLAUDE_CONFIG_DIR` or `~/.claude` for `agent:claude`. A temporary or agent
+state path whose final component is a symbolic link is refused as `spawn_error`.
+The scope is also refused if either added path contains or equals a declared
+path. The receipt's effective `write_scope` has symlinks resolved and contained
+paths folded, and is exactly the list enforced by the OS.
+
+Enforcement is macOS-only. An out-of-scope write fails when attempted. On
+another OS, or when `/usr/bin/sandbox-exec` is unavailable, the launch is
+refused as `spawn_error` and never starts. This boundary restricts writes, not
+reads, network, process execution, or work handed to processes outside the
+run's process tree. Fixed process support still permits writes to `/dev/null`,
+`/dev/zero`, `/dev/stdout`, `/dev/stderr`, and numbered inherited descriptors
+under `/dev/fd/<number>`.
+
+An in-scope hard link created before the run by someone outside the boundary
+can alias an outside file and lets the run change its content. The scoped run
+cannot create that link itself because linking to the outside file is refused.
+A scoped run starts through SIP-protected `/usr/bin/sandbox-exec`, so macOS
+removes `DYLD_*` variables before the task starts. Shell-tool runs through a
+SIP-protected system shell such as `/bin/sh` already lose them; a directly
+launched task program loses them only when scoped. See
+[SECURITY.md](../SECURITY.md#write-scope) for all limits and the agent-specific
+trade-offs.
+
 ## Tool reference
 
 Discovery:
@@ -424,19 +469,21 @@ Discovery:
 Execution:
 
 - **`run_task`** - run a discovered task and wait a bounded time. Inputs:
-  `project_path`, `task_id`, `arguments`, `max_wait_ms`, `tail_bytes`.
+  `project_path`, `task_id`, `arguments`, `write_scope`, `max_wait_ms`,
+  `tail_bytes`.
 - **`start_task`** - background; returns a `run_id`. Inputs: `project_path`,
-  `task_id`, `arguments`.
+  `task_id`, `arguments`, `write_scope`.
 - **`define_shell_block`** - define an ad-hoc shell block for this session.
   Inputs: `command`, `working_directory`.
 - **`run_shell_command`** - an ad-hoc command with a receipt. Inputs:
-  `command`, `block_id`, `working_directory`, `max_wait_ms`, `tail_bytes`.
-  Exactly one of `command` and `block_id` selects the command; `block_id` comes
-  from `define_shell_block`, and `working_directory` must not accompany it.
+  `command`, `block_id`, `working_directory`, `write_scope`, `max_wait_ms`,
+  `tail_bytes`. Exactly one of `command` and `block_id` selects the command;
+  `block_id` comes from `define_shell_block`, and `working_directory` must not
+  accompany it.
 - **`start_shell_command`** - background; inputs: `command`, `block_id`,
-  `working_directory`. Exactly one of `command` and `block_id` selects the
-  command; `block_id` comes from `define_shell_block`, and `working_directory`
-  must not accompany it.
+  `working_directory`, `write_scope`. Exactly one of `command` and `block_id`
+  selects the command; `block_id` comes from `define_shell_block`, and
+  `working_directory` must not accompany it.
 
 Observation:
 

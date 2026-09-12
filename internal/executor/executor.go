@@ -82,7 +82,7 @@ func Start(cmd *exec.Cmd, handle *runstore.Handle, config Config) (*Run, error) 
 		stderrTail: NewTail(config.TailSize),
 		done:       make(chan struct{}),
 		stop:       make(chan stopRequest, 1),
-		meta:       handle.Meta,
+		meta:       cloneMeta(handle.Meta),
 	}
 	cmd.Stdin = nil
 	cmd.Stdout = io.MultiWriter(handle.Stdout(), run.stdoutTail)
@@ -129,7 +129,7 @@ func Start(cmd *exec.Cmd, handle *runstore.Handle, config Config) (*Run, error) 
 			handle.Meta.Error = warningErr.Error()
 		}
 	}
-	run.meta = handle.Meta
+	run.meta = cloneMeta(handle.Meta)
 	go run.await()
 	return run, nil
 }
@@ -266,7 +266,7 @@ func (r *Run) await() {
 
 func (r *Run) complete(result Result, finalErr error) {
 	r.mu.Lock()
-	r.meta = r.handle.Meta
+	r.meta = cloneMeta(r.handle.Meta)
 	r.result = result
 	r.finalErr = finalErr
 	r.metadataRepairNeeded = errors.Is(finalErr, runstore.ErrFinalMetadataPersistence)
@@ -348,8 +348,12 @@ func (r *Run) NeedsMetadataRepair() bool {
 func (r *Run) Meta() runstore.Meta {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	meta := r.meta
+	return cloneMeta(r.meta)
+}
+
+func cloneMeta(meta runstore.Meta) runstore.Meta {
 	meta.Args = append([]string(nil), meta.Args...)
+	meta.WriteScope = append([]string(nil), meta.WriteScope...)
 	return meta
 }
 

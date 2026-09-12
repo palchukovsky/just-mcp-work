@@ -164,6 +164,15 @@ type Runner interface {
 	BuildCommand(ctx context.Context, projectDir string, task Task, args []string) (*exec.Cmd, error)
 }
 
+// WriteScopeProvider reports absolute paths a runner's task must be able to
+// write regardless of the caller's declared scope.
+type WriteScopeProvider interface {
+	TaskWriteScope(task Task) ([]string, error)
+	// BuildScopedCommand builds the task command for a launch that JMW wraps
+	// in a write boundary.
+	BuildScopedCommand(ctx context.Context, projectDir string, task Task, args []string) (*exec.Cmd, error)
+}
+
 // TaskInputValidator is an optional, side-effect-free authorization check run
 // before runner metadata collection or process startup. Implementations must
 // validate only the selected task and caller arguments; they must not inspect

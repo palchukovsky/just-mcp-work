@@ -55,6 +55,7 @@ type Meta struct {
 	TaskID          string            `json:"task_id,omitempty"`
 	Args            []string          `json:"args,omitempty"`
 	CWD             string            `json:"cwd,omitempty"`
+	WriteScope      []string          `json:"write_scope,omitempty"`
 	AIProfile       aiprofile.Profile `json:"ai_profile"`
 	StartedAt       time.Time         `json:"started_at"`
 	EndedAt         time.Time         `json:"ended_at"`
@@ -212,6 +213,7 @@ func (s *Store) Begin(meta Meta) (*Handle, error) {
 	meta.OwnerPID = os.Getpid()
 	meta.OwnerIdentity = ProcessIdentity(meta.OwnerPID)
 	meta.Args = append([]string(nil), meta.Args...)
+	meta.WriteScope = append([]string(nil), meta.WriteScope...)
 	if _, err := s.encodeMeta(meta); err != nil {
 		return nil, fmt.Errorf("validate initial run metadata: %w", err)
 	}

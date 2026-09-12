@@ -4,7 +4,31 @@
 
 package executor
 
-import "testing"
+import (
+	"slices"
+	"testing"
+
+	"github.com/palchukovsky/just-mcp-work/internal/runstore"
+)
+
+func TestRunMetaReturnsDeepCopy(t *testing.T) {
+	run := &Run{meta: runstore.Meta{
+		Args:       []string{"argument"},
+		WriteScope: []string{"/scope"},
+	}}
+
+	snapshot := run.Meta()
+	snapshot.Args[0] = "changed argument"
+	snapshot.WriteScope[0] = "/changed-scope"
+
+	meta := run.Meta()
+	if !slices.Equal(meta.Args, []string{"argument"}) {
+		t.Fatalf("Meta Args after caller mutation = %q, want independent copy", meta.Args)
+	}
+	if !slices.Equal(meta.WriteScope, []string{"/scope"}) {
+		t.Fatalf("Meta WriteScope after caller mutation = %q, want independent copy", meta.WriteScope)
+	}
+}
 
 func TestTailRetainsNewestBytes(t *testing.T) {
 	tail := NewTail(5)

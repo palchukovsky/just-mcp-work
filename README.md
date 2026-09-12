@@ -25,6 +25,9 @@ instead of a wall of output.
 - **Genuinely ad-hoc commands still run.** A plain shell command is only for
   work outside both the discovered tasks and any task surface withheld by a
   runner mode.
+- **Writes can be bounded per launch.** On macOS, a caller can declare the
+  paths a run may write; JMW refuses a scoped launch where it cannot enforce
+  that boundary. See [SECURITY.md](SECURITY.md).
 
 The agent gets the usage rules from the server itself, so there is nothing here
 you have to teach it.
@@ -37,10 +40,12 @@ per runner, the run lifecycle, and the MCP tool reference.
 
 ## Security
 
-Tasks and shell commands run with your privileges and without a sandbox: trust
-a selected task the way you trust the project's build scripts. The only
-server-side authorization mechanism is runner permission declarations and
-modes. Runner modes reduce the task surface but do not isolate it.
+By default, tasks and shell commands run with your privileges and unrestricted
+filesystem access: trust a selected task the way you trust the project's build
+scripts. An optional macOS-only write scope can restrict one run's process tree,
+but it is not isolation. The only server-side authorization mechanism is runner
+permission declarations and modes. Runner modes reduce the task surface but do
+not isolate it.
 `define_shell_block`, `run_shell_command`, and `start_shell_command` are
 unrestricted escape hatches that bypass that mechanism; a task withheld by a
 runner mode must not be recreated through them or another shell path. Discovery
@@ -105,8 +110,9 @@ shell.
 A Git repository or linked worktree exposes `agent:codex` and `agent:claude`
 when their respective CLIs are available. `safe` is the default mode and exposes
 only those fixed tasks; its only alternative is `disabled`, which exposes none.
-The launched coding agent is not sandboxed and runs in the checkout with the
-operator's permissions. See [SECURITY.md](SECURITY.md) for the trust boundary.
+Without a per-launch write scope, the coding agent runs in the checkout with the
+operator's permissions and unrestricted filesystem access. See
+[SECURITY.md](SECURITY.md) for the optional write boundary and its limits.
 
 ## Set it up
 

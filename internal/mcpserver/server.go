@@ -34,6 +34,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/updatecheck"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
+	"github.com/palchukovsky/just-mcp-work/internal/writescope"
 )
 
 func listTasksDescription() string {
@@ -929,6 +930,7 @@ type runTaskInput struct {
 	ProjectPath string   `json:"project_path"`
 	TaskID      string   `json:"task_id"`
 	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
+	WriteScope  []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
 	MaxWaitMS   *int64   `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
 	TailBytes   *int64   `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
 }
@@ -950,6 +952,7 @@ type runDetails struct {
 	TaskID              string            `json:"task_id,omitempty"`
 	Args                []string          `json:"args,omitempty"`
 	CWD                 string            `json:"cwd,omitempty"`
+	WriteScope          []string          `json:"write_scope,omitempty"`
 	AIProfile           aiprofile.Profile `json:"ai_profile"`
 	PID                 int               `json:"pid,omitempty"`
 	OwnerPID            int               `json:"owner_pid,omitempty"`
@@ -982,6 +985,9 @@ func (s *Server) runTask(
 	if err := validateTailBytes(input.TailBytes); err != nil {
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
+	if err := s.validateWriteScope(input.WriteScope); err != nil {
+		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+	}
 	run, stats, output := s.startTaskRun(ctx, input)
 	if run == nil {
 		return mcpErrorFor(output), output, nil
@@ -993,6 +999,7 @@ type startTaskInput struct {
 	ProjectPath string   `json:"project_path"`
 	TaskID      string   `json:"task_id"`
 	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
+	WriteScope  []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
 }
 
 func (s *Server) startTask(
@@ -1000,10 +1007,14 @@ func (s *Server) startTask(
 	_ *mcp.CallToolRequest,
 	input startTaskInput,
 ) (*mcp.CallToolResult, runTaskOutput, error) {
+	if err := s.validateWriteScope(input.WriteScope); err != nil {
+		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+	}
 	run, stats, output := s.startTaskRun(ctx, runTaskInput{
 		ProjectPath: input.ProjectPath,
 		TaskID:      input.TaskID,
 		Arguments:   input.Arguments,
+		WriteScope:  input.WriteScope,
 	})
 	if run == nil {
 		return mcpErrorFor(output), output, nil
@@ -1011,6 +1022,17 @@ func (s *Server) startTask(
 	return nil, s.runningReceipt(run, stats, false), nil
 }
 
+func (s *Server) validateWriteScope(declared []string) error {
+	if declared == nil {
+		return nil
+	}
+	if _, err := writescope.Resolve(s.store.WorktreeRoot(), declared, nil); err != nil {
+		return fmt.Errorf("validate write_scope: %w", err)
+	}
+	return nil
+}
+
+//nolint:gocyclo // The task launch sequence keeps each rejection path explicit.
 func (s *Server) startTaskRun(
 	ctx context.Context,
 	input runTaskInput,
@@ -1071,6 +1093,14 @@ func (s *Server) startTaskRun(
 			return nil, stats, receiptForHandle(handle, s.reject(handle, validationErr))
 		}
 	}
+	provider, providesWriteScope := candidate.(runner.WriteScopeProvider)
+	var runnerWriteScope []string
+	if providesWriteScope && input.WriteScope != nil {
+		runnerWriteScope, err = provider.TaskWriteScope(task)
+		if err != nil {
+			return nil, stats, receiptForHandle(handle, s.reject(handle, err))
+		}
+	}
 	if versionProvider, ok := candidate.(runner.VersionProvider); ok {
 		if runnerVersion, versionErr := versionProvider.RunnerVersion(ctx); versionErr == nil {
 			handle.Meta.RunnerVersion = runnerVersion
@@ -1082,11 +1112,21 @@ func (s *Server) startTaskRun(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, stats, receiptForHandle(handle, s.cancel(handle, ctxErr))
 	}
-	cmd, err := candidate.BuildCommand(context.Background(), project.Dir, task, input.Arguments)
+	var cmd *exec.Cmd
+	if providesWriteScope && input.WriteScope != nil {
+		cmd, err = provider.BuildScopedCommand(
+			context.Background(),
+			project.Dir,
+			task,
+			input.Arguments,
+		)
+	} else {
+		cmd, err = candidate.BuildCommand(context.Background(), project.Dir, task, input.Arguments)
+	}
 	if err != nil {
 		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
-	return s.startRun(handle, cmd, stats)
+	return s.startRun(handle, cmd, stats, input.WriteScope, runnerWriteScope)
 }
 
 var parameterAssignmentPrefix = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*=`)
@@ -1126,11 +1166,12 @@ func validatePositionalTaskArguments(task runner.Task, arguments []string) error
 
 //nolint:govet // Field order follows the MCP request shape.
 type runShellCommandInput struct {
-	Command          string `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
-	BlockID          string `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
-	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"directory; default ."`
-	MaxWaitMS        *int64 `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
-	TailBytes        *int64 `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
+	Command          string   `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
+	BlockID          string   `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
+	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"directory; default ."`
+	WriteScope       []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
+	MaxWaitMS        *int64   `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
+	TailBytes        *int64   `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
 }
 
 func (s *Server) runShellCommand(
@@ -1143,6 +1184,9 @@ func (s *Server) runShellCommand(
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
 	if err = validateTailBytes(input.TailBytes); err != nil {
+		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+	}
+	if err = s.validateWriteScope(input.WriteScope); err != nil {
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
 	command, workingDirectory, err := s.resolveShellCommand(
@@ -1166,9 +1210,10 @@ func (s *Server) runShellCommand(
 }
 
 type startShellCommandInput struct {
-	Command          string `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
-	BlockID          string `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
-	WorkingDirectory string `json:"working_directory,omitempty" jsonschema:"directory; default ."`
+	Command          string   `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
+	BlockID          string   `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
+	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"directory; default ."`
+	WriteScope       []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
 }
 
 func (s *Server) startShellCommand(
@@ -1176,6 +1221,9 @@ func (s *Server) startShellCommand(
 	_ *mcp.CallToolRequest,
 	input startShellCommandInput,
 ) (*mcp.CallToolResult, runTaskOutput, error) {
+	if err := s.validateWriteScope(input.WriteScope); err != nil {
+		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+	}
 	command, workingDirectory, err := s.resolveShellCommand(
 		input.Command,
 		input.BlockID,
@@ -1190,6 +1238,7 @@ func (s *Server) startShellCommand(
 	run, stats, output := s.startShellRun(ctx, runShellCommandInput{
 		Command:          command,
 		WorkingDirectory: workingDirectory,
+		WriteScope:       input.WriteScope,
 	})
 	if run == nil {
 		return mcpErrorFor(output), output, nil
@@ -1236,7 +1285,7 @@ func (s *Server) startShellRun(
 	if err != nil {
 		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
-	return s.startRun(handle, cmd, stats)
+	return s.startRun(handle, cmd, stats, input.WriteScope, nil)
 }
 
 func (s *Server) configureTaskTimeout(meta *runstore.Meta) {
@@ -1251,7 +1300,25 @@ func (s *Server) startRun(
 	handle *runstore.Handle,
 	cmd *exec.Cmd,
 	stats *runstats.Stats,
+	declaredWriteScope []string,
+	runnerWriteScope []string,
 ) (*executor.Run, *runstats.Stats, runTaskOutput) {
+	if declaredWriteScope != nil {
+		extra := make([]string, 1, len(runnerWriteScope)+1)
+		extra[0] = os.TempDir()
+		extra = append(extra, runnerWriteScope...)
+		scope, err := writescope.Resolve(handle.WorktreeRoot(), declaredWriteScope, extra)
+		if err != nil {
+			return nil, stats, receiptForHandle(handle, s.reject(handle, err))
+		}
+		handle.Meta.WriteScope = scope.Roots()
+		if err := handle.PersistRunning(); err != nil {
+			return nil, stats, receiptForHandle(handle, s.reject(handle, err))
+		}
+		if err := writescope.Wrap(cmd, scope); err != nil {
+			return nil, stats, receiptForHandle(handle, s.reject(handle, err))
+		}
+	}
 	if err := s.manager.Reserve(handle.Meta.RunID); err != nil {
 		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
@@ -1374,6 +1441,7 @@ func (s *Server) finishedReceipt(
 	}
 	meta := run.Meta()
 	details := receiptDetails(s.store.WorktreeRoot(), meta.AIProfile, stats)
+	details.WriteScope = append([]string(nil), meta.WriteScope...)
 	details.StdoutBytes = meta.StdoutBytes
 	details.StderrBytes = meta.StderrBytes
 	return runTaskOutput{
@@ -1413,9 +1481,11 @@ func (s *Server) attachTails(result *executor.Result, tailBytes int64) {
 }
 
 func receiptForHandle(handle *runstore.Handle, result executor.Result) runTaskOutput {
+	details := receiptDetails(handle.WorktreeRoot(), handle.Meta.AIProfile, nil)
+	details.WriteScope = append([]string(nil), handle.Meta.WriteScope...)
 	return runTaskOutput{
 		Result:     result,
-		runDetails: receiptDetails(handle.WorktreeRoot(), handle.Meta.AIProfile, nil),
+		runDetails: details,
 	}
 }
 
@@ -1440,13 +1510,16 @@ func (s *Server) runningReceipt(
 	details, err := s.detailsFor(result.RunID, stats)
 	if err != nil {
 		s.config.Logger.Warn("read running task status failed", "run_id", result.RunID, "error", err)
+		meta := run.Meta()
+		fallbackDetails := receiptDetails(
+			s.store.WorktreeRoot(),
+			meta.AIProfile,
+			nil,
+		)
+		fallbackDetails.WriteScope = append([]string(nil), meta.WriteScope...)
 		return runTaskOutput{
-			Result: result,
-			runDetails: receiptDetails(
-				s.store.WorktreeRoot(),
-				run.Meta().AIProfile,
-				nil,
-			),
+			Result:     result,
+			runDetails: fallbackDetails,
 		}
 	}
 	if result.Status == runstore.StatusRunning {
@@ -2024,6 +2097,7 @@ func (s *Server) runDetails(meta runstore.Meta, predicted *runstats.Stats) (*run
 		TaskID:          meta.TaskID,
 		Args:            meta.Args,
 		CWD:             meta.CWD,
+		WriteScope:      append([]string(nil), meta.WriteScope...),
 		AIProfile:       meta.AIProfile,
 		PID:             meta.PID,
 		OwnerPID:        meta.OwnerPID,

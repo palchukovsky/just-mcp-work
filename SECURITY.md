@@ -10,10 +10,11 @@ jmw runs tasks addressed as `<runner>:<task>` (for example, `just:build`). Just,
 Make, CMake, and Docker tasks come from project recipes, targets, presets,
 Dockerfiles, and Compose manifests. Go tasks are synthesized by jmw from a
 fixed command table when it finds a regular `go.mod`. Agent tasks launch a CLI
-coding agent, which then runs unsandboxed, with the operator's own permissions,
-in the checkout. jmw fixes the command shape and argument surface apart from
-the caller-supplied prompt that becomes the agent's instructions; it does not
-constrain what the launched agent then does.
+coding agent with the operator's own permissions in the checkout. jmw fixes the
+command shape and argument surface apart from the caller-supplied prompt that
+becomes the agent's instructions. A per-launch `write_scope` can constrain
+filesystem writes as described below; without one, jmw does not constrain what
+the launched agent then does.
 
 ## Runner authorization
 
@@ -82,8 +83,11 @@ agent's instructions and is placed after literal `--`; a flag-shaped prompt is
 accepted. `model` is free-form, but may not have surrounding whitespace or
 start with `-`; only `effort` is restricted to a fixed vocabulary. The binary
 and flag skeleton are fixed, but this is not an isolation boundary: the launched
-agent inherits the operator's permissions in the checkout. Disabled does not
-construct the agent runner, so it discovers and runs nothing.
+agent inherits the operator's permissions in the checkout. A per-launch
+`write_scope` can add the write boundary described below independently of the
+runner mode. A scoped Codex launch uses `--sandbox danger-full-access` for the
+macOS compatibility described below. Disabled does not construct the agent
+runner, so it discovers and runs nothing.
 
 ### Unreviewed runners
 
@@ -142,14 +146,90 @@ withheld task through a shell does not apply to it. Run it the way you run any
 other command that has no task - through the shell tools or your own terminal -
 and trust it exactly as much as you trust the rest of that Makefile.
 
+## Write scope
+
+`run_task`, `start_task`, `run_shell_command`, and `start_shell_command` accept
+an optional `write_scope`: paths relative to the server's worktree root, the
+same root returned as `worktree_root` and used by `project_path` and
+`working_directory`. The scope belongs to that launch. It may accompany a
+`block_id`; `define_shell_block` does not store one. Omitting it or sending
+`null` preserves the unrestricted behavior and adds no receipt or metadata
+field.
+
+JMW rejects an empty list, an absolute or blank entry, an entry that escapes
+through `..`, one whose existing prefix resolves through a symlink outside the
+root, or a declared path whose final component is itself a symbolic link. A
+symbolic-link path must be replaced by its target in the declaration. These are
+MCP errors before a run is recorded or started. JMW adds the process temporary
+directory (`TMPDIR` when set, otherwise `/tmp`) to accepted scopes. For
+`agent:codex` it also adds `CODEX_HOME`, or `~/.codex` when unset; for
+`agent:claude` it adds `CLAUDE_CONFIG_DIR`, or `~/.claude` when unset. A
+temporary or agent state path whose final component is a symbolic link is
+refused as `spawn_error`. The scope is also refused if either added path
+contains or equals a declared path. The effective list has symlinks resolved
+and contained paths folded. It is returned as `write_scope` in the receipt,
+persisted in `meta.json`, and is exactly what the OS enforces.
+
+On macOS, JMW starts the run under `/usr/bin/sandbox-exec` with a profile that
+denies every file write outside the effective paths, except writes to
+`/dev/null`, `/dev/zero`, `/dev/stdout`, `/dev/stderr`, and numbered inherited
+descriptors under `/dev/fd/<number>`. The kernel rejects an out-of-scope write
+when it is attempted with `Operation not permitted`, and the file is never
+created. Every descendant process inherits the restriction, including a
+background child that detaches and outlives its parent. Writes through an
+in-scope symlink to an outside target and renames from inside to outside are
+also rejected.
+
+On every other OS, or when `/usr/bin/sandbox-exec` is missing, a scoped run is
+refused with `spawn_error` and never starts. There is no degraded mode.
+
+macOS does not allow a sandboxed process to apply a second sandbox. Codex
+normally sandboxes the commands it runs, so `agent:codex` launched with a
+`write_scope` receives `--sandbox danger-full-access`. Codex's own sandbox is
+then off and JMW's profile is the only write boundary. JMW adds that flag only
+together with a successfully established JMW boundary, never for an unscoped
+launch. Codex's other default restrictions, including its network restriction,
+do not apply to the scoped run. The `agent:claude` command is unchanged. An
+agent configured to apply its own macOS sandbox, such as Claude Code with its
+sandbox enabled, cannot run under a JMW write scope.
+
+The boundary deliberately does not cover these cases:
+
+- Reads, network access, and process execution remain unrestricted. This is a
+  write boundary, not isolation.
+- Only the run's process tree is constrained. The calling client, its MCP
+  servers, daemons such as Docker, and already-running services are outside the
+  boundary. Handing work to one of them can cause writes outside the scope.
+- Tool caches outside the effective list are not writable. This includes a Go
+  build or module cache. A direct write to `/tmp` is writable when `TMPDIR` is
+  unset, but not when `TMPDIR` names a different directory. Build, test, and
+  lint gates normally run without `write_scope`.
+- A hard link created before the run by a process outside the boundary can give
+  an in-scope name to an outside file. The run can then change that file's
+  content through the in-scope name. The scoped run cannot create such a link
+  itself because linking to the outside file is refused.
+- A scoped run starts through SIP-protected `/usr/bin/sandbox-exec`, so macOS
+  removes `DYLD_*` variables before the task starts. Shell-tool runs through a
+  SIP-protected system shell such as `/bin/sh` or `/bin/zsh` already lose them.
+  A directly launched task program loses them only when the run is scoped.
+- Git writes repository metadata. In a linked worktree, the main repository's
+  common Git directory may be outside the server's worktree root and therefore
+  cannot be declared. Git operations that write the index or history then fail
+  under a scope.
+- The scope is opt-in and per call. It restrains only a caller that requests it,
+  such as an orchestrator bounding the executor it launches. A caller can omit
+  it, so it is not an authorization policy.
+
+This write boundary is not a substitute for the isolation described in
+[If you need real isolation](#if-you-need-real-isolation).
+
 ## What jmw does NOT do
 
-jmw does **not** sandbox execution. No runner mode provides isolation. A task or
-shell command, once invoked, runs as a child process with the same privileges,
-filesystem access, and environment as the jmw process itself. It can read and
-write anywhere that process can, open network connections, and spawn further
-processes - whatever the task definition, synthesized command, or command text
-tells it to.
+No runner mode provides isolation. Without `write_scope`, a task or shell
+command runs as a child process with the same privileges, filesystem access,
+and environment as the jmw process itself. It can read and write anywhere that
+process can, open network connections, and spawn further processes - whatever
+the task definition, synthesized command, or command text tells it to.
 
 A task file (justfile, Makefile, Dockerfile, Compose manifest, …) is code.
 Pointing jmw at a project is the same act as running that project's build
@@ -195,9 +275,8 @@ secrets a task echoed.
 ## If you need real isolation
 
 Run jmw inside a container, devcontainer, or VM. jmw is designed to compose
-with that boundary - it relies on the surrounding environment for containment
-rather than trying to be a sandbox itself. If a task must not touch your
-host, put jmw somewhere that task cannot reach the host.
+with that boundary. Its optional write scope is not isolation. If a task must
+not touch your host, put jmw somewhere that task cannot reach the host.
 
 ## Reporting a vulnerability
 

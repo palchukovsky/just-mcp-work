@@ -26,12 +26,15 @@ const (
 )
 
 type taskSpec struct {
-	id          string
-	binary      string
-	name        string
-	description string
-	argv        []string
-	params      []taskParam
+	id               string
+	binary           string
+	stateDir         string
+	stateDirEnv      string
+	name             string
+	description      string
+	argv             []string
+	scopedArgvPrefix []string
+	params           []taskParam
 }
 
 type taskParam struct {
@@ -64,11 +67,14 @@ func taskSpecs(codexBinary, claudeBinary string) []taskSpec {
 	claudeEfforts := []string{"low", "medium", "high", "xhigh", "max"}
 	return []taskSpec{
 		{
-			id:          "codex",
-			binary:      codexBinary,
-			name:        "codex",
-			description: "Run Codex with a prompt in this checkout.",
-			argv:        []string{"exec"},
+			id:               "codex",
+			binary:           codexBinary,
+			stateDir:         ".codex",
+			stateDirEnv:      "CODEX_HOME",
+			name:             "codex",
+			description:      "Run Codex with a prompt in this checkout.",
+			argv:             []string{"exec"},
+			scopedArgvPrefix: []string{"--sandbox", "danger-full-access"},
 			params: []taskParam{
 				{Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"}},
 				{Param: runner.Param{Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model"}, argv: []string{"-m", "<model>"}},
@@ -78,6 +84,8 @@ func taskSpecs(codexBinary, claudeBinary string) []taskSpec {
 		{
 			id:          "claude",
 			binary:      claudeBinary,
+			stateDir:    ".claude",
+			stateDirEnv: "CLAUDE_CONFIG_DIR",
 			name:        "claude",
 			description: "Run Claude with a prompt in this checkout.",
 			argv:        []string{"-p"},
@@ -160,9 +168,32 @@ func (r *Runner) BuildCommand(
 	task runner.Task,
 	args []string,
 ) (*exec.Cmd, error) {
+	return r.buildCommand(ctx, projectDir, task, args, false)
+}
+
+// BuildScopedCommand builds an agent command for JMW to wrap in a write boundary.
+func (r *Runner) BuildScopedCommand(
+	ctx context.Context,
+	projectDir string,
+	task runner.Task,
+	args []string,
+) (*exec.Cmd, error) {
+	return r.buildCommand(ctx, projectDir, task, args, true)
+}
+
+func (r *Runner) buildCommand(
+	ctx context.Context,
+	projectDir string,
+	task runner.Task,
+	args []string,
+	scoped bool,
+) (*exec.Cmd, error) {
 	spec, argv, err := r.commandArgs(task, args)
 	if err != nil {
 		return nil, err
+	}
+	if scoped {
+		argv = slices.Insert(argv, len(spec.argv), spec.scopedArgvPrefix...)
 	}
 	detected, err := r.Detect(projectDir)
 	if err != nil {
@@ -175,6 +206,22 @@ func (r *Runner) BuildCommand(
 	cmd := exec.CommandContext(ctx, spec.binary, argv...)
 	cmd.Dir = projectDir
 	return cmd, nil
+}
+
+// TaskWriteScope reports the CLI state directory required by task.
+func (r *Runner) TaskWriteScope(task runner.Task) ([]string, error) {
+	spec, err := r.taskSpecFor(task)
+	if err != nil {
+		return nil, err
+	}
+	if override := os.Getenv(spec.stateDirEnv); override != "" {
+		return []string{override}, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve user home directory for task %q: %w", task.ID, err)
+	}
+	return []string{filepath.Join(home, spec.stateDir)}, nil
 }
 
 func (r *Runner) ValidateTaskInput(task runner.Task, args []string) error {
@@ -268,13 +315,15 @@ func canonicalTask(spec taskSpec) runner.Task {
 	}
 }
 
+//nolint:gocyclo // Direct validation keeps the fixed task table requirements together.
 func validateTaskSpecs(specs []taskSpec) error {
 	if len(specs) == 0 {
 		return fmt.Errorf("agent command table must not be empty")
 	}
 	seen := make(map[string]struct{}, len(specs))
 	for _, spec := range specs {
-		if spec.id == "" || spec.binary == "" || spec.name == "" || spec.description == "" {
+		if spec.id == "" || spec.binary == "" || spec.stateDir == "" || spec.stateDirEnv == "" ||
+			spec.name == "" || spec.description == "" {
 			return fmt.Errorf("agent command table contains an incomplete task")
 		}
 		if _, duplicate := seen[spec.id]; duplicate {
@@ -301,6 +350,7 @@ func cloneTaskSpecs(specs []taskSpec) []taskSpec {
 	for index, spec := range specs {
 		cloned[index] = spec
 		cloned[index].argv = slices.Clone(spec.argv)
+		cloned[index].scopedArgvPrefix = slices.Clone(spec.scopedArgvPrefix)
 		cloned[index].params = make([]taskParam, len(spec.params))
 		for paramIndex, param := range spec.params {
 			cloned[index].params[paramIndex] = param

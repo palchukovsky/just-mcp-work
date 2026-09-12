@@ -2054,6 +2054,9 @@ func TestPromptDelimitsAGuidePathContainingSpaces(t *testing.T) {
 func TestPromptReferenceCarriesMovedToolDetails(t *testing.T) {
 	flat := strings.Join(strings.Fields(promptText), " ")
 	for _, expected := range []string{
+		"write_scope on run_task, start_task, run_shell_command, and start_shell_command restricts a run's writes to listed paths relative to worktree_root;",
+		"omitted leaves it unrestricted, empty errors; JMW adds the temp directory and, for agent tasks, the agent state directory,",
+		"returns effective list as write_scope in receipt; macOS only, elsewhere scoped runs are refused.",
 		"returned rel_path as project_path for task tools",
 		"first 160 runes of the first description line",
 		"drops runner metadata and run statistics",

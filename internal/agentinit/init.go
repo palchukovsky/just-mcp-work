@@ -152,6 +152,12 @@ Task and shell execution
 - working_directory is workspace-relative and defaults to the workspace root.
 
 Run data
+- write_scope on run_task, start_task, run_shell_command, and
+  start_shell_command restricts a run's writes to listed paths relative to
+  worktree_root; omitted leaves it unrestricted, empty errors; JMW adds the
+  temp directory and, for agent tasks, the agent state directory, returns
+  effective list as write_scope in receipt; macOS only, elsewhere scoped
+  runs are refused.
 - tail_bytes is bytes from each stream's end. On run_task and run_shell_command,
   omit it to leave a completed receipt unchanged; 0 disables tails; 1..65536
   requests that tail. get_run_status, wait_run, and stop_run default to 4096;

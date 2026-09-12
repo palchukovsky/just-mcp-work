@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -31,10 +32,12 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/executor"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
+	agentrunner "github.com/palchukovsky/just-mcp-work/internal/runner/agent"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 	"github.com/palchukovsky/just-mcp-work/internal/updatecheck"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
+	"github.com/palchukovsky/just-mcp-work/internal/writescope"
 )
 
 // TestRunShellCommandDescriptionNamesItsAlternatives keeps the tool description
@@ -110,8 +113,35 @@ func TestRegisteredToolContextBudget(t *testing.T) {
 	if descriptionBytes > 2200 {
 		t.Errorf("tool descriptions = %d bytes, want at most 2200", descriptionBytes)
 	}
-	if schemaBytes > 4500 {
-		t.Errorf("tool input schemas = %d bytes, want at most 4500", schemaBytes)
+	if schemaBytes > 4800 {
+		t.Errorf("tool input schemas = %d bytes, want at most 4800", schemaBytes)
+	}
+}
+
+func TestRunToolSchemasExposeWriteScope(t *testing.T) {
+	want := map[string]bool{
+		"run_task":            false,
+		"start_task":          false,
+		"run_shell_command":   false,
+		"start_shell_command": false,
+	}
+	for _, tool := range registeredTools(t) {
+		if _, ok := want[tool.Name]; !ok {
+			continue
+		}
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s input schema: %v", tool.Name, err)
+		}
+		if !strings.Contains(string(encoded), `"write_scope"`) {
+			t.Errorf("%s input schema has no write_scope: %s", tool.Name, encoded)
+		}
+		want[tool.Name] = true
+	}
+	for name, found := range want {
+		if !found {
+			t.Errorf("registered tool %s was not checked", name)
+		}
 	}
 }
 
@@ -610,6 +640,482 @@ func TestRunShellCommandFromNonProjectDirectory(t *testing.T) {
 	)
 	if err != nil || rejected.OK || rejected.Status != runstore.StatusSpawnError {
 		t.Fatalf("rejected shell command = %#v, %v", rejected, err)
+	}
+}
+
+//nolint:gocyclo // The integration flow keeps enforcement and published-root assertions together.
+func TestRunShellCommandWriteScopeEnforcesBoundaryAndPublishesRoots(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("write scope enforcement is available only on darwin")
+	}
+	fixtureRoot := t.TempDir()
+	root := filepath.Join(fixtureRoot, "worktree")
+	temporaryRoot := filepath.Join(fixtureRoot, "tmp")
+	for _, path := range []string{filepath.Join(root, ".git"), temporaryRoot} {
+		if err := os.MkdirAll(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", temporaryRoot)
+	allowed := filepath.Join(root, "allowed")
+	if err := os.Mkdir(allowed, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	inside := filepath.Join(allowed, "inside")
+	outside := filepath.Join(root, "outside")
+	command := "printf inside > " + strconv.Quote(inside) +
+		"; printf outside > " + strconv.Quote(outside)
+	server := newShellTestServer(t, root)
+
+	result, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: command, WriteScope: []string{"allowed"}},
+	)
+	if err != nil || result != nil || receipt.OK || receipt.Status != runstore.StatusNonzero {
+		t.Fatalf("scoped shell command = %#v, %#v, %v; want nonzero receipt", result, receipt, err)
+	}
+	if content, readErr := os.ReadFile(inside); readErr != nil || string(content) != "inside" {
+		t.Fatalf("inside write = %q, %v; want inside", content, readErr)
+	}
+	if _, statErr := os.Lstat(outside); !os.IsNotExist(statErr) {
+		t.Fatalf("outside path exists after rejected write: %v", statErr)
+	}
+	scope, err := writescope.Resolve(root, []string{"allowed"}, []string{os.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := scope.Roots()
+	if !slices.Equal(receipt.WriteScope, want) {
+		t.Fatalf("receipt write_scope = %q, want enforced roots %q", receipt.WriteScope, want)
+	}
+	metaPath := filepath.Join(server.store.LogRoot(), receipt.RunID, "meta.json")
+	encodedMeta, err := os.ReadFile(metaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta runstore.Meta
+	if err = json.Unmarshal(encodedMeta, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(meta.WriteScope, want) {
+		t.Fatalf("meta.json write_scope = %q, want enforced roots %q", meta.WriteScope, want)
+	}
+}
+
+func TestRunWithoutWriteScopeKeepsReceiptAndMetadataSilent(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: shellOutputCommand()},
+	)
+	if err != nil || !receipt.OK {
+		t.Fatalf("unrestricted shell command = %#v, %v", receipt, err)
+	}
+	encodedReceipt, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.WriteScope != nil || strings.Contains(string(encodedReceipt), `"write_scope"`) {
+		t.Fatalf("unrestricted receipt publishes write_scope: %s", encodedReceipt)
+	}
+	encodedMeta, err := os.ReadFile(
+		filepath.Join(server.store.LogRoot(), receipt.RunID, "meta.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta runstore.Meta
+	if err = json.Unmarshal(encodedMeta, &meta); err != nil {
+		t.Fatal(err)
+	}
+	if meta.WriteScope != nil || strings.Contains(string(encodedMeta), `"write_scope"`) {
+		t.Fatalf("unrestricted meta.json publishes write_scope: %s", encodedMeta)
+	}
+}
+
+//nolint:gocyclo // One table proves the same JSON distinction across all four run tools.
+func TestExplicitEmptyWriteScopeRejectsBeforeRunStart(t *testing.T) {
+	tests := []struct {
+		call    func(*Server, string) (*mcp.CallToolResult, runTaskOutput, error)
+		name    string
+		payload string
+	}{
+		{
+			name:    "run task",
+			payload: `{"project_path":".","task_id":"missing:task","write_scope":[]}`,
+			call: func(server *Server, payload string) (*mcp.CallToolResult, runTaskOutput, error) {
+				var input runTaskInput
+				if err := json.Unmarshal([]byte(payload), &input); err != nil {
+					return nil, runTaskOutput{}, fmt.Errorf("decode run_task input: %w", err)
+				}
+				if input.WriteScope == nil {
+					return nil, runTaskOutput{}, errors.New("decoded explicit empty write_scope is nil")
+				}
+				return server.runTask(context.Background(), nil, input)
+			},
+		},
+		{
+			name:    "start task",
+			payload: `{"project_path":".","task_id":"missing:task","write_scope":[]}`,
+			call: func(server *Server, payload string) (*mcp.CallToolResult, runTaskOutput, error) {
+				var input startTaskInput
+				if err := json.Unmarshal([]byte(payload), &input); err != nil {
+					return nil, runTaskOutput{}, fmt.Errorf("decode start_task input: %w", err)
+				}
+				if input.WriteScope == nil {
+					return nil, runTaskOutput{}, errors.New("decoded explicit empty write_scope is nil")
+				}
+				return server.startTask(context.Background(), nil, input)
+			},
+		},
+		{
+			name:    "run shell command",
+			payload: `{"command":"touch started","write_scope":[]}`,
+			call: func(server *Server, payload string) (*mcp.CallToolResult, runTaskOutput, error) {
+				var input runShellCommandInput
+				if err := json.Unmarshal([]byte(payload), &input); err != nil {
+					return nil, runTaskOutput{}, fmt.Errorf("decode run_shell_command input: %w", err)
+				}
+				if input.WriteScope == nil {
+					return nil, runTaskOutput{}, errors.New("decoded explicit empty write_scope is nil")
+				}
+				return server.runShellCommand(context.Background(), nil, input)
+			},
+		},
+		{
+			name:    "start shell command",
+			payload: `{"command":"touch started","write_scope":[]}`,
+			call: func(server *Server, payload string) (*mcp.CallToolResult, runTaskOutput, error) {
+				var input startShellCommandInput
+				if err := json.Unmarshal([]byte(payload), &input); err != nil {
+					return nil, runTaskOutput{}, fmt.Errorf("decode start_shell_command input: %w", err)
+				}
+				if input.WriteScope == nil {
+					return nil, runTaskOutput{}, errors.New("decoded explicit empty write_scope is nil")
+				}
+				return server.startShellCommand(context.Background(), nil, input)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			server := newShellTestServer(t, root)
+			result, receipt, err := test.call(server, test.payload)
+			if err != nil || result == nil || !result.IsError || receipt.Error == nil ||
+				!strings.Contains(receipt.Error.Message, "list must not be empty") {
+				t.Fatalf("explicit empty write_scope = %#v, %#v, %v; want MCP empty-list error", result, receipt, err)
+			}
+			if receipt.RunID != "" {
+				t.Fatalf("explicit empty write_scope created run %q", receipt.RunID)
+			}
+			if _, statErr := os.Lstat(filepath.Join(root, "started")); !os.IsNotExist(statErr) {
+				t.Fatalf("explicit empty write_scope started a process: %v", statErr)
+			}
+			runs, listErr := server.store.ListRecent(1)
+			if listErr != nil || len(runs.Runs) != 0 {
+				t.Fatalf("explicit empty write_scope created ledger entries = %#v, %v", runs.Runs, listErr)
+			}
+		})
+	}
+}
+
+func TestEscapingWriteScopeRejectsBeforeRunStart(t *testing.T) {
+	tests := []struct {
+		call func(*Server, string) (*mcp.CallToolResult, runTaskOutput, error)
+		name string
+	}{
+		{
+			name: "run task",
+			call: func(server *Server, _ string) (*mcp.CallToolResult, runTaskOutput, error) {
+				return server.runTask(context.Background(), nil, runTaskInput{
+					ProjectPath: ".",
+					TaskID:      "missing:task",
+					WriteScope:  []string{"../outside"},
+				})
+			},
+		},
+		{
+			name: "start task",
+			call: func(server *Server, _ string) (*mcp.CallToolResult, runTaskOutput, error) {
+				return server.startTask(context.Background(), nil, startTaskInput{
+					ProjectPath: ".",
+					TaskID:      "missing:task",
+					WriteScope:  []string{"../outside"},
+				})
+			},
+		},
+		{
+			name: "run shell command",
+			call: func(server *Server, marker string) (*mcp.CallToolResult, runTaskOutput, error) {
+				return server.runShellCommand(context.Background(), nil, runShellCommandInput{
+					Command:    shellBlockMarkerCommand(marker),
+					WriteScope: []string{"../outside"},
+				})
+			},
+		},
+		{
+			name: "start shell command",
+			call: func(server *Server, marker string) (*mcp.CallToolResult, runTaskOutput, error) {
+				return server.startShellCommand(context.Background(), nil, startShellCommandInput{
+					Command:    shellBlockMarkerCommand(marker),
+					WriteScope: []string{"../outside"},
+				})
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			marker := filepath.Join(root, "started")
+			server := newShellTestServer(t, root)
+			result, receipt, err := test.call(server, marker)
+			if err != nil || result == nil || !result.IsError || receipt.Error == nil ||
+				!strings.Contains(receipt.Error.Message, "escapes the worktree root") {
+				t.Fatalf("escaping write_scope = %#v, %#v, %v; want MCP error", result, receipt, err)
+			}
+			if receipt.RunID != "" {
+				t.Fatalf("escaping write_scope created run %q", receipt.RunID)
+			}
+			if _, statErr := os.Lstat(marker); !os.IsNotExist(statErr) {
+				t.Fatalf("escaping write_scope started a process: %v", statErr)
+			}
+			runs, listErr := server.store.ListRecent(1)
+			if listErr != nil || len(runs.Runs) != 0 {
+				t.Fatalf("escaping write_scope created ledger entries = %#v, %v", runs.Runs, listErr)
+			}
+		})
+	}
+}
+
+func TestScopedRunRejectsSymlinkedTempRoot(t *testing.T) {
+	fixtureRoot := t.TempDir()
+	root := filepath.Join(fixtureRoot, "worktree")
+	allowed := filepath.Join(root, "allowed")
+	temporaryTarget := filepath.Join(fixtureRoot, "real-tmp")
+	if err := os.MkdirAll(allowed, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(temporaryTarget, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	temporaryLink := filepath.Join(fixtureRoot, "tmp-link")
+	if err := os.Symlink(temporaryTarget, temporaryLink); err != nil {
+		t.Skipf("create temporary-directory symlink: %v", err)
+	}
+	t.Setenv("TMPDIR", temporaryLink)
+	server := newShellTestServer(t, root)
+	marker := filepath.Join(allowed, "started")
+
+	result, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: "touch allowed/started", WriteScope: []string{"allowed"}},
+	)
+	if err != nil || result != nil || receipt.Status != runstore.StatusSpawnError ||
+		!strings.Contains(receipt.Message, temporaryLink) ||
+		!strings.Contains(receipt.Message, "is a symbolic link; declare its target instead") {
+		t.Fatalf("scoped run with symlinked TMPDIR = %#v, %#v, %v; want named spawn_error", result, receipt, err)
+	}
+	if _, statErr := os.Lstat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("scoped run with symlinked TMPDIR started a process: %v", statErr)
+	}
+}
+
+func TestScopedRunRejectsTempRootContainingDeclaredPath(t *testing.T) {
+	fixtureRoot := t.TempDir()
+	temporaryRoot := filepath.Join(fixtureRoot, "tmp")
+	root := filepath.Join(temporaryRoot, "wt")
+	allowed := filepath.Join(root, "allowed")
+	if err := os.MkdirAll(allowed, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", temporaryRoot)
+	server := newShellTestServer(t, root)
+	marker := filepath.Join(allowed, "started")
+	resolvedTemporaryRoot, err := filepath.EvalSymlinks(temporaryRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedDeclaredRoot, err := filepath.EvalSymlinks(allowed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: "touch allowed/started", WriteScope: []string{"allowed"}},
+	)
+	if err != nil || result != nil || receipt.Status != runstore.StatusSpawnError ||
+		!strings.Contains(receipt.Message, resolvedTemporaryRoot) ||
+		!strings.Contains(receipt.Message, resolvedDeclaredRoot) ||
+		!strings.Contains(receipt.Message, "contains or equals") {
+		t.Fatalf("scoped run below TMPDIR = %#v, %#v, %v; want named containment spawn_error", result, receipt, err)
+	}
+	if _, statErr := os.Lstat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("scoped run below TMPDIR started a process: %v", statErr)
+	}
+}
+
+//nolint:gocyclo // One integration flow proves the runner-owned path reaches the receipt.
+func TestAgentWriteScopeComesFromRunner(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("write scope enforcement is available only on darwin")
+	}
+	fixtureRoot := t.TempDir()
+	root := filepath.Join(fixtureRoot, "worktree")
+	temporaryRoot := filepath.Join(fixtureRoot, "tmp")
+	agentStateRoot := filepath.Join(fixtureRoot, "codex-home")
+	for _, path := range []string{filepath.Join(root, ".git"), temporaryRoot, agentStateRoot} {
+		if err := os.MkdirAll(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", temporaryRoot)
+	t.Setenv("CODEX_HOME", agentStateRoot)
+	if err := os.Mkdir(filepath.Join(root, "allowed"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	runners, err := runner.NewRegistry(agentrunner.Registration("/usr/bin/false", "/usr/bin/false"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidate, ok := runners.Get("agent")
+	if !ok {
+		t.Fatal("agent runner is absent")
+	}
+	tasks, err := candidate.ListTasks(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var task runner.Task
+	for _, listed := range tasks {
+		if listed.ID == "agent:codex" {
+			task = listed
+			break
+		}
+	}
+	provider, ok := candidate.(runner.WriteScopeProvider)
+	if !ok || task.ID == "" {
+		t.Fatalf("agent runner/task does not expose write scope: %T, %#v", candidate, task)
+	}
+	required, err := provider.TaskWriteScope(task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(workspaceRegistry, runners, store, Config{
+		Timeout:   5 * time.Second,
+		Retention: time.Hour,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, receipt, err := server.startTask(
+		context.Background(),
+		nil,
+		startTaskInput{
+			ProjectPath: ".",
+			TaskID:      task.ID,
+			Arguments:   []string{"prompt"},
+			WriteScope:  []string{"allowed"},
+		},
+	)
+	if err != nil || result != nil || receipt.RunID == "" {
+		t.Fatalf("startTask with runner write scope = %#v, %#v, %v", result, receipt, err)
+	}
+	scope, err := writescope.Resolve(root, []string{"allowed"}, append([]string{os.TempDir()}, required...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := scope.Roots(); !slices.Equal(receipt.WriteScope, want) {
+		t.Fatalf("agent receipt write_scope = %q, want runner-provided roots %q", receipt.WriteScope, want)
+	}
+	_, waited, err := server.waitRun(context.Background(), nil, waitRunInput{RunID: receipt.RunID})
+	if err != nil || waited.Status != runstore.StatusNonzero {
+		t.Fatalf("waitRun for agent fixture = %#v, %v", waited, err)
+	}
+}
+
+func TestTaskRunBuildsScopedCommandOnlyForWriteScope(t *testing.T) {
+	root := t.TempDir()
+	candidate := &scopedCommandTrackingRunner{}
+	server := newRunnerTestServer(t, root, candidate)
+
+	_, _, err := server.runTask(context.Background(), nil, runTaskInput{
+		ProjectPath: ".",
+		TaskID:      "fake:echo",
+		WriteScope:  []string{"."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidate.scopedBuildCalls != 1 || candidate.buildCalls != 0 {
+		t.Fatalf(
+			"scoped launch build calls = scoped %d, unscoped %d; want 1, 0",
+			candidate.scopedBuildCalls,
+			candidate.buildCalls,
+		)
+	}
+
+	_, receipt, err := server.runTask(context.Background(), nil, runTaskInput{
+		ProjectPath: ".",
+		TaskID:      "fake:echo",
+	})
+	if err != nil || !receipt.OK {
+		t.Fatalf("unscoped runTask = %#v, %v", receipt, err)
+	}
+	if candidate.scopedBuildCalls != 1 || candidate.buildCalls != 1 {
+		t.Fatalf(
+			"calls after unscoped launch = scoped %d, unscoped %d; want 1, 1",
+			candidate.scopedBuildCalls,
+			candidate.buildCalls,
+		)
+	}
+}
+
+func TestScopedTaskRunRejectsCommandThatCannotBeWrapped(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("sandbox-exec wrap refusal is available only on darwin")
+	}
+	fixtureRoot := t.TempDir()
+	root := filepath.Join(fixtureRoot, "worktree")
+	temporaryRoot := filepath.Join(fixtureRoot, "tmp")
+	for _, path := range []string{root, temporaryRoot} {
+		if err := os.Mkdir(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", temporaryRoot)
+	marker := filepath.Join(root, "started")
+	candidate := &scopedCommandTrackingRunner{marker: marker}
+	server := newRunnerTestServer(t, root, candidate)
+
+	result, receipt, err := server.runTask(context.Background(), nil, runTaskInput{
+		ProjectPath: ".",
+		TaskID:      "fake:echo",
+		WriteScope:  []string{"."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result != nil || receipt.OK || receipt.Status != runstore.StatusSpawnError ||
+		!strings.Contains(receipt.Message, "already wrapped") {
+		t.Errorf("unwrappable scoped command receipt = %#v, %#v; want spawn_error", result, receipt)
+	}
+	if _, statErr := os.Lstat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("unwrappable scoped command started process; marker error: %v", statErr)
 	}
 }
 
@@ -1357,6 +1863,34 @@ func newShellTestServer(t *testing.T, root string) *Server {
 	return server
 }
 
+func newRunnerTestServer(t *testing.T, root string, candidate runner.Runner) *Server {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(root, "justfile"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runners, err := runner.NewRegistry(testRegistration(candidate))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRegistry, err := workspace.NewRegistry(root, runners, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := runstore.NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server, err := New(workspaceRegistry, runners, store, Config{
+		Timeout:   5 * time.Second,
+		Retention: time.Hour,
+		Logger:    slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
 func TestNewRejectsRunStoreFromAnotherRoot(t *testing.T) {
 	registryRoot := t.TempDir()
 	storeRoot := t.TempDir()
@@ -1702,6 +2236,51 @@ func (handlerRunner) BuildCommand(
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestMCPServerHelperProcess")
 	cmd.Dir = projectDir
 	cmd.Env = append(os.Environ(), "JMW_TEST_HELPER_PROCESS=1")
+	return cmd, nil
+}
+
+type scopedCommandTrackingRunner struct {
+	handlerRunner
+
+	marker           string
+	buildCalls       int
+	scopedBuildCalls int
+}
+
+func (*scopedCommandTrackingRunner) TaskWriteScope(runner.Task) ([]string, error) {
+	return nil, nil
+}
+
+func (candidate *scopedCommandTrackingRunner) BuildCommand(
+	ctx context.Context,
+	projectDir string,
+	task runner.Task,
+	args []string,
+) (*exec.Cmd, error) {
+	candidate.buildCalls++
+	return candidate.handlerRunner.BuildCommand(ctx, projectDir, task, args)
+}
+
+func (candidate *scopedCommandTrackingRunner) BuildScopedCommand(
+	ctx context.Context,
+	projectDir string,
+	task runner.Task,
+	args []string,
+) (*exec.Cmd, error) {
+	candidate.scopedBuildCalls++
+	if candidate.marker == "" {
+		return candidate.handlerRunner.BuildCommand(ctx, projectDir, task, args)
+	}
+	// #nosec G204 -- the executable and arguments are fixed; marker is an isolated test-owned path.
+	cmd := exec.CommandContext(
+		ctx,
+		"/usr/bin/sandbox-exec",
+		"-p",
+		"(version 1)(allow default)",
+		"/usr/bin/touch",
+		candidate.marker,
+	)
+	cmd.Dir = projectDir
 	return cmd, nil
 }
 

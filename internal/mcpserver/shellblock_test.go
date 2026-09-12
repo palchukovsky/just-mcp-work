@@ -109,6 +109,54 @@ func TestShellBlockCanRunTwiceByID(t *testing.T) {
 	}
 }
 
+//nolint:gocyclo // The integration flow keeps scoped and unrestricted launches together.
+func TestShellBlockWriteScopeIsPerLaunch(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("write scope enforcement is available only on darwin")
+	}
+	fixtureRoot := t.TempDir()
+	root := filepath.Join(fixtureRoot, "worktree")
+	temporaryRoot := filepath.Join(fixtureRoot, "tmp")
+	for _, path := range []string{filepath.Join(root, ".git"), temporaryRoot} {
+		if err := os.MkdirAll(path, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("TMPDIR", temporaryRoot)
+	if err := os.Mkdir(filepath.Join(root, "allowed"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	server := newShellTestServer(t, root)
+	command := shellBlockAppendCommand(filepath.Join(root, "allowed", "runs"))
+	block := defineShellBlockForTest(t, server, command, "")
+
+	result, scoped, err := server.startShellCommand(
+		context.Background(),
+		nil,
+		startShellCommandInput{BlockID: block.BlockID, WriteScope: []string{"allowed"}},
+	)
+	if err != nil || result != nil || scoped.RunID == "" || len(scoped.WriteScope) == 0 {
+		t.Fatalf("scoped block launch = %#v, %#v, %v", result, scoped, err)
+	}
+	_, waited, err := server.waitRun(context.Background(), nil, waitRunInput{RunID: scoped.RunID})
+	if err != nil || !waited.OK {
+		t.Fatalf("wait scoped block = %#v, %v", waited, err)
+	}
+
+	_, unrestricted, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{BlockID: block.BlockID},
+	)
+	if err != nil || !unrestricted.OK || unrestricted.WriteScope != nil {
+		t.Fatalf("unrestricted block relaunch = %#v, %v", unrestricted, err)
+	}
+	meta, err := server.store.Get(unrestricted.RunID)
+	if err != nil || meta.WriteScope != nil {
+		t.Fatalf("unrestricted block metadata = %#v, %v", meta, err)
+	}
+}
+
 func TestShellBlockSelectorsRejectBeforeRunStart(t *testing.T) {
 	root := t.TempDir()
 	server := newShellTestServer(t, root)

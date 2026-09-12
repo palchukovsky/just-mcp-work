@@ -95,6 +95,28 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	}
 }
 
+func TestBeginCopiesSliceMetadata(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"argument"}
+	writeScope := []string{"/scope"}
+	handle, err := store.Begin(Meta{Args: args, WriteScope: writeScope})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args[0] = "changed argument"
+	writeScope[0] = "/changed-scope"
+	if got := handle.Meta.Args; len(got) != 1 || got[0] != "argument" {
+		t.Fatalf("handle Args after caller mutation = %q, want independent copy", got)
+	}
+	if got := handle.Meta.WriteScope; len(got) != 1 || got[0] != "/scope" {
+		t.Fatalf("handle WriteScope after caller mutation = %q, want independent copy", got)
+	}
+}
+
 func TestBeginPersistsOnlyCanonicalAIProfile(t *testing.T) {
 	store, err := NewForWorktree(t.TempDir(), t.TempDir())
 	if err != nil {
