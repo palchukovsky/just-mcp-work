@@ -298,8 +298,15 @@ func suppressIncluded(project *Project, included map[includedProject]struct{}) b
 
 // Find discovers projects and looks up one relative project path.
 func (r *Registry) Find(ctx context.Context, relPath string) (Project, error) {
-	if !validRelPath(relPath) {
-		return Project{}, fmt.Errorf("invalid project path %q", relPath)
+	// The rejection carries the whole contract: a caller that sent an absolute
+	// path learns the expected form here instead of looking it up in the guide.
+	if issue := relPathIssue(relPath); issue != "" {
+		return Project{}, fmt.Errorf(
+			"invalid project path %q: %s; project_path is workspace-relative, "+
+				"\".\" is the workspace root, and list_projects returns each rel_path",
+			relPath,
+			issue,
+		)
 	}
 	// Prefer an exact scoped discovery. An including parent outside that scan
 	// base may leave more runners visible than a full-workspace scan does, and a
@@ -369,7 +376,7 @@ func (r *Registry) ResolveDir(relPath string) (string, error) {
 	if relPath == "" {
 		relPath = "."
 	}
-	if !validRelPath(relPath) {
+	if relPathIssue(relPath) != "" {
 		return "", fmt.Errorf("invalid working directory %q", relPath)
 	}
 	path := r.root
@@ -454,15 +461,24 @@ func (p *Project) empty() bool {
 	return len(p.Runners) == 0 && len(p.Errors) == 0 && len(p.Warnings) == 0
 }
 
-func validRelPath(path string) bool {
-	if path == "." {
-		return true
-	}
-	if path == "" || filepath.IsAbs(path) {
-		return false
+// relPathIssue names why path cannot address anything inside the workspace, or
+// returns an empty string when it can. The reason lives next to the rule so a
+// rejection can state it, instead of leaving the caller to guess which half of
+// the contract the path broke.
+func relPathIssue(path string) string {
+	switch {
+	case path == ".":
+		return ""
+	case path == "":
+		return "the path is empty"
+	case filepath.IsAbs(path):
+		return "the path is absolute"
 	}
 	clean := filepath.ToSlash(filepath.Clean(path))
-	return clean != ".." && !strings.HasPrefix(clean, "../")
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "the path leaves the workspace root"
+	}
+	return ""
 }
 
 func (r *Registry) excluded(path string) bool {

@@ -609,9 +609,15 @@ files and the widened selection. Otherwise, plain `init` removes beta feedback
 guidance. Use
 `just-mcp-work init-beta-test --dir "<root>"` to stay in the beta test.
 
-- `unknown project_path` - the path is not a discovered project, or is not
-  workspace-relative. Re-run `list_projects` with a wider `path` or
-  `max_depth`.
+- `invalid project path "..."` - the path is absolute, empty, or leaves the
+  workspace root. The message states the expected form: `project_path` is
+  workspace-relative, `.` is the workspace root, and `list_projects` returns
+  each `rel_path`.
+- `unknown project_path "..."` - the path does not match the `rel_path` of any
+  discovered project as `list_projects` returns it. Another spelling of a real
+  project, such as `./nested` for `nested`, lands here too. Send the `rel_path`
+  verbatim, and re-run `list_projects` with a wider `path` or `max_depth` when
+  the project is absent from the list.
 - `unknown task_id "..." for project "..."` - a wrong ID, or a runner mode
   withheld the task. Check `list_tasks` with `names`, read the project
   warnings, and do not rebuild the task in a shell.

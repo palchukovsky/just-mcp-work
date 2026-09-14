@@ -260,13 +260,47 @@ func TestDiscoverKeepsPartiallyDiscoveredTasks(t *testing.T) {
 	}
 }
 
-func TestFindRejectsPathsOutsideWorkspace(t *testing.T) {
-	registry, err := NewRegistry(t.TempDir(), mustRunnerRegistry(t), nil)
+// TestFindRejectsAndExplainsUnusablePaths keeps the rejection of a path that
+// cannot address a project, and makes it state the contract the path broke: an
+// absolute path is exactly the case that otherwise sends the caller looking for
+// the rule elsewhere.
+func TestFindRejectsAndExplainsUnusablePaths(t *testing.T) {
+	root := t.TempDir()
+	registry, err := NewRegistry(root, mustRunnerRegistry(t), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := registry.Find(context.Background(), "../outside"); err == nil {
-		t.Fatal("Find accepted a path outside the workspace")
+	for _, testCase := range []struct {
+		name   string
+		path   string
+		reason string
+	}{
+		{name: "absolute", path: root, reason: "the path is absolute"},
+		{name: "outside the workspace", path: "../outside", reason: "the path leaves the workspace root"},
+		{name: "empty", path: "", reason: "the path is empty"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, findErr := registry.Find(context.Background(), testCase.path)
+			if findErr == nil {
+				t.Fatalf("Find(%q) was accepted", testCase.path)
+			}
+			for _, expected := range []string{
+				fmt.Sprintf("invalid project path %q", testCase.path),
+				testCase.reason,
+				"project_path is workspace-relative",
+				`"." is the workspace root`,
+				"list_projects returns each rel_path",
+			} {
+				if !strings.Contains(findErr.Error(), expected) {
+					t.Errorf(
+						"Find(%q) error = %v, want it to mention %q",
+						testCase.path,
+						findErr,
+						expected,
+					)
+				}
+			}
+		})
 	}
 }
 

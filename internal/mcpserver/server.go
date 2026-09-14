@@ -460,7 +460,7 @@ const (
 
 //nolint:govet,lll // Field order follows the MCP request shape; the schema help text is one string per field.
 type listTasksInput struct {
-	ProjectPath     string   `json:"project_path"`
+	ProjectPath     string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
 	Runner          string   `json:"runner,omitempty"`
 	Names           []string `json:"names,omitempty"`
 	NamePrefix      string   `json:"name_prefix,omitempty"`
@@ -925,9 +925,9 @@ func singleTaskSelector(names, prefix, query bool) error {
 	return nil
 }
 
-//nolint:govet // Field order follows the MCP request shape.
+//nolint:govet,lll // Field order follows the MCP request shape; the schema help text is one string per field.
 type runTaskInput struct {
-	ProjectPath string   `json:"project_path"`
+	ProjectPath string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
 	TaskID      string   `json:"task_id"`
 	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
 	WriteScope  []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
@@ -995,8 +995,9 @@ func (s *Server) runTask(
 	return nil, s.waitForSyncReceipt(ctx, request, run, stats, wait, input.TailBytes), nil
 }
 
+//nolint:lll // The schema help text is one string per field.
 type startTaskInput struct {
-	ProjectPath string   `json:"project_path"`
+	ProjectPath string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
 	TaskID      string   `json:"task_id"`
 	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
 	WriteScope  []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`

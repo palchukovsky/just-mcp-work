@@ -113,8 +113,14 @@ func TestRegisteredToolContextBudget(t *testing.T) {
 	if descriptionBytes > 2200 {
 		t.Errorf("tool descriptions = %d bytes, want at most 2200", descriptionBytes)
 	}
-	if schemaBytes > 4800 {
-		t.Errorf("tool input schemas = %d bytes, want at most 4800", schemaBytes)
+	// Every session pays for the encoded input schemas of all 14 tools before an
+	// agent asks anything, so this ceiling is a budget, not a high-water mark:
+	// the first multiple of 250 that keeps roughly 250 bytes of headroom over the
+	// current 4981 bytes. Moving it decides what every agent pays in every
+	// session - measure the new total and argue the budget, do not round up to
+	// whatever just failed.
+	if schemaBytes > 5250 {
+		t.Errorf("tool input schemas = %d bytes, want at most 5250", schemaBytes)
 	}
 }
 
@@ -143,6 +149,56 @@ func TestRunToolSchemasExposeWriteScope(t *testing.T) {
 			t.Errorf("registered tool %s was not checked", name)
 		}
 	}
+}
+
+// TestProjectPathSchemaStatesItsFormat keeps the path contract in the schema of
+// every tool that resolves a project, so an absolute path is not the first way
+// an agent learns the parameter is workspace-relative.
+func TestProjectPathSchemaStatesItsFormat(t *testing.T) {
+	descriptions := projectPathSchemaDescriptions(t)
+	for _, name := range []string{"list_tasks", "run_task", "start_task"} {
+		description, ok := descriptions[name]
+		if !ok {
+			t.Fatalf("%s input schema has no project_path property", name)
+		}
+		for _, expected := range []string{"workspace-relative", `"."`, "rel_path", "list_projects"} {
+			if !strings.Contains(description, expected) {
+				t.Errorf(
+					"%s project_path description = %q, want it to mention %q",
+					name,
+					description,
+					expected,
+				)
+			}
+		}
+	}
+}
+
+// projectPathSchemaDescriptions reads the project_path help out of the encoded
+// input schemas, which is the form the client actually receives.
+func projectPathSchemaDescriptions(t *testing.T) map[string]string {
+	t.Helper()
+	descriptions := make(map[string]string)
+	for _, tool := range registeredTools(t) {
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s input schema: %v", tool.Name, err)
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Description string `json:"description"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(encoded, &schema); err != nil {
+			t.Fatalf("decode %s input schema: %v", tool.Name, err)
+		}
+		property, ok := schema.Properties["project_path"]
+		if !ok {
+			continue
+		}
+		descriptions[tool.Name] = property.Description
+	}
+	return descriptions
 }
 
 func registeredToolDescriptions(t *testing.T) map[string]string {

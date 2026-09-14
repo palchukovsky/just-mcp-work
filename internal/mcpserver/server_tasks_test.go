@@ -1157,3 +1157,62 @@ func TestListTasksReportsTheFilterOfAFailedLookup(t *testing.T) {
 		t.Fatalf("applied filter = %#v", output.AppliedFilter)
 	}
 }
+
+// TestListTasksExplainsAnAbsoluteProjectPath keeps the rejection of an absolute
+// project_path self-contained: the answer names the expected form and both ways
+// to obtain one, so the agent does not go looking for the rule in the guide.
+func TestListTasksExplainsAnAbsoluteProjectPath(t *testing.T) {
+	server := newCatalogTestServer(t)
+	result, output, err := server.listTasks(context.Background(), nil, listTasksInput{
+		ProjectPath: server.workspace.Root(),
+	})
+	if err != nil || result == nil || !result.IsError || output.Error == nil {
+		t.Fatalf("list_tasks with an absolute project_path = %#v, %#v, %v", result, output, err)
+	}
+	for _, expected := range []string{
+		"invalid project path",
+		"the path is absolute",
+		"project_path is workspace-relative",
+		`"." is the workspace root`,
+		"list_projects returns each rel_path",
+	} {
+		if !strings.Contains(output.Error.Message, expected) {
+			t.Errorf("error %q does not mention %q", output.Error.Message, expected)
+		}
+	}
+}
+
+// TestListTasksAcceptsWorkspaceRelativeProjectPaths keeps both forms the
+// rejection points at working: "." for the root and a rel_path as list_projects
+// returns it.
+func TestListTasksAcceptsWorkspaceRelativeProjectPaths(t *testing.T) {
+	server := newCatalogTestServer(t)
+	nested := filepath.Join(server.workspace.Root(), "nested")
+	if err := os.MkdirAll(nested, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nested, "justfile"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, projects, err := server.listProjects(context.Background(), nil, listProjectsInput{})
+	if err != nil {
+		t.Fatalf("list_projects = %#v, %v", projects, err)
+	}
+	relPath := ""
+	for _, project := range projects.Projects {
+		if project.RelPath != "." {
+			relPath = project.RelPath
+		}
+	}
+	if relPath == "" {
+		t.Fatalf("list_projects returned no nested project: %#v", projects.Projects)
+	}
+	for _, path := range []string{".", relPath} {
+		result, output, listErr := server.listTasks(context.Background(), nil, listTasksInput{
+			ProjectPath: path,
+		})
+		if listErr != nil || result != nil || output.Error != nil || len(output.Tasks) == 0 {
+			t.Fatalf("list_tasks(%q) = %#v, %#v, %v", path, result, output, listErr)
+		}
+	}
+}
