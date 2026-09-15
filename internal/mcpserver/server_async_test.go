@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/palchukovsky/just-mcp-work/internal/executor"
 	"github.com/palchukovsky/just-mcp-work/internal/runmanager"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 )
@@ -210,6 +211,383 @@ func TestSyncShellTailBytesAcceptsUpperBound(t *testing.T) {
 	if err != nil || result != nil || receipt.Status != runstore.StatusOK {
 		t.Fatalf("tail_bytes=65536 = %#v, %#v, %v, want a completed run", result, receipt, err)
 	}
+}
+
+func TestSyncShellStdoutJSON(t *testing.T) {
+	for _, testCase := range []struct {
+		name           string
+		mode           string
+		stdout         string
+		wantJSON       string
+		wantStdoutTail string
+		tailBytes      *int64
+		wantErrorParts []string
+		wantJSONSet    bool
+	}{
+		{
+			name:           "object with independent tail",
+			mode:           "stdout",
+			stdout:         `{"answer":42}`,
+			wantJSON:       `{"answer":42}`,
+			wantJSONSet:    true,
+			wantStdoutTail: `r":42}`,
+			tailBytes:      int64Pointer(6),
+		},
+		{
+			name:        "array",
+			mode:        "stdout",
+			stdout:      `["one",2,false]`,
+			wantJSON:    `["one",2,false]`,
+			wantJSONSet: true,
+		},
+		{
+			name:        "largest exact integer",
+			mode:        "stdout",
+			stdout:      `{"id":9007199254740992}`,
+			wantJSON:    `{"id":9007199254740992}`,
+			wantJSONSet: true,
+		},
+		{
+			name:   "integer beyond the exact float64 range",
+			mode:   "stdout",
+			stdout: `{"id":9007199254740993}`,
+			wantErrorParts: []string{
+				"stdout JSON number at $.id",
+				"float64 round trip",
+				"get_run_logs",
+			},
+		},
+		{
+			name:   "integer beyond int64",
+			mode:   "stdout",
+			stdout: `{"id":99999999999999999999}`,
+			wantErrorParts: []string{
+				"stdout JSON number at $.id",
+				"get_run_logs",
+			},
+		},
+		{
+			name:   "nested inexact integer names its path",
+			mode:   "stdout",
+			stdout: `{"rows":[{"ok":1},{"id":9007199254740993}]}`,
+			wantErrorParts: []string{
+				"stdout JSON number at $.rows[1].id",
+			},
+		},
+		{
+			name:        "null",
+			mode:        "stdout",
+			stdout:      "null",
+			wantJSON:    "null",
+			wantJSONSet: true,
+		},
+		{
+			name:           "invalid",
+			mode:           "stdout",
+			stdout:         "not JSON",
+			wantErrorParts: []string{"parse stdout as JSON:", "invalid character"},
+		},
+		{
+			name:           "trailing value",
+			mode:           "stdout",
+			stdout:         `{"answer":42} false`,
+			wantErrorParts: []string{"parse stdout as JSON:", "multiple JSON values"},
+		},
+		{
+			name:           "invalid UTF-8",
+			mode:           "invalid-utf8",
+			wantErrorParts: []string{"parse stdout as JSON:", "not valid UTF-8"},
+		},
+		{
+			name: "oversize",
+			mode: "oversize",
+			wantErrorParts: []string{
+				strconv.FormatInt(stdoutJSONLimit+1, 10),
+				strconv.FormatInt(stdoutJSONLimit, 10),
+				"get_run_logs",
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			server := newShellTestServer(t, t.TempDir())
+			block := defineArgvShellBlockForTest(t, server, shellArgvHelperBase(testCase.mode), "")
+			arguments := []string(nil)
+			if testCase.mode == "stdout" {
+				arguments = append(shellArgvHelperBase(testCase.mode), testCase.stdout)
+			}
+			_, receipt, err := server.runShellCommand(
+				context.Background(),
+				nil,
+				runShellCommandInput{
+					BlockID:      block.BlockID,
+					Arguments:    arguments,
+					TailBytes:    testCase.tailBytes,
+					StdoutFormat: "json",
+				},
+			)
+			if err != nil || !receipt.OK {
+				t.Fatalf("stdout JSON run = %#v, %v", receipt, err)
+			}
+			if receipt.StdoutTail != testCase.wantStdoutTail {
+				t.Fatalf("stdout tail = %q, want %q", receipt.StdoutTail, testCase.wantStdoutTail)
+			}
+			encodedValue, marshalErr := json.Marshal(receipt.StdoutJSON)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if testCase.wantJSONSet {
+				if receipt.StdoutJSON == nil || string(encodedValue) != testCase.wantJSON ||
+					receipt.StdoutJSONError != "" {
+					t.Fatalf("structured stdout = %s, %q", encodedValue, receipt.StdoutJSONError)
+				}
+			} else {
+				if receipt.StdoutJSON != nil {
+					t.Fatalf("structured stdout = %#v, want unset", receipt.StdoutJSON)
+				}
+				for _, part := range testCase.wantErrorParts {
+					if !strings.Contains(receipt.StdoutJSONError, part) {
+						t.Fatalf("stdout_json_error = %q, want %q", receipt.StdoutJSONError, part)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSyncShellStdoutJSONAcceptsSizeLimit(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	block := defineArgvShellBlockForTest(t, server, shellArgvHelperBase("json-limit"), "")
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{BlockID: block.BlockID, StdoutFormat: "json"},
+	)
+	var value string
+	var ok bool
+	if receipt.StdoutJSON != nil {
+		value, ok = (*receipt.StdoutJSON).(string)
+	}
+	if err != nil || !receipt.OK || receipt.StdoutJSONError != "" || !ok ||
+		len(value) != int(stdoutJSONLimit-2) || receipt.StdoutBytes != stdoutJSONLimit {
+		t.Fatalf("size-limit structured stdout = %T/%d, %#v, %v", receipt.StdoutJSON, len(value), receipt, err)
+	}
+}
+
+func TestSyncShellStdoutJSONIsAbsentFromPromotedReceipt(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	immediate := int64(0)
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{
+			Command:      shellSleepCommand(),
+			MaxWaitMS:    &immediate,
+			StdoutFormat: "json",
+		},
+	)
+	if err != nil || receipt.Status != runstore.StatusRunning || !receipt.Promoted {
+		t.Fatalf("promoted JSON run = %#v, %v", receipt, err)
+	}
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "stdout_json") {
+		t.Fatalf("promoted receipt has structured stdout fields: %s", encoded)
+	}
+	stopRunOrFail(t, server, receipt.RunID)
+}
+
+func TestSyncShellStdoutJSONOnAlreadyCompletedImmediateReceipt(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	run, stats, output := server.startShellRun(
+		context.Background(),
+		runShellCommandInput{
+			Arguments: append(shellArgvHelperBase("stdout"), `{"done":true}`),
+		},
+	)
+	if run == nil || output.Error != nil {
+		t.Fatalf("start terminal receipt fixture = %#v", output)
+	}
+	<-run.Done()
+	receipt := server.shellCommandReceipt(
+		server.waitForSyncReceipt(context.Background(), nil, run, stats, syncWait{}, nil),
+		run.Meta(),
+		"json",
+	)
+	encoded, err := json.Marshal(receipt.StdoutJSON)
+	if err != nil || receipt.Status != runstore.StatusOK || receipt.Promoted ||
+		receipt.StdoutJSON == nil || receipt.StdoutJSONError != "" ||
+		string(encoded) != `{"done":true}` {
+		t.Fatalf("already-completed immediate receipt = %s, %#v, %v", encoded, receipt, err)
+	}
+}
+
+func TestSyncShellStdoutFormatRejectsBeforeRunStart(t *testing.T) {
+	root := t.TempDir()
+	server := newShellTestServer(t, root)
+	marker := filepath.Join(root, "stdout-format-marker")
+	result, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{
+			Command:      shellBlockMarkerCommand(marker),
+			StdoutFormat: "yaml",
+		},
+	)
+	if err != nil || result == nil || !result.IsError || receipt.Error == nil ||
+		receipt.Error.Message != `stdout_format must be omitted or "json"` {
+		t.Fatalf("invalid stdout_format result = %#v, %#v, %v", result, receipt, err)
+	}
+	if receipt.runDetails == nil || receipt.WorktreeRoot != server.store.WorktreeRoot() {
+		t.Fatalf("invalid stdout_format details = %#v", receipt.runDetails)
+	}
+	page, listErr := server.store.ListRecent(1)
+	if listErr != nil || len(page.Runs) != 0 {
+		t.Fatalf("runs after invalid stdout_format = %#v, %v", page, listErr)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("invalid stdout_format started command: %v", statErr)
+	}
+}
+
+// TestSyncShellStdoutJSONFollowsTheTerminalStatus keeps a cancelled or timed-out
+// run from returning a confident stdout_json parsed from whatever reached the
+// log before it stopped, and keeps a nonzero exit - which still printed its
+// whole output - parsed as before.
+func TestSyncShellStdoutJSONFollowsTheTerminalStatus(t *testing.T) {
+	for _, testCase := range []struct {
+		status   runstore.Status
+		wantJSON bool
+	}{
+		{status: runstore.StatusNonzero, wantJSON: true},
+		{status: runstore.StatusCancelled},
+		{status: runstore.StatusTimeout},
+		{status: runstore.StatusSpawnError},
+	} {
+		t.Run(string(testCase.status), func(t *testing.T) {
+			server := newShellTestServer(t, t.TempDir())
+			handle, err := server.store.Begin(runstore.Meta{TaskID: "shell:command"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = handle.Stdout().Write([]byte(`{"complete":true}`)); err != nil {
+				t.Fatal(err)
+			}
+			if err = handle.Finish(testCase.status, 0, "", false, false); err != nil {
+				t.Fatal(err)
+			}
+			receipt := server.shellCommandReceipt(
+				runTaskOutput{
+					Result: executor.Result{RunID: handle.Meta.RunID, Status: testCase.status},
+				},
+				handle.Meta,
+				"json",
+			)
+			if testCase.wantJSON {
+				encoded, marshalErr := json.Marshal(receipt.StdoutJSON)
+				if marshalErr != nil || receipt.StdoutJSON == nil ||
+					string(encoded) != `{"complete":true}` || receipt.StdoutJSONError != "" {
+					t.Fatalf("terminal status structured stdout = %s, %q", encoded, receipt.StdoutJSONError)
+				}
+				return
+			}
+			if receipt.StdoutJSON != nil {
+				t.Fatalf("unfinished run structured stdout = %#v, want unset", receipt.StdoutJSON)
+			}
+			for _, part := range []string{string(testCase.status), "get_run_logs"} {
+				if !strings.Contains(receipt.StdoutJSONError, part) {
+					t.Fatalf("stdout_json_error = %q, want %q", receipt.StdoutJSONError, part)
+				}
+			}
+		})
+	}
+}
+
+func TestSyncShellStdoutJSONReportsStoreReadFailure(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	handle, err := server.store.Begin(runstore.Meta{TaskID: "shell:command"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := handle.Stdout().Write([]byte(`{"ok":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := handle.Finish(runstore.StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(server.store.LogRoot(), handle.Meta.RunID, "stdout.log")); err != nil {
+		t.Fatal(err)
+	}
+	output := runShellCommandOutput{}
+	server.attachStdoutJSON(&output, handle.Meta)
+	if output.StdoutJSON != nil ||
+		!strings.Contains(output.StdoutJSONError, "read stdout for JSON:") {
+		t.Fatalf("store read failure = %#v", output)
+	}
+}
+
+//nolint:gocyclo // Both receipt surfaces and false-value omission form one response contract.
+func TestStreamTruncationFlagsReachSyncReceiptAndStatus(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	block := defineArgvShellBlockForTest(t, server, shellArgvHelperBase("truncate"), "")
+	_, receipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{BlockID: block.BlockID},
+	)
+	if err != nil || !receipt.OK || !receipt.StdoutTruncated || !receipt.StderrTruncated {
+		t.Fatalf("truncated synchronous receipt = %#v, %v", receipt, err)
+	}
+	_, status, err := server.getRunStatus(
+		context.Background(),
+		nil,
+		getRunStatusInput{RunID: receipt.RunID},
+	)
+	if err != nil || !status.StdoutTruncated || !status.StderrTruncated {
+		t.Fatalf("truncated status details = %#v, %v", status.runDetails, err)
+	}
+	for name, value := range map[string]any{"receipt": receipt, "status": status} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if !strings.Contains(string(encoded), `"stdout_truncated":true`) ||
+			!strings.Contains(string(encoded), `"stderr_truncated":true`) {
+			t.Fatalf("%s JSON omits truncation flags: %s", name, encoded)
+		}
+	}
+
+	_, shortReceipt, err := server.runShellCommand(
+		context.Background(),
+		nil,
+		runShellCommandInput{Command: shellOutputCommand()},
+	)
+	if err != nil || !shortReceipt.OK {
+		t.Fatalf("short run = %#v, %v", shortReceipt, err)
+	}
+	_, shortStatus, err := server.getRunStatus(
+		context.Background(),
+		nil,
+		getRunStatusInput{RunID: shortReceipt.RunID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]any{"receipt": shortReceipt, "status": shortStatus} {
+		encoded, marshalErr := json.Marshal(value)
+		if marshalErr != nil {
+			t.Fatal(marshalErr)
+		}
+		if strings.Contains(string(encoded), "stdout_truncated") ||
+			strings.Contains(string(encoded), "stderr_truncated") {
+			t.Fatalf("%s JSON has false truncation flags: %s", name, encoded)
+		}
+	}
+}
+
+func int64Pointer(value int64) *int64 {
+	return &value
 }
 
 func TestSyncWaitBounds(t *testing.T) {

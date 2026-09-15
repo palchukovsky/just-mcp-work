@@ -58,17 +58,202 @@ func TestRunShellCommandDescriptionNamesItsAlternatives(t *testing.T) {
 			"Exactly one of command and block_id",
 			"block_id comes from define_shell_block",
 			"working_directory must not accompany block_id",
+			"arguments is the full argv",
+			"starting with the block's own argv",
+			"argv block",
 		} {
 			if !strings.Contains(description, expected) {
 				t.Errorf("%s description does not mention %q", name, expected)
 			}
 		}
 	}
-	for _, expected := range []string{"run_task", "start_task", "promoted: true"} {
+	for _, expected := range []string{
+		"run_task",
+		"start_task",
+		"promoted: true",
+		"do not retry",
+		"stdout_format=json",
+		"stdout_json",
+		"stdout_json_error",
+	} {
 		if !strings.Contains(runShellCommandDescription(), expected) {
 			t.Errorf("run_shell_command description does not mention %q", expected)
 		}
 	}
+}
+
+// TestStructuredStdoutFieldsReachOnlyRunShellCommand keeps stdout_json and
+// stdout_json_error out of the three receipts that can never carry them. Every
+// tools/list ships each output schema, so an unreachable pair of fields is a
+// context cost paid by every client on every session.
+func TestStructuredStdoutFieldsReachOnlyRunShellCommand(t *testing.T) {
+	for _, tool := range registeredTools(t) {
+		wantStructuredStdout, sharesTheReceipt := map[string]bool{
+			"run_shell_command":   true,
+			"start_shell_command": false,
+			"run_task":            false,
+			"start_task":          false,
+		}[tool.Name]
+		if !sharesTheReceipt {
+			continue
+		}
+		encoded, err := json.Marshal(tool.OutputSchema)
+		if err != nil {
+			t.Fatalf("marshal %s output schema: %v", tool.Name, err)
+		}
+		schema := string(encoded)
+		for _, field := range []string{"stdout_json", "stdout_json_error"} {
+			if strings.Contains(schema, field) != wantStructuredStdout {
+				t.Errorf(
+					"%s output schema mentions %q = %v, want %v",
+					tool.Name,
+					field,
+					!wantStructuredStdout,
+					wantStructuredStdout,
+				)
+			}
+		}
+		// The shared receipt must still inline through the embedded type.
+		for _, field := range []string{`"run_id"`, `"status"`, `"stdout_truncated"`} {
+			if !strings.Contains(schema, field) {
+				t.Errorf("%s output schema lost %s: %s", tool.Name, field, schema)
+			}
+		}
+	}
+}
+
+func TestShellToolInputSchemasDescribeArgvFields(t *testing.T) {
+	for _, tool := range registeredTools(t) {
+		expected := map[string][]string{
+			"define_shell_block": {
+				`"argv"`,
+				"exact argv; no shell",
+			},
+			"run_shell_command": {
+				`"arguments"`,
+				"full argv; starts with block argv",
+				`"stdout_format"`,
+				"json or omitted",
+			},
+			"start_shell_command": {
+				`"arguments"`,
+				"full argv; starts with block argv",
+			},
+		}[tool.Name]
+		if expected == nil {
+			continue
+		}
+		encoded, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, part := range expected {
+			if !strings.Contains(string(encoded), part) {
+				t.Errorf("%s input schema does not mention %q: %s", tool.Name, part, encoded)
+			}
+		}
+	}
+}
+
+//nolint:gocyclo // One session keeps the define, run, and exact-log assertions together.
+func TestArgvShellBlockRunsThroughMCPClient(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	withMCPClientSession(t, server, func(session *mcp.ClientSession) {
+		defined, err := session.CallTool(
+			context.Background(),
+			&mcp.CallToolParams{
+				Name: "define_shell_block",
+				Arguments: map[string]any{
+					"argv": shellArgvHelperBase("stdout"),
+				},
+			},
+		)
+		if err != nil {
+			t.Fatalf("define argv shell block through MCP: %v", err)
+		}
+		if defined.IsError {
+			if len(defined.Content) > 0 {
+				if content, ok := defined.Content[0].(*mcp.TextContent); ok {
+					t.Fatalf("define argv shell block through MCP: %s", content.Text)
+				}
+			}
+			t.Fatalf("define argv shell block through MCP = %#v", defined)
+		}
+		definedOutput, ok := defined.StructuredContent.(map[string]any)
+		if !ok {
+			t.Fatalf("define argv shell block structured content = %T", defined.StructuredContent)
+		}
+		blockID, ok := definedOutput["block_id"].(string)
+		if !ok || blockID == "" {
+			t.Fatalf("define argv shell block output = %#v", definedOutput)
+		}
+
+		callRun := func(payload string) map[string]any {
+			t.Helper()
+			run, callErr := session.CallTool(
+				context.Background(),
+				&mcp.CallToolParams{
+					Name: "run_shell_command",
+					Arguments: map[string]any{
+						"block_id":      blockID,
+						"arguments":     append(shellArgvHelperBase("stdout"), payload),
+						"stdout_format": "json",
+					},
+				},
+			)
+			if callErr != nil || run.IsError {
+				t.Fatalf("run argv shell block through MCP = %#v, %v", run, callErr)
+			}
+			output, isMap := run.StructuredContent.(map[string]any)
+			if !isMap || output["status"] != string(runstore.StatusOK) {
+				t.Fatalf("run argv shell block structured content = %#v", run.StructuredContent)
+			}
+			if len(run.Content) == 0 {
+				t.Fatal("run argv shell block returned no text content")
+			}
+			return output
+		}
+
+		// A document the float64 round trip keeps exactly reaches the client as it was printed.
+		exactOutput := callRun(`{"id":42}`)
+		encodedExact, err := json.Marshal(exactOutput["stdout_json"])
+		if err != nil || string(encodedExact) != `{"id":42}` {
+			t.Fatalf("client StructuredContent stdout_json = %s, %v", encodedExact, err)
+		}
+
+		// A token the round trip would round is refused in band instead of arriving rounded.
+		const stdout = `{"id":9007199254740993}`
+		runOutput := callRun(stdout)
+		if value, present := runOutput["stdout_json"]; present {
+			t.Fatalf("client StructuredContent stdout_json = %#v, want it withheld", value)
+		}
+		jsonError, ok := runOutput["stdout_json_error"].(string)
+		if !ok || !strings.Contains(jsonError, "$.id") || !strings.Contains(jsonError, "get_run_logs") {
+			t.Fatalf("client StructuredContent stdout_json_error = %#v", runOutput["stdout_json_error"])
+		}
+
+		runID, ok := runOutput["run_id"].(string)
+		if !ok || runID == "" {
+			t.Fatalf("run argv shell block output = %#v", runOutput)
+		}
+		logs, err := session.CallTool(
+			context.Background(),
+			&mcp.CallToolParams{
+				Name: "get_run_logs",
+				Arguments: map[string]any{
+					"run_id": runID,
+					"stream": "stdout",
+				},
+			},
+		)
+		if err != nil || logs.IsError {
+			t.Fatalf("read argv shell block log through MCP = %#v, %v", logs, err)
+		}
+		logsOutput, ok := logs.StructuredContent.(map[string]any)
+		if !ok || logsOutput["data"] != stdout {
+			t.Fatalf("argv shell block log content = %#v", logs.StructuredContent)
+		}
+	})
 }
 
 func TestTaskDescriptionsRetainTheirSafetyContract(t *testing.T) {
@@ -114,13 +299,14 @@ func TestRegisteredToolContextBudget(t *testing.T) {
 		t.Errorf("tool descriptions = %d bytes, want at most 2200", descriptionBytes)
 	}
 	// Every session pays for the encoded input schemas of all 14 tools before an
-	// agent asks anything, so this ceiling is a budget, not a high-water mark:
-	// the first multiple of 250 that keeps roughly 250 bytes of headroom over the
-	// current 4981 bytes. Moving it decides what every agent pays in every
-	// session - measure the new total and argue the budget, do not round up to
-	// whatever just failed.
-	if schemaBytes > 5250 {
-		t.Errorf("tool input schemas = %d bytes, want at most 5250", schemaBytes)
+	// agent asks anything, so this ceiling is a budget, not a high-water mark.
+	// Set it from the measured total - currently 5295 bytes - by rounding up to
+	// the next multiple of 250, taking one more step when that would leave less
+	// than 100 bytes of headroom. Moving it decides what every agent pays in
+	// every session: measure the new total and argue the budget, do not round up
+	// to whatever just failed.
+	if schemaBytes > 5500 {
+		t.Errorf("tool input schemas = %d bytes, want at most 5500", schemaBytes)
 	}
 }
 
@@ -212,10 +398,23 @@ func registeredToolDescriptions(t *testing.T) map[string]string {
 
 func registeredTools(t *testing.T) []*mcp.Tool {
 	t.Helper()
+	var tools []*mcp.Tool
+	withMCPClientSession(t, newShellTestServer(t, t.TempDir()), func(session *mcp.ClientSession) {
+		listed, err := session.ListTools(context.Background(), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tools = listed.Tools
+	})
+	return tools
+}
+
+func withMCPClientSession(t *testing.T, server *Server, test func(*mcp.ClientSession)) {
+	t.Helper()
 	ctx := context.Background()
-	server := newShellTestServer(t, t.TempDir()).newMCPServer()
+	mcpServer := server.newMCPServer()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	serverSession, err := mcpServer.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,11 +433,7 @@ func registeredTools(t *testing.T) []*mcp.Tool {
 			t.Fatal(closeErr)
 		}
 	}()
-	listed, err := clientSession.ListTools(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return listed.Tools
+	test(clientSession)
 }
 
 // TestListTasksExplainsAnEmptyRunner keeps the reason for a taskless runner in
@@ -837,7 +1032,8 @@ func TestExplicitEmptyWriteScopeRejectsBeforeRunStart(t *testing.T) {
 				if input.WriteScope == nil {
 					return nil, runTaskOutput{}, errors.New("decoded explicit empty write_scope is nil")
 				}
-				return server.runShellCommand(context.Background(), nil, input)
+				result, output, err := server.runShellCommand(context.Background(), nil, input)
+				return result, output.runTaskOutput, err
 			},
 		},
 		{
@@ -906,10 +1102,11 @@ func TestEscapingWriteScopeRejectsBeforeRunStart(t *testing.T) {
 		{
 			name: "run shell command",
 			call: func(server *Server, marker string) (*mcp.CallToolResult, runTaskOutput, error) {
-				return server.runShellCommand(context.Background(), nil, runShellCommandInput{
+				result, output, err := server.runShellCommand(context.Background(), nil, runShellCommandInput{
 					Command:    shellBlockMarkerCommand(marker),
 					WriteScope: []string{"../outside"},
 				})
+				return result, output.runTaskOutput, err
 			},
 		},
 		{

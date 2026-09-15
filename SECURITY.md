@@ -99,9 +99,19 @@ default or `disabled`; their command review is tracked separately.
 
 The `define_shell_block`, `run_shell_command`, and `start_shell_command` tools
 form the shell escape hatch. `define_shell_block` shares the execution tools'
-permission group, so its command text is shown to the operator once, at
-definition; a later `block_id` run presents only the identifier, not the text it
-stands for. They remain available for genuinely ad-hoc commands outside the
+permission group, and a block stores either shell text in `command` or an exact
+`argv`, which executes the named program directly, without a shell. Both kinds
+fix the working directory at definition.
+
+What the operator sees differs between the two calls. At definition they see the
+whole stored block: the shell text, or the argv the block fixes. At run time a
+shell-text block presents only its `block_id`, not the text it stands for. An
+argv block run instead carries the full argv in `arguments`, which the server
+requires to start with the argv the block fixed; the run a client asks for
+therefore always names the program it is about to execute, and the block's own
+elements cannot be replaced by the run that uses it.
+
+These tools remain available for genuinely ad-hoc commands outside the
 discovered or withheld task surfaces. A task may be absent because its runner
 mode withheld it; agents must not recreate or run that task through any of these
 tools or another shell path. Runner selections do not implement a general shell

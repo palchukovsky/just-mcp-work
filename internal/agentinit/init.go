@@ -146,9 +146,15 @@ Task and shell execution
   commands outside discovered or withheld tasks. A task may be absent because the
   operator withheld it through a runner mode. Never recreate or run such a task
   through a shell path.
-- define_shell_block registers a long repeated command under a block_id. Exactly
+- define_shell_block registers either shell text in command or an executable and
+  fixed arguments in argv under a block_id. argv blocks bypass the shell. Exactly
   one of command and block_id selects what run_shell_command or
   start_shell_command runs; working_directory must not accompany block_id.
+- arguments is accepted only with an argv block_id and carries the full argv of
+  that run, starting with the argv the block fixed; omit it to run the block's
+  argv as defined. Each value reaches an ordinary executable without quoting,
+  splitting, expansion, or other shell handling; a Windows batch target - a .bat
+  or .cmd file, cmd.exe, msiexec - parses the command line by its own rules.
 - working_directory is workspace-relative and defaults to the workspace root.
 
 Run data
@@ -162,6 +168,18 @@ Run data
   omit it to leave a completed receipt unchanged; 0 disables tails; 1..65536
   requests that tail. get_run_status, wait_run, and stop_run default to 4096;
   0 disables their tails.
+- run_shell_command stdout_format: json parses stdout up to 65536 bytes into
+  stdout_json after a run that reached the end of its output, status ok or
+  nonzero. Parse, size, or log-read failures set stdout_json_error; a run that
+  ended cancelled, timeout, or spawn_error is not parsed and stdout_json_error
+  names that status; promoted receipts carry neither field.
+- The MCP output schema carries every number as a float64, so JMW withholds
+  stdout_json when a JSON integer outside 2^53 would reach you with different
+  digits, and stdout_json_error names that number's path; use get_run_logs for
+  the exact digits.
+- Completed synchronous receipts and completed status views set
+  stdout_truncated or stderr_truncated when the corresponding in-memory tail
+  exceeded its limit.
 - get_run reads persisted metadata. get_run_logs reads stdout or stderr by raw
   byte offset (default 0), with a default limit of 65536 bytes and a maximum of
   1048576 bytes, as utf8 (default) or base64.

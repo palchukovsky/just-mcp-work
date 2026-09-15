@@ -35,7 +35,8 @@ JMW removes both costs.
   requests one project or one task and gets that, not a catalog.
 - **A receipt instead of a log.** A finished run answers with status, exit
   code, and duration; by default, tails appear only on failure. `tail_bytes`
-  can request them on success. The full `stdout` and `stderr` stay on disk.
+  can request them on success. A synchronous shell run can also parse bounded
+  stdout as structured JSON. The full `stdout` and `stderr` stay on disk.
 - **Background runs.** A slow run is promoted to the background with a `run_id`
   that can be polled, waited on, or stopped, so a check gate never blocks the
   turn.
@@ -377,6 +378,20 @@ normal receipt with an explanation in `message`, not as a tool error.
   `tail_bytes must be between 0 and 65536`. Completed receipts also report
   `stdout_bytes` and `stderr_bytes` for nonempty streams. Compare a returned
   tail's length with its stream's size; if it is smaller, use `get_run_logs`.
+- **Structured synchronous stdout.** `run_shell_command` accepts
+  `stdout_format: "json"`. A run that reached the end of its own output -
+  status `ok` or `nonzero` - parses the whole stdout log when it is at most
+  65536 bytes and returns the value in `stdout_json`. Invalid JSON, an
+  unavailable log, or a larger log instead sets `stdout_json_error`; the size
+  error names the actual size, the limit, and `get_run_logs`. A run that ended
+  `cancelled`, `timeout`, or `spawn_error` holds only what it managed to write
+  before it stopped, so it is not parsed at all and `stdout_json_error` names
+  that status. A promoted receipt has neither field. `stdout_format` does not
+  change `tail_bytes`. The MCP output schema carries every number as a
+  `float64`, so a JSON integer outside ±2^53 would reach you with different
+  digits; JMW withholds `stdout_json` in that case and sets
+  `stdout_json_error` naming the path of the first such number. Read those
+  digits with `get_run_logs`.
 - **Promotion.** `status: running`, `promoted: true`, `run_id`, and up to 4096
   bytes of each tail so far.
 - **Status calls.** `get_run_status`, `wait_run`, and `stop_run` read tails
@@ -389,13 +404,17 @@ normal receipt with an explanation in `message`, not as a tool error.
 Live receipts and status calls carry lifecycle detail worth reading before you
 act: `completed`, `process_alive`, `owned_by_this_server`,
 `last_output_age_ms`, `no_output_yet`, `stdout_bytes`, `stderr_bytes`,
-`task_timeout_ms`, and `time_to_task_timeout_ms`. They also carry `ai_profile`
-with `family`, `profile_id`, `profile_version`, and `transport`. `Store.Begin`
+`task_timeout_ms`, and `time_to_task_timeout_ms`. Completed synchronous
+receipts and completed status views additionally carry `stdout_truncated` and
+`stderr_truncated` when the executor's corresponding fixed in-memory tail
+exceeded its limit. Those flags are independent of requested `tail_bytes` and
+appear only when true. Receipts and status calls also carry `ai_profile` with
+`family`, `profile_id`, `profile_version`, and `transport`. `Store.Begin`
 records the profile in the run ledger, and `get_run` returns that persisted
-value. A completed synchronous receipt keeps `ai_profile` and the nonempty
-stream byte counts, but carries no other lifecycle fields. A gate that has
-printed nothing for minutes and a gate about to hit its timeout look identical
-in `status` alone.
+value. A completed synchronous receipt keeps `ai_profile`, the nonempty stream
+byte counts, and true truncation flags, but carries no other lifecycle fields.
+A gate that has printed nothing for minutes and a gate about to hit its timeout
+look identical in `status` alone.
 
 The `stats` block compares this invocation with its own history. `exact`
 aggregates runs of the same task with the same arguments, `task` aggregates the
@@ -474,16 +493,22 @@ Execution:
 - **`start_task`** - background; returns a `run_id`. Inputs: `project_path`,
   `task_id`, `arguments`, `write_scope`.
 - **`define_shell_block`** - define an ad-hoc shell block for this session.
-  Inputs: `command`, `working_directory`.
+  Inputs: `command`, `argv`, `working_directory`. Exactly one of `command` and
+  `argv` defines shell text or an executable with fixed arguments. An argv
+  block bypasses the shell; its first element must be nonblank. Later empty
+  elements are preserved.
 - **`run_shell_command`** - an ad-hoc command with a receipt. Inputs:
-  `command`, `block_id`, `working_directory`, `write_scope`, `max_wait_ms`,
-  `tail_bytes`. Exactly one of `command` and `block_id` selects the command;
-  `block_id` comes from `define_shell_block`, and `working_directory` must not
-  accompany it.
+  `command`, `block_id`, `arguments`, `working_directory`, `write_scope`,
+  `max_wait_ms`, `tail_bytes`, `stdout_format`. Exactly one of `command` and
+  `block_id` selects the command; `block_id` comes from `define_shell_block`,
+  and `working_directory` must not accompany it. `arguments` is accepted only
+  for an argv block and is appended as exact process arguments.
+  `stdout_format` accepts only `"json"` or omission.
 - **`start_shell_command`** - background; inputs: `command`, `block_id`,
-  `working_directory`, `write_scope`. Exactly one of `command` and `block_id`
-  selects the command; `block_id` comes from `define_shell_block`, and
-  `working_directory` must not accompany it.
+  `arguments`, `working_directory`, `write_scope`. Exactly one of `command` and
+  `block_id` selects the command; `block_id` comes from `define_shell_block`,
+  and `working_directory` must not accompany it. `arguments` has the same argv
+  block-only semantics as the synchronous tool.
 
 Observation:
 
@@ -580,13 +605,23 @@ receipt or a `tail_bytes` output slice is worth more than the full output. Shell
 runs land in the same ledger under the task ID `shell:command`, so `list_runs`
 and `get_run_logs` work on them too. This is for genuinely ad-hoc work, not a
 task hidden by a runner mode; do not edit a build file to expose or recreate
-such a task.
+such a task. Set `stdout_format: "json"` when a synchronous command emits one
+bounded JSON value that you want directly in the receipt.
 
 For a long block you will run more than once in one server session, define it
 once with `define_shell_block` and repeat it by `block_id`; that keeps the
 command text out of each repeat in the transcript. Definition fixes the working
-directory. Blocks live only for that server session, and an unknown `block_id`
-is an error, not a fresh run.
+directory. For repeatable CLI calls, define an argv block and pass the full
+argv in `arguments` whenever a run adds values: it must start with the argv the
+block fixed, and the elements after it are the values that change. Omit
+`arguments` to run the block's argv as defined. Repeating the fixed part is
+deliberate - it keeps the whole command line inside the one call that executes
+it, rather than splitting it between a definition and an opaque `block_id`.
+Each value reaches an ordinary executable unchanged, without a shell; on
+Windows a batch target - a `.bat` or `.cmd` file, `cmd.exe`, `msiexec` -
+parses the command line by its own rules, so a value carrying quotes or spaces
+can arrive there with a different shape. Blocks live only for that server
+session, and an unknown `block_id` is an error, not a fresh run.
 
 **Do not route through JMW** output you must read or quote when it is too large
 for a tail: `git diff`, `git log`, searches, source excerpts, generated reports,

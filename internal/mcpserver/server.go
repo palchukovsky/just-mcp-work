@@ -11,12 +11,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,21 +47,21 @@ func listTasksDescription() string {
 
 // runShellCommandDescription describes the ad-hoc escape hatch of this server.
 func runShellCommandDescription() string {
-	return "Run a genuinely ad-hoc command outside discovered or withheld tasks. A task withheld " +
-		"by the operator through a runner mode must never be recreated or run through this or another " +
-		"shell path. Prefer run_task/start_task for a discovered task and a normal shell when the " +
-		"command's own output is too large for a tail. A running receipt with run_id and promoted: true is " +
-		"normal: follow it; do not retry. Exactly one of command and block_id selects what runs; " +
-		"block_id comes from define_shell_block; working_directory must not accompany block_id."
+	return "Run a genuinely ad-hoc command, never a task withheld by a runner mode through this or " +
+		"another shell path. Prefer run_task/start_task, or a normal shell for output too large for a tail. " +
+		"A running receipt with promoted: true is normal: follow it; do not retry. Exactly one of command " +
+		"and block_id selects what runs; block_id comes from define_shell_block; working_directory must " +
+		"not accompany block_id. arguments is the full argv for an argv block, starting with the block's " +
+		"own argv. stdout_format=json returns stdout_json or stdout_json_error for completed output up " +
+		"to 65536 bytes."
 }
 
 func startShellCommandDescription() string {
-	return "Start a genuinely ad-hoc command outside discovered or withheld tasks asynchronously. " +
-		"A task withheld by the operator through a runner mode must never be recreated or run through " +
-		"this or another shell path. Prefer run_task/start_task for a discovered task and a normal " +
-		"shell when the command's own output is too large for a tail. Exactly one of command and " +
-		"block_id selects what runs; block_id comes from define_shell_block; working_directory " +
-		"must not accompany block_id."
+	return "Start a genuinely ad-hoc command asynchronously, never a task withheld by a runner mode " +
+		"through this or another shell path. Prefer run_task/start_task, or a normal shell for output too " +
+		"large for a tail. Exactly one of command and block_id selects what runs; block_id comes from " +
+		"define_shell_block; working_directory must not accompany block_id. arguments is the full argv " +
+		"for an argv block, starting with the block's own argv."
 }
 
 // Config controls server-side execution defaults.
@@ -965,6 +968,8 @@ type runDetails struct {
 	NoOutputYet         *bool             `json:"no_output_yet,omitempty"`
 	StdoutBytes         int64             `json:"stdout_bytes,omitempty"`
 	StderrBytes         int64             `json:"stderr_bytes,omitempty"`
+	StdoutTruncated     bool              `json:"stdout_truncated,omitempty"`
+	StderrTruncated     bool              `json:"stderr_truncated,omitempty"`
 	TaskTimeoutMS       *int64            `json:"task_timeout_ms,omitempty"`
 	TimeToTaskTimeoutMS *int64            `json:"time_to_task_timeout_ms,omitempty"`
 	TimeoutMS           int64             `json:"timeout_ms,omitempty"`
@@ -1169,50 +1174,104 @@ func validatePositionalTaskArguments(task runner.Task, arguments []string) error
 type runShellCommandInput struct {
 	Command          string   `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
 	BlockID          string   `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
+	Arguments        []string `json:"arguments,omitempty" jsonschema:"full argv; starts with block argv"`
 	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"directory; default ."`
 	WriteScope       []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
 	MaxWaitMS        *int64   `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
 	TailBytes        *int64   `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
+	StdoutFormat     string   `json:"stdout_format,omitempty" jsonschema:"json or omitted"`
+}
+
+// runShellCommandOutput carries the structured stdout fields that only
+// run_shell_command can produce, so the three other run receipts do not ship an
+// unreachable pair of fields in their output schema.
+type runShellCommandOutput struct {
+	runTaskOutput
+	StdoutJSON      *any   `json:"stdout_json,omitempty"`
+	StdoutJSONError string `json:"stdout_json_error,omitempty"`
 }
 
 func (s *Server) runShellCommand(
 	ctx context.Context,
 	request *mcp.CallToolRequest,
 	input runShellCommandInput,
-) (*mcp.CallToolResult, runTaskOutput, error) {
+) (*mcp.CallToolResult, runShellCommandOutput, error) {
 	wait, err := s.syncWaitDuration(input.MaxWaitMS)
 	if err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), shellCommandOutput(runTaskOutput{Error: newToolError(err)}), nil
 	}
 	if err = validateTailBytes(input.TailBytes); err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), shellCommandOutput(runTaskOutput{Error: newToolError(err)}), nil
 	}
 	if err = s.validateWriteScope(input.WriteScope); err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), shellCommandOutput(runTaskOutput{Error: newToolError(err)}), nil
 	}
-	command, workingDirectory, err := s.resolveShellCommand(
+	if input.StdoutFormat != "" && input.StdoutFormat != "json" {
+		err = fmt.Errorf(`stdout_format must be omitted or "json"`)
+		return toolErrorResult(err), shellCommandOutput(runTaskOutput{
+			runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
+			Error:      newToolError(err),
+		}), nil
+	}
+	command, argv, workingDirectory, err := s.resolveShellCommand(
 		input.Command,
 		input.BlockID,
 		input.WorkingDirectory,
+		input.Arguments,
 	)
 	if err != nil {
-		return toolErrorResult(err), runTaskOutput{
+		return toolErrorResult(err), shellCommandOutput(runTaskOutput{
 			runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
 			Error:      newToolError(err),
-		}, nil
+		}), nil
 	}
 	input.Command = command
+	input.Arguments = argv
 	input.WorkingDirectory = workingDirectory
 	run, stats, output := s.startShellRun(ctx, input)
 	if run == nil {
-		return mcpErrorFor(output), output, nil
+		return mcpErrorFor(output), shellCommandOutput(output), nil
 	}
-	return nil, s.waitForSyncReceipt(ctx, request, run, stats, wait, input.TailBytes), nil
+	receipt := s.waitForSyncReceipt(ctx, request, run, stats, wait, input.TailBytes)
+	return nil, s.shellCommandReceipt(receipt, run.Meta(), input.StdoutFormat), nil
+}
+
+func shellCommandOutput(output runTaskOutput) runShellCommandOutput {
+	return runShellCommandOutput{runTaskOutput: output}
+}
+
+// shellCommandReceipt attaches structured stdout only to a run that reached the
+// end of its own output. A cancelled or timed-out run holds whatever reached the
+// log before it stopped, so parsing it would return a confident value, or a
+// parse error blaming the command, for output that was never complete.
+func (s *Server) shellCommandReceipt(
+	receipt runTaskOutput,
+	meta runstore.Meta,
+	stdoutFormat string,
+) runShellCommandOutput {
+	output := shellCommandOutput(receipt)
+	if stdoutFormat != "json" {
+		return output
+	}
+	switch output.Status {
+	case runstore.StatusOK, runstore.StatusNonzero:
+		s.attachStdoutJSON(&output, meta)
+	case runstore.StatusTimeout, runstore.StatusCancelled, runstore.StatusSpawnError:
+		output.StdoutJSONError = fmt.Sprintf(
+			"run ended with status %q, so stdout is not a completed document and was not parsed; "+
+				"use get_run_logs to read what it wrote",
+			output.Status,
+		)
+	case runstore.StatusRunning:
+		// A promoted receipt carries neither structured stdout field.
+	}
+	return output
 }
 
 type startShellCommandInput struct {
 	Command          string   `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
 	BlockID          string   `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
+	Arguments        []string `json:"arguments,omitempty" jsonschema:"full argv; starts with block argv"`
 	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"directory; default ."`
 	WriteScope       []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
 }
@@ -1225,10 +1284,11 @@ func (s *Server) startShellCommand(
 	if err := s.validateWriteScope(input.WriteScope); err != nil {
 		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
 	}
-	command, workingDirectory, err := s.resolveShellCommand(
+	command, argv, workingDirectory, err := s.resolveShellCommand(
 		input.Command,
 		input.BlockID,
 		input.WorkingDirectory,
+		input.Arguments,
 	)
 	if err != nil {
 		return toolErrorResult(err), runTaskOutput{
@@ -1238,6 +1298,7 @@ func (s *Server) startShellCommand(
 	}
 	run, stats, output := s.startShellRun(ctx, runShellCommandInput{
 		Command:          command,
+		Arguments:        argv,
 		WorkingDirectory: workingDirectory,
 		WriteScope:       input.WriteScope,
 	})
@@ -1253,8 +1314,12 @@ func (s *Server) startShellRun(
 ) (*executor.Run, *runstats.Stats, runTaskOutput) {
 	go s.cleanup()
 	workingDirectory := canonicalWorkingDirectory(input.WorkingDirectory)
+	args := []string{input.Command}
+	if len(input.Arguments) > 0 {
+		args = append([]string(nil), input.Arguments...)
+	}
 	s.repairTerminalMetadata()
-	stats, statsErr := s.stats.For(workingDirectory, "shell:command", []string{input.Command})
+	stats, statsErr := s.stats.For(workingDirectory, "shell:command", args)
 	if statsErr != nil {
 		s.config.Logger.Warn("read shell duration statistics failed", "error", statsErr)
 	}
@@ -1262,7 +1327,7 @@ func (s *Server) startShellRun(
 		runstore.Meta{
 			ProjectPath: workingDirectory,
 			TaskID:      "shell:command",
-			Args:        []string{input.Command},
+			Args:        args,
 			AIProfile:   s.config.AIProfile,
 		},
 	)
@@ -1282,9 +1347,16 @@ func (s *Server) startShellRun(
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, stats, receiptForHandle(handle, s.cancel(handle, ctxErr))
 	}
-	cmd, err := shellCommand(dir, input.Command)
-	if err != nil {
-		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
+	var cmd *exec.Cmd
+	if len(input.Arguments) > 0 {
+		// #nosec G204 -- the caller intentionally supplied an exact executable argv.
+		cmd = exec.CommandContext(context.Background(), input.Arguments[0], input.Arguments[1:]...)
+		cmd.Dir = dir
+	} else {
+		cmd, err = shellCommand(dir, input.Command)
+		if err != nil {
+			return nil, stats, receiptForHandle(handle, s.reject(handle, err))
+		}
 	}
 	return s.startRun(handle, cmd, stats, input.WriteScope, nil)
 }
@@ -1402,32 +1474,35 @@ func (s *Server) waitForSyncReceipt(
 ) runTaskOutput {
 	stopProgress := s.progressReporter(ctx, request, run, stats)
 	defer stopProgress()
+	var output runTaskOutput
 	if !wait.untilCompletion && wait.duration == 0 {
-		return s.runningReceipt(run, stats, true)
-	}
-	var timeout <-chan time.Time
-	var timer *time.Timer
-	if !wait.untilCompletion {
-		timer = time.NewTimer(wait.duration)
-		defer timer.Stop()
-		timeout = timer.C
-	}
-	select {
-	case <-run.Done():
-		if err := run.Err(); err != nil {
-			s.config.Logger.Error("task ledger finalization failed", "run_id", run.Snapshot().RunID, "error", err)
+		output = s.runningReceipt(run, stats, true)
+	} else {
+		var timeout <-chan time.Time
+		var timer *time.Timer
+		if !wait.untilCompletion {
+			timer = time.NewTimer(wait.duration)
+			defer timer.Stop()
+			timeout = timer.C
 		}
-		s.stats.Invalidate()
-		return s.finishedReceipt(run, stats, tailBytes)
-	case <-ctx.Done():
-		if err := run.Stop(); err != nil {
-			s.config.Logger.Error("cancel task run failed", "run_id", run.Snapshot().RunID, "error", err)
+		select {
+		case <-run.Done():
+			if err := run.Err(); err != nil {
+				s.config.Logger.Error("task ledger finalization failed", "run_id", run.Snapshot().RunID, "error", err)
+			}
+			s.stats.Invalidate()
+			output = s.finishedReceipt(run, stats, tailBytes)
+		case <-ctx.Done():
+			if err := run.Stop(); err != nil {
+				s.config.Logger.Error("cancel task run failed", "run_id", run.Snapshot().RunID, "error", err)
+			}
+			s.stats.Invalidate()
+			output = s.finishedReceipt(run, stats, tailBytes)
+		case <-timeout:
+			output = s.runningReceipt(run, stats, true)
 		}
-		s.stats.Invalidate()
-		return s.finishedReceipt(run, stats, tailBytes)
-	case <-timeout:
-		return s.runningReceipt(run, stats, true)
 	}
+	return output
 }
 
 // finishedReceipt keeps the completed synchronous receipt bound to its ledger identity.
@@ -1445,10 +1520,105 @@ func (s *Server) finishedReceipt(
 	details.WriteScope = append([]string(nil), meta.WriteScope...)
 	details.StdoutBytes = meta.StdoutBytes
 	details.StderrBytes = meta.StderrBytes
+	details.StdoutTruncated = meta.StdoutTruncated
+	details.StderrTruncated = meta.StderrTruncated
 	return runTaskOutput{
 		Result:     result,
 		runDetails: details,
 	}
+}
+
+const stdoutJSONLimit int64 = 65536
+
+// maxExactJSONInteger is the largest integer a float64 holds exactly. The MCP
+// SDK applies the output schema through map[string]any, so every parsed number
+// becomes a float64 on its way to the client; a token beyond this bound reaches
+// the caller with different digits.
+const maxExactJSONInteger int64 = 1 << 53
+
+func (s *Server) attachStdoutJSON(output *runShellCommandOutput, meta runstore.Meta) {
+	if meta.StdoutBytes > stdoutJSONLimit {
+		output.StdoutJSONError = fmt.Sprintf(
+			"stdout is %d bytes, exceeds the %d-byte JSON limit; use get_run_logs to read it",
+			meta.StdoutBytes,
+			stdoutJSONLimit,
+		)
+		return
+	}
+	stdout, err := s.store.ReadLog(meta.RunID, "stdout", 0, stdoutJSONLimit)
+	if err != nil {
+		output.StdoutJSONError = fmt.Sprintf("read stdout for JSON: %v", err)
+		return
+	}
+	if !utf8.Valid(stdout) {
+		output.StdoutJSONError = "parse stdout as JSON: stdout is not valid UTF-8"
+		return
+	}
+	var stdoutJSON any
+	decoder := json.NewDecoder(strings.NewReader(string(stdout)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&stdoutJSON); err != nil {
+		output.StdoutJSONError = fmt.Sprintf("parse stdout as JSON: %v", err)
+		return
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			err = fmt.Errorf("multiple JSON values")
+		}
+		output.StdoutJSONError = fmt.Sprintf("parse stdout as JSON: %v", err)
+		return
+	}
+	if path, lossy := inexactJSONNumber(stdoutJSON, "$"); lossy {
+		output.StdoutJSONError = fmt.Sprintf(
+			"stdout JSON number at %s does not survive the MCP output schema's float64 round trip; "+
+				"use get_run_logs to read its exact digits",
+			path,
+		)
+		return
+	}
+	output.StdoutJSON = &stdoutJSON
+}
+
+// inexactJSONNumber walks a parsed document and names the first number the
+// client would receive with different digits. Reporting the path is the whole
+// point: the alternative is a receipt that says ok and carries a wrong number.
+func inexactJSONNumber(value any, path string) (string, bool) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for _, key := range slices.Sorted(maps.Keys(typed)) {
+			if found, lossy := inexactJSONNumber(typed[key], path+"."+key); lossy {
+				return found, true
+			}
+		}
+	case []any:
+		for index, element := range typed {
+			if found, lossy := inexactJSONNumber(element, fmt.Sprintf("%s[%d]", path, index)); lossy {
+				return found, true
+			}
+		}
+	case json.Number:
+		if !survivesFloat64(typed) {
+			return path, true
+		}
+	}
+	return "", false
+}
+
+// survivesFloat64 reports whether a JSON number token reaches the client
+// unchanged after the output schema converts it to a float64.
+func survivesFloat64(token json.Number) bool {
+	text := token.String()
+	if !strings.ContainsAny(text, ".eE") {
+		value, err := strconv.ParseInt(text, 10, 64)
+		if err != nil {
+			// An integer beyond int64 cannot keep its digits through a float64.
+			return false
+		}
+		return value <= maxExactJSONInteger && value >= -maxExactJSONInteger
+	}
+	_, err := token.Float64()
+	return err == nil
 }
 
 func (s *Server) attachTails(result *executor.Result, tailBytes int64) {
@@ -2110,6 +2280,8 @@ func (s *Server) runDetails(meta runstore.Meta, predicted *runstats.Stats) (*run
 		NoOutputYet:     boolPointer(logState.NoOutputYet),
 		StdoutBytes:     logState.StdoutBytes,
 		StderrBytes:     logState.StderrBytes,
+		StdoutTruncated: meta.StdoutTruncated,
+		StderrTruncated: meta.StderrTruncated,
 		Stats:           predicted,
 	}
 	if meta.TaskTimeoutMS != nil {
