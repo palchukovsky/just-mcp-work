@@ -42,9 +42,10 @@ const (
 	claudeServerRule = "mcp__" + serverName
 )
 
-// Prompt returns the profiled JMW usage guidance served as the MCP server's instructions.
-// A verified agent guide path lets the server use the compact form. When
-// betaTest is true, it appends the beta feedback contract.
+// Prompt returns the JMW usage guidance served as the MCP server's instructions.
+// A declared profile is stated first; with no declared profile the guidance
+// starts directly. A verified agent guide path lets the server use the compact
+// form. When betaTest is true, it appends the beta feedback contract.
 func Prompt(profile aiprofile.Profile, betaTest bool, agentGuidePath string) string {
 	prompt := promptText
 	if agentGuidePath != "" {
@@ -53,6 +54,9 @@ func Prompt(profile aiprofile.Profile, betaTest bool, agentGuidePath string) str
 	if betaTest {
 		// This wrapper is presentation only; the managed-block text is the single contract.
 		prompt += "\n\nBETA TEST FEEDBACK\n" + betaTestManagedBlockText
+	}
+	if !profile.Declared() {
+		return prompt
 	}
 	return fmt.Sprintf(
 		profilePromptText,
@@ -323,9 +327,11 @@ type Options struct {
 	BetaTest       bool
 	DryRun         bool
 	WriteMCPConfig bool
-	// AIProfile selects the presentation profile carried by generated managed
-	// server arguments. The zero value means unknown.
-	AIProfile aiprofile.Profile
+	// AIFamilies selects the presentation profiles carried by generated managed
+	// server arguments and names at least one family. Each family reaches the
+	// one configuration its client reads; a configuration whose family is not
+	// selected carries no profile.
+	AIFamilies aiprofile.Selection
 	// RunnerModes is the complete, catalog-ordered runner selection persisted in
 	// the workspace policy file.
 	RunnerModes runner.ValidatedSelections
@@ -384,11 +390,11 @@ func Apply(options Options) (Result, error) {
 	if _, err := options.RunnerModes.Selections(); err != nil {
 		return Result{}, fmt.Errorf("validate runner selections: %w", err)
 	}
-	profile, err := aiprofile.Canonical(options.AIProfile)
+	families, err := options.AIFamilies.Canonical()
 	if err != nil {
-		return Result{}, fmt.Errorf("validate AI profile: %w", err)
+		return Result{}, fmt.Errorf("validate AI families: %w", err)
 	}
-	options.AIProfile = profile
+	options.AIFamilies = families
 	scope, preserveMCPAnchor, err := resolveScope(options.Dir)
 	if err != nil {
 		return Result{}, err
@@ -431,10 +437,11 @@ func Apply(options Options) (Result, error) {
 	surfaces = append(surfaces, workspaceSurfaces...)
 	manifestEdits, err := planManifest(
 		scope,
+		edits,
 		surfaces,
 		options.BetaTest,
 		options.ShellPermission,
-		options.AIProfile,
+		options.AIFamilies,
 		selected,
 	)
 	if err != nil {
@@ -627,7 +634,11 @@ func planMCPConfig(
 		return nil, nil, err
 	}
 	if options.WriteMCPConfig {
-		after, mergeErr := mergeMCPConfig(before, scope, options.AIProfile)
+		after, mergeErr := mergeMCPConfig(
+			before,
+			scope,
+			options.AIFamilies.ProfileFor(aiprofile.FamilyClaude),
+		)
 		if mergeErr != nil {
 			return nil, nil, mergeErr
 		}
@@ -672,7 +683,7 @@ func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurf
 			before,
 			scope,
 			options.ShellPermission,
-			options.AIProfile,
+			options.AIFamilies.ProfileFor(aiprofile.FamilyCodex),
 		)
 		if mergeErr != nil {
 			return nil, nil, fmt.Errorf("merge %s: %w", path, mergeErr)
@@ -1359,15 +1370,17 @@ func resolvePath(path string) (string, error) {
 }
 
 // MCPConfigSnippet is a ready-to-paste local MCP configuration for scopeRoot.
-func MCPConfigSnippet(scopeRoot string, profile aiprofile.Profile) (string, error) {
+// It carries the Claude profile when that family is declared, because .mcp.json
+// is the configuration a Claude client reads.
+func MCPConfigSnippet(scopeRoot string, families aiprofile.Selection) (string, error) {
 	if scopeRoot == "" {
 		return "", fmt.Errorf("MCP config scope root is required")
 	}
-	profile, err := aiprofile.Canonical(profile)
+	families, err := families.Canonical()
 	if err != nil {
-		return "", fmt.Errorf("validate AI profile: %w", err)
+		return "", fmt.Errorf("validate AI families: %w", err)
 	}
-	data, err := mergeMCPConfig(nil, scopeRoot, profile)
+	data, err := mergeMCPConfig(nil, scopeRoot, families.ProfileFor(aiprofile.FamilyClaude))
 	if err != nil {
 		return "", err
 	}
@@ -2108,9 +2121,21 @@ func tomlStringArray(values []string) (string, error) {
 	return "[" + strings.Join(encoded, ", ") + "]", nil
 }
 
+// AIFamilyConfig names the generated configuration whose client declares
+// family, the same pairing planMCPConfig and planCodexConfig write.
+func AIFamilyConfig(family aiprofile.Family) (string, bool) {
+	switch family {
+	case aiprofile.FamilyClaude:
+		return mcpConfig, true
+	case aiprofile.FamilyCodex:
+		return codexConfig, true
+	}
+	return "", false
+}
+
 func managedServerArgs(root string, profile aiprofile.Profile) []string {
 	args := []string{"serve", "--root", root}
-	if profile.Family != aiprofile.FamilyUnknown {
+	if profile.Declared() {
 		args = append(args, "--ai", string(profile.Family))
 	}
 	return args

@@ -38,9 +38,11 @@ type managedManifest struct {
 	SchemaVersion int    `json:"schema_version"`
 	Release       string `json:"release"`
 	BetaTest      bool   `json:"beta_test,omitempty"`
-	// An omitted AIFamily predates this field and means unknown, matching the
-	// managed serve arguments written by those manifests.
-	AIFamily aiprofile.Family `json:"ai_family"`
+	// AIFamilies lists the declared families, one per generated configuration,
+	// and names at least one. A manifest without a usable list, including one
+	// written before the list replaced the single ai_family, is not recognized:
+	// serve refuses it and init chooses the families again.
+	AIFamilies aiprofile.Selection `json:"ai_families"`
 	// An omitted ShellPermission predates this field and means ask, the only
 	// shell permission those manifests could have recorded.
 	ShellPermission string            `json:"shell_permission,omitempty"`
@@ -64,10 +66,11 @@ type manifestBlockRange func(string) (int, int, bool, error)
 //nolint:gocyclo // Keep the pre-write mode-change refusal beside the manifest it validates.
 func planManifest(
 	scope string,
+	planned []plannedEdit,
 	surfaces []manifestSurface,
 	betaTest bool,
 	shellPermission ShellPermission,
-	profile aiprofile.Profile,
+	families aiprofile.Selection,
 	selected map[string]struct{},
 ) ([]plannedEdit, error) {
 	path, err := findScopedConfig(
@@ -76,6 +79,16 @@ func planManifest(
 	)
 	if err != nil {
 		return nil, err
+	}
+	// The recorded document is read from the manifest's own resolved path, so a
+	// path that resolves onto a surface this init already plans to write would
+	// have that surface read as a manifest. Report the collision before reading
+	// it, exactly as the complete plan reports one.
+	pending := make([]plannedEdit, 0, len(planned)+1)
+	pending = append(pending, planned...)
+	pending = append(pending, plannedEdit{surface: manifestFile, collisionPath: path})
+	if collisionErr := validatePlannedEditPaths(pending); collisionErr != nil {
+		return nil, collisionErr
 	}
 	before, beforeExists, err := readOptionalFile(path)
 	if err != nil {
@@ -91,9 +104,14 @@ func planManifest(
 		}
 	}
 	if beforeExists {
-		var recorded managedManifest
-		if decodeErr := json.Unmarshal(before, &recorded); decodeErr == nil &&
-			recorded.SchemaVersion == manifestSchemaVersion {
+		// The carried claude surface and the two mode-change refusals below all
+		// read the recorded document, so a document this binary cannot decode
+		// stops init instead of silently planning without them.
+		recorded, decodeErr := decodeManagedManifest(path, before)
+		if decodeErr != nil {
+			return nil, decodeErr
+		}
+		if recorded.SchemaVersion == manifestSchemaVersion {
 			retiredGuideEdit, hasRetiredGuideEdit, retiredGuideErr := planRetiredAgentGuide(
 				scope,
 				recorded.Surfaces,
@@ -203,7 +221,7 @@ func planManifest(
 			SchemaVersion:   manifestSchemaVersion,
 			Release:         version.Current().Display(),
 			BetaTest:        betaTest,
-			AIFamily:        profile.Family,
+			AIFamilies:      families,
 			ShellPermission: recordedShellPermission,
 			Surfaces:        surfaces,
 		},
@@ -221,39 +239,34 @@ func planManifest(
 	return edits, nil
 }
 
-func profileForManifestFamily(family aiprofile.Family) (aiprofile.Profile, error) {
-	switch family {
-	case aiprofile.FamilyUnknown:
-		return aiprofile.Unknown(), nil
-	case aiprofile.FamilyCodex, aiprofile.FamilyClaude:
-		profile, err := aiprofile.Parse(string(family))
-		if err != nil {
-			return aiprofile.Profile{}, fmt.Errorf("parse AI family: %w", err)
-		}
-		return profile, nil
-	default:
-		return aiprofile.Profile{}, fmt.Errorf("unsupported AI family %q", family)
+// ErrUnrecognizedAIFamilies reports a managed manifest whose AI families this
+// binary cannot use: none recorded, as in a manifest written before the list
+// replaced the single family, or a list that is not a valid selection.
+var ErrUnrecognizedAIFamilies = errors.New("recorded AI families are not recognized")
+
+// decodeManagedManifest decodes the one document every reader of the manifest
+// works from. A document this binary cannot decode is a hard error everywhere:
+// neither init nor serve may act on recorded state it cannot see.
+func decodeManagedManifest(path string, data []byte) (managedManifest, error) {
+	var manifest managedManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return managedManifest{}, fmt.Errorf("decode managed manifest %s: %w", path, err)
 	}
+	return manifest, nil
 }
 
-func profileFromManagedManifest(data []byte) (aiprofile.Profile, error) {
-	var fields struct {
-		AIFamily json.RawMessage `json:"ai_family"`
+// families reports the recorded selection. A manifest that records none, as one
+// written before the list replaced the single family does, and one that records
+// a selection this binary cannot use are both unrecognized.
+func (m managedManifest) families() (aiprofile.Selection, error) {
+	if len(m.AIFamilies) == 0 {
+		return nil, errors.New("no AI families are recorded")
 	}
-	if err := json.Unmarshal(data, &fields); err != nil {
-		return aiprofile.Profile{}, fmt.Errorf("decode AI family: %w", err)
+	families, err := m.AIFamilies.Canonical()
+	if err != nil {
+		return nil, fmt.Errorf("read AI families: %w", err)
 	}
-	if len(fields.AIFamily) == 0 {
-		return aiprofile.Unknown(), nil
-	}
-	if bytes.Equal(bytes.TrimSpace(fields.AIFamily), []byte("null")) {
-		return aiprofile.Profile{}, errors.New("unsupported AI family null")
-	}
-	var family aiprofile.Family
-	if err := json.Unmarshal(fields.AIFamily, &family); err != nil {
-		return aiprofile.Profile{}, fmt.Errorf("decode AI family: %w", err)
-	}
-	return profileForManifestFamily(family)
+	return families, nil
 }
 
 func planRetiredAgentGuide(
@@ -492,7 +505,7 @@ func ReadRecordedBetaTest(root string) (bool, bool, error) {
 	var manifest managedManifest
 	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
 		manifest.SchemaVersion != manifestSchemaVersion {
-		//nolint:nilerr // Decode/schema failures mean unknown mode; init remains the repair path.
+		//nolint:nilerr // Unknown mode is asked about; planManifest refuses an undecodable one.
 		return false, false, nil
 	}
 	return manifest.BetaTest, true, nil
@@ -515,7 +528,7 @@ func ReadRecordedShellPermission(root string) (ShellPermission, bool, error) {
 	var manifest managedManifest
 	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
 		manifest.SchemaVersion != manifestSchemaVersion || manifest.ShellPermission == "" {
-		//nolint:nilerr // Decode/schema failures mean no recorded shell permission; init repairs it.
+		//nolint:nilerr // No recorded choice is asked about; planManifest refuses an undecodable one.
 		return "", false, nil
 	}
 	permission, err := ParseShellPermission(manifest.ShellPermission)
@@ -529,44 +542,44 @@ func ReadRecordedShellPermission(root string) (ShellPermission, bool, error) {
 	return permission, true, nil
 }
 
-// ReadRecordedAIProfile reports the AI family recorded in the workspace
-// manifest. A legacy manifest with no family records unknown. A missing
-// manifest has no recorded choice. Malformed, schema-incompatible, and invalid
-// manifests fail so init cannot silently replace a recorded family.
-func ReadRecordedAIProfile(root string) (aiprofile.Profile, bool, error) {
+// ReadRecordedAIFamilies reports the AI families recorded in the workspace
+// manifest. A missing manifest has no recorded choice. A manifest whose
+// families cannot be used - none recorded, as in one written before the list
+// replaced the single family, or an invalid list - fails with an error wrapping
+// ErrUnrecognizedAIFamilies, so init can choose them again as in a new
+// workspace. A malformed or schema-incompatible manifest and a filesystem error
+// fail without it.
+func ReadRecordedAIFamilies(root string) (aiprofile.Selection, bool, error) {
 	manifestPath := filepath.Join(root, manifestFile)
 	data, exists, err := readOptionalFile(manifestPath)
 	if err != nil {
-		return aiprofile.Profile{}, false, err
+		return nil, false, err
 	}
 	if !exists {
-		return aiprofile.Unknown(), false, nil
+		return nil, false, nil
 	}
 
-	var manifest managedManifest
-	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil {
-		return aiprofile.Profile{}, false, fmt.Errorf(
-			"decode managed manifest %s: %w",
-			manifestPath,
-			decodeErr,
-		)
+	manifest, err := decodeManagedManifest(manifestPath, data)
+	if err != nil {
+		return nil, false, err
 	}
 	if manifest.SchemaVersion != manifestSchemaVersion {
-		return aiprofile.Profile{}, false, fmt.Errorf(
+		return nil, false, fmt.Errorf(
 			"managed manifest %s has unsupported schema version %d",
 			manifestPath,
 			manifest.SchemaVersion,
 		)
 	}
-	profile, err := profileFromManagedManifest(data)
+	families, err := manifest.families()
 	if err != nil {
-		return aiprofile.Profile{}, false, fmt.Errorf(
-			"read AI profile from managed manifest %s: %w",
+		return nil, false, fmt.Errorf(
+			"%w in managed manifest %s: %w",
+			ErrUnrecognizedAIFamilies,
 			manifestPath,
 			err,
 		)
 	}
-	return profile, true, nil
+	return families, true, nil
 }
 
 // VerifyManagedSurfaces checks that the generated workspace configuration
@@ -611,7 +624,7 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			managedManifestRecovery(root),
 		)
 	}
-	profile, err := profileFromManagedManifest(data)
+	families, err := manifest.families()
 	if err != nil {
 		return ManagedSurfaces{}, fmt.Errorf(
 			"managed manifest %s is unusable: %w; %s",
@@ -684,7 +697,7 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			root,
 			manifest.BetaTest,
 			shellPermission,
-			profile,
+			families,
 			recorded,
 		)
 		if err != nil {
@@ -785,7 +798,7 @@ func generatedManifestSurface(
 	root string,
 	betaTest bool,
 	shellPermission ShellPermission,
-	profile aiprofile.Profile,
+	families aiprofile.Selection,
 	recorded manifestSurface,
 ) (manifestSurface, error) {
 	switch recorded.Kind {
@@ -802,7 +815,12 @@ func generatedManifestSurface(
 			[]byte(promptText+"\n"),
 		), nil
 	case manifestKindCodexConfig:
-		content, err := mergeCodexConfig(nil, root, shellPermission, profile)
+		content, err := mergeCodexConfig(
+			nil,
+			root,
+			shellPermission,
+			families.ProfileFor(aiprofile.FamilyCodex),
+		)
 		if err != nil {
 			return manifestSurface{}, err
 		}
@@ -813,7 +831,7 @@ func generatedManifestSurface(
 			codexBlockRange,
 		)
 	case manifestKindMCPConfig:
-		content, err := mergeMCPConfig(nil, root, profile)
+		content, err := mergeMCPConfig(nil, root, families.ProfileFor(aiprofile.FamilyClaude))
 		if err != nil {
 			return manifestSurface{}, err
 		}

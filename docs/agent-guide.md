@@ -5,9 +5,10 @@ coding agent should drive them. The server has two forms of usage rules in its
 MCP `instructions` field: with a verified `.just-mcp-work/guide.txt`, it serves
 the short rules that must fire unprompted and points to that file by its
 verified absolute path; without a verified guide path, it serves the full usage
-text. Both forms start with the active AI family, profile ID, profile version,
-and transport, followed by the same JMW contract. This page is the project's
-public long form.
+text. When `serve` runs with `--ai`, both forms start with the declared AI
+family, profile ID, profile version, and transport; without it they carry no
+profile. The JMW contract that follows is the same in every form. This page is
+the project's public long form.
 
 - [What the server is for](#what-the-server-is-for)
 - [The object model](#the-object-model)
@@ -224,15 +225,19 @@ array of selections:
 {"version": 1, "runners": [{"name": "go", "mode": "safe"}]}
 ```
 
-During `init`, the operator selects `unknown`, `codex`, or `claude`. A workspace
-with no managed manifest offers `unknown`; later runs offer the family in the
-managed manifest. Pass `init --ai unknown|codex|claude` to answer the question
-non-interactively. Managed MCP and Codex server arguments always include
-`serve --root <dir>`, add `--ai codex|claude` for those families, and omit
-`--ai` for `unknown`. They carry no runner selection. The AI family is
-caller-declared provenance, not authenticated identity, and selects an
-instruction/profile presentation only. The policy, not the server arguments,
-defines the authorized task surface an agent sees.
+During `init`, the operator selects any number of the declarable families,
+`codex` and `claude`; both are offered in a workspace with no managed manifest.
+Each selected family is declared in the configuration its own client reads:
+`claude` in `.mcp.json`, `codex` in `.codex/config.toml`. Later runs offer the
+families in the managed manifest and ask again, as in a new workspace, when the
+recorded ones are not recognized. Pass `init --ai codex|claude|codex,claude` to
+answer the question non-interactively. Managed MCP and Codex server arguments
+always include `serve --root <dir>`, add `--ai codex|claude` when that
+configuration's family is declared, and omit `--ai` otherwise. They carry no
+runner selection. The AI family is caller-declared provenance, not
+authenticated identity, and selects an instruction/profile presentation only.
+The policy, not the server arguments, defines the authorized task surface an
+agent sees.
 
 `init` also writes `.just-mcp-work/guide.txt`, the generated reference used by an
 agent at work, and records it with the other managed surfaces. JMW owns that
@@ -408,11 +413,13 @@ act: `completed`, `process_alive`, `owned_by_this_server`,
 receipts and completed status views additionally carry `stdout_truncated` and
 `stderr_truncated` when the executor's corresponding fixed in-memory tail
 exceeded its limit. Those flags are independent of requested `tail_bytes` and
-appear only when true. Receipts and status calls also carry `ai_profile` with
-`family`, `profile_id`, `profile_version`, and `transport`. `Store.Begin`
+appear only when true. When `serve` runs with `--ai`, receipts and status calls
+also carry `ai_profile` with `family`, `profile_id`, `profile_version`, and
+`transport`; without it the key is absent. `Store.Begin`
 records the profile in the run ledger, and `get_run` returns that persisted
-value. A completed synchronous receipt keeps `ai_profile`, the nonempty stream
-byte counts, and true truncation flags, but carries no other lifecycle fields.
+value. A completed synchronous receipt keeps a declared `ai_profile`, the
+nonempty stream byte counts, and true truncation flags, but carries no other
+lifecycle fields.
 A gate that has printed nothing for minutes and a gate about to hit its timeout
 look identical in `status` alone.
 
@@ -691,9 +698,11 @@ guidance. Use
 - `managed manifest <path> has unsupported schema version <n>` or `is too new
   (schema version <n>)` - this binary cannot use the recorded schema. Run
   `just-mcp-work init --dir "<root>"`.
-- `managed manifest <path> is unusable` - a recorded surface path is unsafe or
-  cannot be contained within the workspace. Run `just-mcp-work init --dir
-  "<root>"`.
+- `managed manifest <path> is unusable` - the recorded AI families are missing
+  or not recognized, as in a manifest written before the family list replaced
+  the single family, or a recorded surface path is unsafe or cannot be
+  contained within the workspace. `serve` refuses to start until `init`
+  rewrites the manifest. Run `just-mcp-work init --dir "<root>"`.
 - `managed surfaces "<first>" and "<second>" resolve to the same path <path>` -
   two actual planned edits collide. Separate the managed targets, then run
   `just-mcp-work init --dir "<root>"` again.
@@ -725,7 +734,7 @@ The operator sets these; an agent cannot change them at runtime.
 | Flag | Environment | Default | Effect |
 | --- | --- | --- | --- |
 | `--root` | `JMW_ROOT` | cwd | Workspace scope. |
-| `--ai` | - | `unknown` | Declared `codex` or `claude` presentation profile. |
+| `--ai` | - | None | Declared `codex` or `claude` presentation profile. |
 | `--timeout` | `JMW_TIMEOUT` | `15m` | Per-run timeout; `0` disables it. |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` | Default synchronous wait. |
 | `--retention` | `JMW_RETENTION` | `72h` | Run-log retention. |

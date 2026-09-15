@@ -180,13 +180,20 @@ option to answer selected runner questions non-interactively. `init` writes the
 complete canonical selection to `.just-mcp-work.json` in the workspace scope
 root, next to `.mcp.json`.
 
-`init` also asks which AI family the managed server should declare. A workspace
-with no managed manifest offers `unknown`; later runs offer the family stored by
-the previous `init`. Pass `--ai unknown|codex|claude` to answer the question
-non-interactively. The selection is recorded in the managed manifest and used
-for both generated MCP configurations: their arguments always include
-`serve --root <dir>`, add `--ai codex|claude` for those families, and omit
-`--ai` for `unknown`. The profile is caller-declared presentation and
+`init` also asks which AI families the managed server should declare. The
+question lists its choices with numbers, and the answer names as many as the
+workspace needs, by number or by name, separated by commas or spaces. Both
+`codex` and `claude` are offered in a workspace that has none recorded. Each
+family is declared in the configuration its own client reads - `claude` in
+`.mcp.json`, `codex` in `.codex/config.toml` - so a configuration whose family
+was not selected declares none. Later runs offer the families stored by the
+previous `init`; when the recorded ones are not recognized, as after an upgrade
+from a release that stored a single family, `init` says so and asks again. Until
+that `init` rewrites the manifest, `serve` refuses to start on it. Pass
+`--ai codex|claude|codex,claude` to answer the question non-interactively. The
+selection is recorded in the managed manifest. Generated arguments always
+include `serve --root <dir>` and add `--ai codex|claude` when the family of that
+configuration is declared. The profile is caller-declared presentation and
 provenance; it does not change runner modes, task visibility, shell permission,
 or write access. To change runner selection, run `init`, not
 `serve --runner-mode`.
@@ -209,15 +216,15 @@ test when that preflight succeeds.
 | Flag | Environment | Default |
 | --- | --- | --- |
 | `--root` | `JMW_ROOT` | Current directory |
-| `--ai` | - | `unknown` |
+| `--ai` | - | None |
 | `--timeout` | `JMW_TIMEOUT` | `15m` (`0` disables the timeout) |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` |
 | `--retention` | `JMW_RETENTION` | `72h` |
 | `--exclude` | - | None |
 
 Run data is kept under `.just-mcp-work/log/` in the selected workspace. Every
-new run records the active AI profile and returns it in receipts; `unknown`
-means `serve` started without `--ai`.
+new run started by a `serve` with `--ai` records that AI profile and returns it
+in receipts; a run under a `serve` without `--ai` records none.
 
 ## Development and release
 

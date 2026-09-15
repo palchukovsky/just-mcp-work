@@ -51,8 +51,8 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	if handle.Meta.Status != StatusRunning || handle.Meta.StartedAt.IsZero() {
 		t.Fatalf("initial metadata = %#v", handle.Meta)
 	}
-	if handle.Meta.AIProfile != aiprofile.Unknown() {
-		t.Fatalf("default AI profile = %#v, want unknown", handle.Meta.AIProfile)
+	if handle.Meta.AIProfile.Declared() {
+		t.Fatalf("default AI profile = %#v, want none", handle.Meta.AIProfile)
 	}
 	if handle.Meta.OwnerPID != os.Getpid() {
 		t.Fatalf("owner PID = %d, want %d", handle.Meta.OwnerPID, os.Getpid())
@@ -83,7 +83,7 @@ func TestBeginFinishMetadataAndPagedLogs(t *testing.T) {
 	}
 	if meta.Status != StatusNonzero ||
 		meta.WorktreeRoot != worktreeRoot ||
-		meta.AIProfile != aiprofile.Unknown() ||
+		meta.AIProfile.Declared() ||
 		meta.ExitCode != 7 ||
 		meta.StdoutBytes != 6 ||
 		meta.StderrBytes != 7 ||
@@ -148,13 +148,54 @@ func TestBeginPersistsOnlyCanonicalAIProfile(t *testing.T) {
 	}
 }
 
-func TestStoreReadsLegacyMetadataWithoutAIProfileAsUnknown(t *testing.T) {
+// TestStoreKeepsAnUndeclaredAIProfileAbsent pins that a run started without a
+// declared profile carries none: meta.json has no ai_profile key, and reading
+// it back, alone or in a listing, does not invent a profile.
+func TestStoreKeepsAnUndeclaredAIProfileAbsent(t *testing.T) {
 	root := t.TempDir()
 	store, err := NewForWorktree(root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	handle, err := store.Begin(Meta{TaskID: "just:legacy-profile"})
+	handle, err := store.Begin(Meta{TaskID: "just:undeclared-profile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = handle.Finish(StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(handle.dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"ai_profile"`) {
+		t.Fatalf("meta.json records a profile for an undeclared run:\n%s", data)
+	}
+
+	meta, err := store.Get(handle.Meta.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.AIProfile.Declared() {
+		t.Fatalf("undeclared AI profile = %#v, want none", meta.AIProfile)
+	}
+	page, err := store.ListRecent(1)
+	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.AIProfile.Declared() {
+		t.Fatalf("ListRecent = %#v, %v, want a run without a profile", page, err)
+	}
+}
+
+// TestStoreReadsARecordedUnknownAIProfileAsAbsent covers the upgrade over runs
+// already on disk: a record written by a release that declared the retired
+// unknown family reads back without a profile, alone and in a listing, so that
+// family reaches no receipt while the record sits out its retention.
+func TestStoreReadsARecordedUnknownAIProfileAsAbsent(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewForWorktree(root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := store.Begin(Meta{TaskID: "just:unknown-profile"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,19 +205,26 @@ func TestStoreReadsLegacyMetadataWithoutAIProfileAsUnknown(t *testing.T) {
 	mutatePersistedMetadata(
 		t,
 		filepath.Join(handle.dir, "meta.json"),
-		func(metadata map[string]any) { delete(metadata, "ai_profile") },
+		func(metadata map[string]any) {
+			metadata["ai_profile"] = map[string]any{
+				"family":          "unknown",
+				"profile_id":      "jmw/unknown",
+				"profile_version": "1",
+				"transport":       "mcp-stdio",
+			}
+		},
 	)
 
 	meta, err := store.Get(handle.Meta.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.AIProfile != aiprofile.Unknown() {
-		t.Fatalf("legacy AI profile = %#v, want unknown", meta.AIProfile)
+	if meta.AIProfile.Declared() {
+		t.Fatalf("recorded unknown AI profile = %#v, want none", meta.AIProfile)
 	}
 	page, err := store.ListRecent(1)
-	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.AIProfile != aiprofile.Unknown() {
-		t.Fatalf("ListRecent = %#v, %v, want legacy run with unknown profile", page, err)
+	if err != nil || len(page.Runs) != 1 || page.Runs[0].Meta.AIProfile.Declared() {
+		t.Fatalf("ListRecent = %#v, %v, want a run without a profile", page, err)
 	}
 }
 
@@ -222,12 +270,14 @@ func TestStoreReadsAndCleansUpCompletedStaleRunWithFutureAIProfile(t *testing.T)
 		},
 	)
 
+	// The record stays readable and reaches every path below; only the family
+	// it names, which this release cannot present, is not passed on.
 	meta, err := store.Get(handle.Meta.RunID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.AIProfile != futureProfile {
-		t.Fatalf("Get AI profile = %#v, want %#v", meta.AIProfile, futureProfile)
+	if meta.AIProfile.Declared() {
+		t.Fatalf("Get AI profile = %#v, want none for %#v", meta.AIProfile, futureProfile)
 	}
 	logData, err := store.ReadLog(handle.Meta.RunID, "stdout", 0, int64(len(logText)))
 	if err != nil || string(logData) != logText {
@@ -236,8 +286,8 @@ func TestStoreReadsAndCleansUpCompletedStaleRunWithFutureAIProfile(t *testing.T)
 	page, err := store.ListRecent(1)
 	if err != nil || len(page.Runs) != 1 ||
 		page.Runs[0].Meta.RunID != handle.Meta.RunID ||
-		page.Runs[0].Meta.AIProfile != futureProfile {
-		t.Fatalf("ListRecent = %#v, %v, want future-profile run", page, err)
+		page.Runs[0].Meta.AIProfile.Declared() {
+		t.Fatalf("ListRecent = %#v, %v, want future-profile run without a profile", page, err)
 	}
 
 	if err = store.Cleanup(time.Hour); err != nil {

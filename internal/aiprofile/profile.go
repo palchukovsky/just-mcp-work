@@ -5,7 +5,11 @@
 // Package aiprofile describes the caller-declared AI presentation profile.
 package aiprofile
 
-import "fmt"
+import (
+	"fmt"
+	"slices"
+	"strings"
+)
 
 const (
 	profileVersion = "1"
@@ -16,13 +20,19 @@ const (
 type Family string
 
 const (
-	FamilyUnknown Family = "unknown"
-	FamilyCodex   Family = "codex"
-	FamilyClaude  Family = "claude"
+	FamilyCodex  Family = "codex"
+	FamilyClaude Family = "claude"
 )
 
+// Declarable lists the families an operator can declare, in the order they are
+// offered and stored.
+func Declarable() []Family {
+	return []Family{FamilyCodex, FamilyClaude}
+}
+
 // Profile is caller-declared presentation provenance, not an authenticated
-// identity or a capability declaration.
+// identity or a capability declaration. The zero value declares no profile; it
+// is what serve runs with when it has no --ai argument.
 type Profile struct {
 	Family    Family `json:"family"`
 	ID        string `json:"profile_id"`
@@ -30,37 +40,31 @@ type Profile struct {
 	Transport string `json:"transport"`
 }
 
-// Unknown returns the profile used when serve has no --ai argument.
-func Unknown() Profile {
-	return profile(FamilyUnknown)
+// Declared reports whether the profile names a family rather than being the
+// absence of one.
+func (p Profile) Declared() bool {
+	return p != Profile{}
 }
 
 // Parse returns the profile for an explicitly declared AI family.
 func Parse(value string) (Profile, error) {
 	family := Family(value)
-	switch family {
-	case FamilyCodex, FamilyClaude:
-		return profile(family), nil
-	case FamilyUnknown:
-		// Listed so the closed set stays exhaustive; unknown is not declarable
-		// and shares the rejection below with every unsupported value.
+	if !slices.Contains(Declarable(), family) {
+		return Profile{}, fmt.Errorf("AI family must be one of %s", familyList(Declarable()))
 	}
-	return Profile{}, fmt.Errorf("AI family must be one of codex, claude")
+	return profile(family), nil
 }
 
-// Canonical validates a profile and maps an absent internal value to unknown.
-// The zero value represents the same absence as an omitted --ai argument.
+// Canonical validates a profile. The zero value is the absence of a profile,
+// the same absence as an omitted --ai argument, and is returned unchanged.
 func Canonical(value Profile) (Profile, error) {
-	if value == (Profile{}) {
-		return Unknown(), nil
+	if !value.Declared() {
+		return Profile{}, nil
 	}
-	switch value.Family {
-	case FamilyUnknown, FamilyCodex, FamilyClaude:
-	default:
+	if !slices.Contains(Declarable(), value.Family) {
 		return Profile{}, fmt.Errorf("unsupported AI family %q", value.Family)
 	}
-	want := profile(value.Family)
-	if value != want {
+	if value != profile(value.Family) {
 		return Profile{}, fmt.Errorf("invalid AI profile for family %q", value.Family)
 	}
 	return value, nil
@@ -73,4 +77,68 @@ func profile(family Family) Profile {
 		Version:   profileVersion,
 		Transport: stdioTransport,
 	}
+}
+
+// Selection is the set of families declared for one workspace. A workspace
+// generates a server configuration per client, so several families can be
+// declared at once, each in the configuration its client reads. A selection
+// names at least one family.
+type Selection []Family
+
+// ParseSelection canonicalizes explicitly chosen family names.
+func ParseSelection(values []string) (Selection, error) {
+	selection := make(Selection, 0, len(values))
+	for _, value := range values {
+		selection = append(selection, Family(value))
+	}
+	return selection.Canonical()
+}
+
+// Canonical validates a selection and returns it in the declared order. It
+// rejects an empty selection, an unsupported family, and a repeated one.
+func (s Selection) Canonical() (Selection, error) {
+	if len(s) == 0 {
+		return nil, fmt.Errorf(
+			"no AI family is selected; choose any of %s",
+			familyList(Declarable()),
+		)
+	}
+	selected := make(Selection, 0, len(s))
+	for _, family := range s {
+		if !slices.Contains(Declarable(), family) {
+			return nil, fmt.Errorf(
+				"unsupported AI family %q; must be one of %s",
+				family,
+				familyList(Declarable()),
+			)
+		}
+		if slices.Contains(selected, family) {
+			return nil, fmt.Errorf("AI family %q is selected twice", family)
+		}
+		selected = append(selected, family)
+	}
+	canonical := make(Selection, 0, len(selected))
+	for _, family := range Declarable() {
+		if slices.Contains(selected, family) {
+			canonical = append(canonical, family)
+		}
+	}
+	return canonical, nil
+}
+
+// ProfileFor returns the profile a configuration read by family should carry:
+// that family's profile when it is declared, and no profile when it is not.
+func (s Selection) ProfileFor(family Family) Profile {
+	if !slices.Contains(s, family) {
+		return Profile{}
+	}
+	return profile(family)
+}
+
+func familyList(families []Family) string {
+	names := make([]string, 0, len(families))
+	for _, family := range families {
+		names = append(names, string(family))
+	}
+	return strings.Join(names, ", ")
 }

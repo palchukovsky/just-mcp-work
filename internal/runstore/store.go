@@ -44,7 +44,10 @@ const (
 // finalization errors, such as closing a log, do not require ledger repair.
 var ErrFinalMetadataPersistence = errors.New("final run metadata persistence failed")
 
-// Meta is persisted as <run>/meta.json.
+// Meta is persisted as <run>/meta.json. AIProfile records the profile the run
+// was started under; a record whose profile this release does not recognize,
+// such as the retired unknown family of an earlier one, reads back as no
+// declared profile rather than as the family it names.
 //
 //nolint:govet // Field order follows the stable on-disk metadata schema.
 type Meta struct {
@@ -56,7 +59,7 @@ type Meta struct {
 	Args            []string          `json:"args,omitempty"`
 	CWD             string            `json:"cwd,omitempty"`
 	WriteScope      []string          `json:"write_scope,omitempty"`
-	AIProfile       aiprofile.Profile `json:"ai_profile"`
+	AIProfile       aiprofile.Profile `json:"ai_profile,omitzero"`
 	StartedAt       time.Time         `json:"started_at"`
 	EndedAt         time.Time         `json:"ended_at"`
 	DurationMS      int64             `json:"duration_ms,omitempty"`
@@ -772,8 +775,11 @@ func readMeta(path string) (Meta, error) {
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return Meta{}, fmt.Errorf("decode run metadata: %w", err)
 	}
-	if meta.AIProfile == (aiprofile.Profile{}) {
-		meta.AIProfile = aiprofile.Unknown()
+	if _, canonicalErr := aiprofile.Canonical(meta.AIProfile); canonicalErr != nil {
+		// A profile this release cannot present - the retired unknown family
+		// recorded by an earlier one among them - reads as no declared profile,
+		// so a family this binary does not know reaches no receipt.
+		meta.AIProfile = aiprofile.Profile{}
 	}
 	return meta, nil
 }

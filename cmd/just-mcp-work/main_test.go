@@ -25,7 +25,6 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
-	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
@@ -96,7 +95,7 @@ func defaultRunnerInput() *strings.Reader {
 }
 
 func initArgsWithRunnerModes(dir string) []string {
-	return append(initArgsWithRunnerModesWithoutAI(dir), "--ai", "unknown")
+	return append(initArgsWithRunnerModesWithoutAI(dir), "--ai", "codex")
 }
 
 func initArgsWithRunnerModesWithoutAI(dir string) []string {
@@ -198,6 +197,32 @@ func TestServerRunErrorAcceptsContextCancellation(t *testing.T) {
 	}
 }
 
+// assertServeProfileDiagnostics checks what serve reports about the AI profile:
+// the declared one in full, or a single line saying none was declared, with no
+// placeholder family in its log or its instructions.
+func assertServeProfileDiagnostics(t *testing.T, ai, stderr, instructions string) {
+	t.Helper()
+	want := []string{"msg=\"AI profile not declared\""}
+	if ai != "" {
+		want = []string{
+			"msg=\"AI profile selected\"",
+			"ai_family=" + ai,
+			"profile_id=jmw/" + ai,
+			"profile_version=1",
+			"transport=mcp-stdio",
+		}
+	}
+	for _, line := range want {
+		if !strings.Contains(stderr, line) {
+			t.Fatalf("serve diagnostics do not contain %q: %s", line, stderr)
+		}
+	}
+	if ai == "" && (strings.Contains(stderr, "unknown") ||
+		strings.Contains(instructions, "AI PROFILE")) {
+		t.Fatalf("serve without --ai presented a profile:\n%s\n%s", stderr, instructions)
+	}
+}
+
 func TestServeUsesVerifiedAgentGuideForInstructions(t *testing.T) {
 	for _, test := range []struct {
 		name       string
@@ -234,21 +259,7 @@ func TestServeUsesVerifiedAgentGuideForInstructions(t *testing.T) {
 			if _, err := os.Stat(startupFailurePath); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("successful serve left startup failure: %v", err)
 			}
-			wantFamily := "unknown"
-			if test.ai != "" {
-				wantFamily = test.ai
-			}
-			for _, want := range []string{
-				"msg=\"AI profile selected\"",
-				"ai_family=" + wantFamily,
-				"profile_id=jmw/" + wantFamily,
-				"profile_version=1",
-				"transport=mcp-stdio",
-			} {
-				if !strings.Contains(stderr, want) {
-					t.Fatalf("serve diagnostics do not contain %q: %s", want, stderr)
-				}
-			}
+			assertServeProfileDiagnostics(t, test.ai, stderr, instructions)
 		})
 	}
 }
@@ -470,7 +481,7 @@ func TestInitWritesMCPConfigByDefault(t *testing.T) {
 	}
 }
 
-func TestInitAsksForAIProfileAndRecordsUnknownByDefault(t *testing.T) {
+func TestInitOffersBothAIFamiliesByDefault(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -484,36 +495,42 @@ func TestInitAsksForAIProfileAndRecordsUnknownByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"Which AI family should the managed just-mcp-work server present?",
-		"unknown (default)",
-		"AI family [unknown, default]:",
+		"Which AI families should the managed just-mcp-work server declare?",
+		"  1) codex (default) - declare it in .codex/config.toml",
+		"  2) claude (default) - declare it in .mcp.json",
+		"AI families [codex,claude, default]:",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
-			t.Fatalf("AI profile prompt lacks %q:\n%s", want, diagnostics.String())
+			t.Fatalf("AI family prompt lacks %q:\n%s", want, diagnostics.String())
 		}
 	}
-	manifest, err := os.ReadFile(filepath.Join(dir, ".just-mcp-work", "managed.json"))
-	if err != nil {
-		t.Fatal(err)
+	if strings.Contains(diagnostics.String(), "unknown") {
+		t.Fatalf("AI family prompt still offers a placeholder family:\n%s", diagnostics.String())
 	}
-	if !bytes.Contains(manifest, []byte(`"ai_family": "unknown"`)) {
-		t.Fatalf("managed manifest does not record unknown AI family:\n%s", manifest)
+	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
+		families,
+		[]string{"codex", "claude"},
+	) {
+		t.Fatalf("default answer recorded AI families = %#v, want codex and claude", families)
 	}
 	if args := initSnippetArgs(t, result.String()); !slices.Equal(
 		args,
-		[]string{"serve", "--root", dir},
+		[]string{"serve", "--root", dir, "--ai", "claude"},
 	) {
-		t.Fatalf("unknown-profile snippet args = %#v", args)
+		t.Fatalf("default snippet args = %#v", args)
 	}
 }
 
-func TestInitExplicitAIProfileWritesManagedArguments(t *testing.T) {
+// TestInitExplicitAIFamiliesWriteManagedArguments covers the flag answering for
+// several families at once: each generated configuration declares the family
+// whose client reads it, and the manifest records both.
+func TestInitExplicitAIFamiliesWriteManagedArguments(t *testing.T) {
 	dir := t.TempDir()
 	args := append(
 		initArgsWithRunnerModesWithoutAI(dir),
 		"--write-mcp-config=true",
 		"--shell-permission", "ask",
-		"--ai", "codex",
+		"--ai", "codex,claude",
 	)
 	var diagnostics bytes.Buffer
 	if err := initCommandWithIO(
@@ -525,9 +542,217 @@ func TestInitExplicitAIProfileWritesManagedArguments(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(diagnostics.String(), "Which AI family") {
-		t.Fatalf("explicit AI profile was still questioned:\n%s", diagnostics.String())
+	if strings.Contains(diagnostics.String(), "Which AI families") {
+		t.Fatalf("explicit AI families were still questioned:\n%s", diagnostics.String())
 	}
+	wantMCPArgs := []string{"serve", "--root", dir, "--ai", "claude"}
+	if got := initMCPConfigArgs(t, dir); !slices.Equal(got, wantMCPArgs) {
+		t.Fatalf("managed MCP args = %#v, want %#v", got, wantMCPArgs)
+	}
+	codexConfig, err := os.ReadFile(filepath.Join(dir, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(codexConfig), `"--ai", "codex"`) {
+		t.Fatalf("Codex configuration does not declare codex:\n%s", codexConfig)
+	}
+	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
+		families,
+		[]string{"codex", "claude"},
+	) {
+		t.Fatalf("managed manifest AI families = %#v, want codex and claude", families)
+	}
+}
+
+// TestInitAcceptsAIFamilyNumbersOnTheConsole picks a family by the number
+// printed beside it instead of typing its name, and leaves the configuration of
+// the client that was not picked without a profile.
+func TestInitAcceptsAIFamilyNumbersOnTheConsole(t *testing.T) {
+	dir := t.TempDir()
+	args := append(
+		initArgsWithRunnerModesWithoutAI(dir),
+		"--write-mcp-config=true",
+		"--shell-permission", "ask",
+	)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("2\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if families := initRecordedAIFamilies(t, dir); !slices.Equal(families, []string{"claude"}) {
+		t.Fatalf("numbered answer recorded AI families = %#v, want claude", families)
+	}
+	wantMCPArgs := []string{"serve", "--root", dir, "--ai", "claude"}
+	if got := initMCPConfigArgs(t, dir); !slices.Equal(got, wantMCPArgs) {
+		t.Fatalf("managed MCP args = %#v, want %#v", got, wantMCPArgs)
+	}
+	codexConfig, err := os.ReadFile(filepath.Join(dir, ".codex", "config.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(codexConfig), `"--ai"`) {
+		t.Fatalf("Codex configuration declares a family that was not picked:\n%s", codexConfig)
+	}
+}
+
+// TestInitRepeatsAIFamilyQuestionUntilTheAnswerIsUsable keeps the answers that
+// cannot be honoured out of the manifest: a number nobody offered, and a family
+// named twice.
+func TestInitRepeatsAIFamilyQuestionUntilTheAnswerIsUsable(t *testing.T) {
+	dir := t.TempDir()
+	args := append(
+		initArgsWithRunnerModesWithoutAI(dir),
+		"--write-mcp-config=true",
+		"--shell-permission", "ask",
+	)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("9\ncodex,codex\n2 1\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`Unsupported AI family "9"; choose any of codex, claude.`,
+		`"codex" is named twice.`,
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("AI family question lacks %q:\n%s", want, diagnostics.String())
+		}
+	}
+	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
+		families,
+		[]string{"codex", "claude"},
+	) {
+		t.Fatalf("repeated question recorded AI families = %#v, want codex and claude", families)
+	}
+}
+
+// TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized covers the
+// upgrade from a manifest written before the family list: init names the
+// manifest it could not use and what is wrong with it, then offers the defaults
+// as in a new workspace instead of refusing to continue.
+func TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized(t *testing.T) {
+	dir := t.TempDir()
+	args := append(
+		initArgsWithRunnerModesWithoutAI(dir),
+		"--write-mcp-config=true",
+		"--shell-permission", "ask",
+	)
+	if err := initCommandWithIO(
+		false,
+		append(slices.Clone(args), "--ai", "claude"),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(dir, ".just-mcp-work", "managed.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err = json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	delete(document, "ai_families")
+	document["ai_family"] = "unknown"
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(manifestPath, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var diagnostics bytes.Buffer
+	if err = initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"The AI families recorded by an earlier init cannot be used; choose them again:",
+		manifestPath,
+		"no AI families are recorded",
+		"AI families [codex,claude, default]:",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("unrecognized AI families prompt lacks %q:\n%s", want, diagnostics.String())
+		}
+	}
+	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
+		families,
+		[]string{"codex", "claude"},
+	) {
+		t.Fatalf("re-chosen AI families = %#v, want codex and claude", families)
+	}
+}
+
+// TestInitRunnerQuestionTakesAModeNameOnly keeps the numbered AI-families
+// question from spreading to the runner question: its choices carry no numbers,
+// a typed number is not a mode, and neither is an answer that names two.
+func TestInitRunnerQuestionTakesAModeNameOnly(t *testing.T) {
+	catalog, err := runnerCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := catalog.PermissionRequests()[0]
+	if len(request.Choices) < 2 {
+		t.Fatalf("runner %q offers %d choices, want at least 2", request.Name, len(request.Choices))
+	}
+	firstMode := string(request.Choices[0].Mode)
+	secondMode := string(request.Choices[1].Mode)
+
+	var closedOutput bytes.Buffer
+	closedConsole := initConsole{
+		input:  bufio.NewReader(strings.NewReader("1")),
+		output: &closedOutput,
+	}
+	_, err = closedConsole.askRunnerMode(request, singleOffer(string(request.Default), false))
+	if err == nil || !strings.Contains(err.Error(), `unsupported mode "1"`) {
+		t.Fatalf("numbered runner answer error = %v, want an unsupported mode", err)
+	}
+	if strings.Contains(closedOutput.String(), "1) "+firstMode) {
+		t.Fatalf("runner question numbered its choices:\n%s", closedOutput.String())
+	}
+
+	var output bytes.Buffer
+	console := initConsole{
+		input: bufio.NewReader(
+			strings.NewReader(firstMode + "," + secondMode + "\n" + secondMode + "\n"),
+		),
+		output: &output,
+	}
+	mode, err := console.askRunnerMode(request, singleOffer(string(request.Default), false))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode != request.Choices[1].Mode {
+		t.Fatalf("mode after a refused answer = %q, want %q", mode, request.Choices[1].Mode)
+	}
+	wantPrompt := fmt.Sprintf("Unsupported mode %q", firstMode+","+secondMode)
+	if !strings.Contains(output.String(), wantPrompt) {
+		t.Fatalf("single-choice question lacks %q:\n%s", wantPrompt, output.String())
+	}
+}
+
+func initMCPConfigArgs(t *testing.T, dir string) []string {
+	t.Helper()
 	config, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -540,26 +765,31 @@ func TestInitExplicitAIProfileWritesManagedArguments(t *testing.T) {
 	if err = json.Unmarshal(config, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	wantArgs := []string{"serve", "--root", dir, "--ai", "codex"}
-	if got := decoded.Servers["just-mcp-work"].Args; !slices.Equal(got, wantArgs) {
-		t.Fatalf("managed MCP args = %#v, want %#v", got, wantArgs)
-	}
+	return decoded.Servers["just-mcp-work"].Args
+}
+
+func initRecordedAIFamilies(t *testing.T, dir string) []string {
+	t.Helper()
 	manifest, err := os.ReadFile(filepath.Join(dir, ".just-mcp-work", "managed.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(manifest, []byte(`"ai_family": "codex"`)) {
-		t.Fatalf("managed manifest does not record codex AI family:\n%s", manifest)
+	var decoded struct {
+		AIFamilies []string `json:"ai_families"`
 	}
+	if err = json.Unmarshal(manifest, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded.AIFamilies
 }
 
-func TestInitOffersRecordedAIProfileAsCurrent(t *testing.T) {
+func TestInitOffersRecordedAIFamiliesAsCurrent(t *testing.T) {
 	dir := t.TempDir()
 	firstArgs := append(
 		initArgsWithRunnerModesWithoutAI(dir),
 		"--write-mcp-config=true",
 		"--shell-permission", "ask",
-		"--ai", "codex",
+		"--ai", "claude",
 	)
 	if err := initCommandWithIO(
 		false,
@@ -586,63 +816,80 @@ func TestInitOffersRecordedAIProfileAsCurrent(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"codex (current)", "AI family [codex, current]:"} {
+	for _, want := range []string{
+		"  1) codex (default) - ",
+		"  2) claude (current, default) - ",
+		"AI families [claude, current]:",
+	} {
 		if !strings.Contains(diagnostics.String(), want) {
-			t.Fatalf("recorded AI profile prompt lacks %q:\n%s", want, diagnostics.String())
+			t.Fatalf("recorded AI family prompt lacks %q:\n%s", want, diagnostics.String())
 		}
 	}
-	config, err := os.ReadFile(filepath.Join(dir, ".mcp.json"))
-	if err != nil {
-		t.Fatal(err)
+	wantMCPArgs := []string{"serve", "--root", dir, "--ai", "claude"}
+	if got := initMCPConfigArgs(t, dir); !slices.Equal(got, wantMCPArgs) {
+		t.Fatalf("accepting the current AI families changed managed args = %#v", got)
 	}
-	if !bytes.Contains(config, []byte(`"--ai"`)) ||
-		!bytes.Contains(config, []byte(`"codex"`)) {
-		t.Fatalf("accepting current AI profile changed managed args:\n%s", config)
-	}
-}
-
-func TestInitRejectsUnsupportedAIProfileBeforeWriting(t *testing.T) {
-	dir := t.TempDir()
-	err := initCommandWithIO(
-		false,
-		[]string{"--dir", dir, "--ai", "gemini"},
-		strings.NewReader(""),
-		io.Discard,
-		io.Discard,
-	)
-	if err == nil || !strings.Contains(err.Error(), "unknown, codex, claude") {
-		t.Fatalf("init unsupported AI profile error = %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(dir, ".just-mcp-work")); !os.IsNotExist(statErr) {
-		t.Fatalf("unsupported AI profile wrote workspace state: %v", statErr)
+	if families := initRecordedAIFamilies(t, dir); !slices.Equal(families, []string{"claude"}) {
+		t.Fatalf("accepting the current AI families recorded %#v", families)
 	}
 }
 
-func TestInitExplicitAIProfileRepairsUnreadableManifest(t *testing.T) {
+func TestInitRejectsUnusableAIFamiliesBeforeWriting(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "unsupported", value: "gemini", want: "must be one of codex, claude"},
+		{
+			name:  "placeholder of older releases",
+			value: "unknown",
+			want:  `unsupported AI family "unknown"`,
+		},
+		{name: "no family named", value: " ", want: "no AI family is selected"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			err := initCommandWithIO(
+				false,
+				[]string{"--dir", dir, "--ai", testCase.value},
+				strings.NewReader(""),
+				io.Discard,
+				io.Discard,
+			)
+			if err == nil || !strings.Contains(err.Error(), testCase.want) {
+				t.Fatalf("init --ai %q error = %v, want %q", testCase.value, err, testCase.want)
+			}
+			if _, statErr := os.Stat(filepath.Join(dir, ".just-mcp-work")); !os.IsNotExist(statErr) {
+				t.Fatalf("unusable AI families wrote workspace state: %v", statErr)
+			}
+		})
+	}
+}
+
+// TestInitExplicitAIFamiliesRefuseAnUnreadableManifest holds the explicit --ai
+// route to the same refusal the console route gives. The recorded document
+// carries the surfaces init must carry forward and the modes it must refuse to
+// change; when this binary cannot decode it, init stops rather than rewrite the
+// workspace from state it cannot see, and the file is left as it was.
+func TestInitExplicitAIFamiliesRefuseAnUnreadableManifest(t *testing.T) {
 	dir := t.TempDir()
 	manifestPath := filepath.Join(dir, ".just-mcp-work", "managed.json")
 	if err := os.MkdirAll(filepath.Dir(manifestPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(manifestPath, []byte("{not json"), 0o600); err != nil {
+	before := []byte("{not json")
+	if err := os.WriteFile(manifestPath, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	args := append(initArgsWithRunnerModesWithoutAI(dir), "--ai", "claude")
-	if err := initCommandWithIO(
-		false,
-		args,
-		strings.NewReader(""),
-		io.Discard,
-		io.Discard,
-	); err != nil {
-		t.Fatal(err)
+	err := initCommandWithIO(false, args, strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "decode managed manifest") {
+		t.Fatalf("init over an unreadable manifest error = %v, want a decode refusal", err)
 	}
-	manifest, err := os.ReadFile(manifestPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(manifest, []byte(`"ai_family": "claude"`)) {
-		t.Fatalf("explicit AI profile did not repair managed manifest:\n%s", manifest)
+	after, readErr := os.ReadFile(manifestPath)
+	if readErr != nil || !bytes.Equal(after, before) {
+		t.Fatalf("refused init rewrote the manifest: %q, %v", after, readErr)
 	}
 }
 
@@ -718,7 +965,9 @@ func TestInitSnippetPinsSelectedLinkedWorktreeWhenCWDIsDifferent(t *testing.T) {
 		t.Fatalf("decode MCP snippet: %v\n%s", err, output.String())
 	}
 	args := snippet.Servers["just-mcp-work"].Args
-	want := []string{"serve", "--root", worktreeDir}
+	// No --ai answers the family question with its default, both families,
+	// so the .mcp.json snippet declares claude.
+	want := []string{"serve", "--root", worktreeDir, "--ai", "claude"}
 	if !slices.Equal(args, want) {
 		t.Fatalf("snippet args = %#v, want %#v", args, want)
 	}
@@ -833,7 +1082,7 @@ func TestInitEOFRejectsUnansweredRunnerQuestion(t *testing.T) {
 	var diagnostics bytes.Buffer
 	err := initCommandWithIO(
 		false,
-		[]string{"--dir", dir, "--agents", "codex", "--ai", "unknown"},
+		[]string{"--dir", dir, "--agents", "codex", "--ai", "codex"},
 		strings.NewReader(""),
 		&result,
 		&diagnostics,
@@ -1147,6 +1396,9 @@ func TestInitLeavesRecordedBetaWorkspaceWhenConfirmed(t *testing.T) {
 }
 
 func TestInitAsksWhenRecordedBetaModeCannotBeRead(t *testing.T) {
+	// A manifest of a schema this binary does not support still decodes, so init
+	// asks and continues. A malformed one does not, and the question is followed
+	// by the refusal to plan from a document that cannot be read.
 	for _, name := range []string{"malformed", "unsupported schema"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1174,15 +1426,13 @@ func TestInitAsksWhenRecordedBetaModeCannotBeRead(t *testing.T) {
 			}
 
 			var diagnostics bytes.Buffer
-			if err := initCommandWithIO(
+			initErr := initCommandWithIO(
 				false,
 				initArgsWithoutQuestions(dir),
 				strings.NewReader("yes\n"),
 				io.Discard,
 				&diagnostics,
-			); err != nil {
-				t.Fatal(err)
-			}
+			)
 			for _, want := range []string{
 				"beta-test mode could not be read",
 				"Plain init may remove beta feedback guidance.",
@@ -1190,6 +1440,16 @@ func TestInitAsksWhenRecordedBetaModeCannotBeRead(t *testing.T) {
 				if !strings.Contains(diagnostics.String(), want) {
 					t.Fatalf("unknown-mode question does not contain %q: %q", want, diagnostics.String())
 				}
+			}
+			if name == "malformed" {
+				if initErr == nil ||
+					!strings.Contains(initErr.Error(), "decode managed manifest") {
+					t.Fatalf("init over a malformed manifest error = %v, want a decode refusal", initErr)
+				}
+				return
+			}
+			if initErr != nil {
+				t.Fatal(initErr)
 			}
 			assertWorkspaceBetaTest(t, dir, false)
 		})
@@ -1389,7 +1649,7 @@ func TestRunSelectsTheRequestedManagedBlock(t *testing.T) {
 				"codex",
 				"--write-mcp-config=false",
 				"--ai",
-				"unknown",
+				"codex",
 				"--runner-mode",
 				"just=all",
 				"--runner-mode",
@@ -1573,8 +1833,8 @@ func TestParseServeOptionsTracksExplicitRoot(t *testing.T) {
 
 func TestParseServeOptionsSelectsAIProfile(t *testing.T) {
 	options, _, err := parseServeOptions(nil)
-	if err != nil || options.AIProfile != aiprofile.Unknown() {
-		t.Fatalf("default AI profile = %#v, %v, want unknown", options.AIProfile, err)
+	if err != nil || options.AIProfile.Declared() {
+		t.Fatalf("default AI profile = %#v, %v, want none", options.AIProfile, err)
 	}
 	for _, family := range []string{"codex", "claude"} {
 		options, _, err = parseServeOptions([]string{"--ai", family})
@@ -1690,7 +1950,6 @@ func TestServeRejectsRetiredRunnerModeWithMigrationMessage(t *testing.T) {
 	}
 	wantOptions := map[string]string{
 		"root_explicit":     "true",
-		"ai_profile":        "jmw/unknown",
 		"timeout":           "15m0s",
 		"timeout_unlimited": "false",
 		"sync_deadline":     "1m0s",
@@ -1800,7 +2059,6 @@ func TestServeStartupFailureRecordsOptionsForPositionalArgument(t *testing.T) {
 	failure := readStartupFailureRecord(t, root)
 	want := map[string]string{
 		"root_explicit":     "true",
-		"ai_profile":        "jmw/unknown",
 		"timeout":           "15m0s",
 		"timeout_unlimited": "false",
 		"sync_deadline":     "1m0s",
@@ -2395,7 +2653,7 @@ func TestInitRunnerChoiceLineMatchesPermissionRequest(t *testing.T) {
 	}
 	request := catalog.PermissionRequests()[1]
 	choice := request.Choices[0]
-	offer := enumeratedOffer{value: string(choice.Mode), current: true}
+	offer := singleOffer(string(choice.Mode), true)
 	var output bytes.Buffer
 	console := initConsole{
 		input:  bufio.NewReader(strings.NewReader("\n")),
@@ -2411,7 +2669,7 @@ func TestInitRunnerChoiceLineMatchesPermissionRequest(t *testing.T) {
 	wantLine := fmt.Sprintf(
 		"  %s%s - %s: %s\n",
 		choice.Mode,
-		enumeratedChoiceLabel(string(choice.Mode), string(request.Default), offer),
+		enumeratedChoiceLabel(string(choice.Mode), []string{string(request.Default)}, offer),
 		choice.Label,
 		choice.Description,
 	)

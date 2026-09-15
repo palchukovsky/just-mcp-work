@@ -14,10 +14,12 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
@@ -186,7 +188,6 @@ func parseServeOptions(args []string) (serveOptions, string, error) {
 	options := serveOptions{
 		Root:              *root,
 		RootExplicit:      rootExplicit,
-		AIProfile:         aiprofile.Unknown(),
 		Timeout:           *timeout,
 		TimeoutUnlimited:  *timeout == 0,
 		SyncDeadline:      *syncDeadline,
@@ -266,13 +267,17 @@ func serve(args []string) (resultErr error) {
 		return fmt.Errorf("verify managed surfaces: %w", verifyErr)
 	}
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	logger.Info(
-		"AI profile selected",
-		"ai_family", options.AIProfile.Family,
-		"profile_id", options.AIProfile.ID,
-		"profile_version", options.AIProfile.Version,
-		"transport", options.AIProfile.Transport,
-	)
+	if options.AIProfile.Declared() {
+		logger.Info(
+			"AI profile selected",
+			"ai_family", options.AIProfile.Family,
+			"profile_id", options.AIProfile.ID,
+			"profile_version", options.AIProfile.Version,
+			"transport", options.AIProfile.Transport,
+		)
+	} else {
+		logger.Info("AI profile not declared")
+	}
 	registry, err := runnerRegistry(root, logger)
 	if err != nil {
 		return err
@@ -469,8 +474,9 @@ func initCommandWithIO(
 	aiFamily := flags.String(
 		"ai",
 		"",
-		"AI family for generated managed server arguments: unknown, codex, or claude; "+
-			"empty asks on the console",
+		"AI families for generated managed server arguments, one per generated "+
+			"configuration: any of "+strings.Join(familyNames(aiprofile.Declarable()), ", ")+
+			" separated by commas; empty asks on the console",
 	)
 	var runnerModes runnerModeFlag
 	flags.Var(
@@ -486,7 +492,7 @@ func initCommandWithIO(
 			flags.Output(),
 			"Usage: just-mcp-work "+command+" [--dir <dir>] [--agents <names>] [--dry-run] "+
 				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
-				"[--ai unknown|codex|claude] "+
+				"[--ai "+initAIFlagValues()+"] "+
 				"[--runner-mode <name>=<mode>]...",
 		)
 		flags.PrintDefaults()
@@ -521,9 +527,9 @@ func initCommandWithIO(
 			return confirmErr
 		}
 	}
-	profile, err := console.selectAIProfile(scope, *aiFamily)
+	families, err := console.selectAIFamilies(scope, *aiFamily)
 	if err != nil {
-		return fmt.Errorf("select AI profile: %w", err)
+		return fmt.Errorf("select AI families: %w", err)
 	}
 	currentModes, err := console.currentRunnerModes(scope, catalog)
 	if err != nil {
@@ -541,7 +547,7 @@ func initCommandWithIO(
 			BetaTest:          betaTest,
 			DryRun:            *dryRun,
 			WriteMCPConfig:    *writeMCPConfig,
-			AIProfile:         profile,
+			AIFamilies:        families,
 			RunnerModes:       canonicalModes,
 			ClaudePermissions: permissions,
 			ShellPermission:   parsedShellPermission,
@@ -549,9 +555,7 @@ func initCommandWithIO(
 				offer agentinit.ShellPermission,
 				current bool,
 			) (agentinit.ShellPermission, error) {
-				return console.askShellPermission(
-					enumeratedOffer{value: string(offer), current: current},
-				)
+				return console.askShellPermission(singleOffer(string(offer), current))
 			},
 			Confirm: console.confirmClaudePermissions,
 		},
@@ -559,7 +563,7 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("apply agent instructions: %w", err)
 	}
-	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig, profile)
+	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig, families)
 }
 
 func writeInitResult(
@@ -567,7 +571,7 @@ func writeInitResult(
 	result agentinit.Result,
 	dryRun bool,
 	writeMCPConfig bool,
-	profile aiprofile.Profile,
+	families aiprofile.Selection,
 ) error {
 	if dryRun {
 		for _, diff := range result.Diffs {
@@ -594,7 +598,7 @@ func writeInitResult(
 			"Restart Codex or your MCP client to load updated server configuration.\n",
 		)
 	}
-	snippet, snippetErr := agentinit.MCPConfigSnippet(result.Scope, profile)
+	snippet, snippetErr := agentinit.MCPConfigSnippet(result.Scope, families)
 	if snippetErr != nil {
 		return fmt.Errorf("build MCP config snippet: %w", snippetErr)
 	}
@@ -612,40 +616,53 @@ type initConsole struct {
 	output io.Writer
 }
 
-func parseInitAIProfile(value string) (aiprofile.Profile, error) {
-	switch aiprofile.Family(value) {
-	case aiprofile.FamilyUnknown:
-		return aiprofile.Unknown(), nil
-	case aiprofile.FamilyCodex, aiprofile.FamilyClaude:
-		profile, err := aiprofile.Parse(value)
-		if err != nil {
-			return aiprofile.Profile{}, fmt.Errorf("parse AI family: %w", err)
-		}
-		return profile, nil
-	default:
-		return aiprofile.Profile{}, fmt.Errorf(
-			"unsupported AI family %q; must be one of unknown, codex, claude",
-			value,
-		)
+// parseInitAIFamilies reads the --ai value, which names as many families as the
+// workspace declares, separated the same way the console answer is.
+func parseInitAIFamilies(value string) (aiprofile.Selection, error) {
+	families, err := aiprofile.ParseSelection(splitAnswerTokens(value))
+	if err != nil {
+		return nil, fmt.Errorf("parse AI families %q: %w", value, err)
 	}
+	return families, nil
 }
 
-func (c *initConsole) selectAIProfile(
+// defaultAIFamilies is offered when no usable selection is recorded: every
+// client this product generates a configuration for is declared.
+func defaultAIFamilies() aiprofile.Selection {
+	return aiprofile.Selection{aiprofile.FamilyCodex, aiprofile.FamilyClaude}
+}
+
+func (c *initConsole) selectAIFamilies(
 	scope string,
 	explicit string,
-) (aiprofile.Profile, error) {
+) (aiprofile.Selection, error) {
 	if explicit != "" {
-		return parseInitAIProfile(explicit)
+		return parseInitAIFamilies(explicit)
 	}
-	current, found, err := agentinit.ReadRecordedAIProfile(scope)
+	current, found, err := agentinit.ReadRecordedAIFamilies(scope)
+	if errors.Is(err, agentinit.ErrUnrecognizedAIFamilies) {
+		// A recorded selection this binary cannot read, such as one written by
+		// an older release, is chosen again as in a new workspace. The refusal
+		// carries the manifest it came from and what is wrong with it, so the
+		// operator sees why the question offers the defaults.
+		if writeErr := writeInitOutput(
+			c.output,
+			"\nThe AI families recorded by an earlier init cannot be used; "+
+				"choose them again: %v\n",
+			err,
+		); writeErr != nil {
+			return nil, writeErr
+		}
+		found, err = false, nil
+	}
 	if err != nil {
-		return aiprofile.Profile{}, fmt.Errorf("read current AI profile: %w", err)
+		return nil, fmt.Errorf("read current AI families: %w", err)
 	}
-	offer := enumeratedOffer{value: string(aiprofile.FamilyUnknown)}
+	offer := enumeratedOffer{values: familyNames(defaultAIFamilies())}
 	if found {
-		offer = enumeratedOffer{value: string(current.Family), current: true}
+		offer = enumeratedOffer{values: familyNames(current), current: true}
 	}
-	return c.askAIProfile(offer)
+	return c.askAIFamilies(offer)
 }
 
 func writeInitOutput(output io.Writer, format string, arguments ...any) error {
@@ -799,9 +816,9 @@ func (c *initConsole) selectRunnerModes(
 		if _, found := overridden[request.Name]; found {
 			continue
 		}
-		offer := enumeratedOffer{value: string(request.Default)}
+		offer := singleOffer(string(request.Default), false)
 		if currentMode, found := currentModes[request.Name]; found {
-			offer = enumeratedOffer{value: string(currentMode), current: true}
+			offer = singleOffer(string(currentMode), true)
 		}
 		mode, askErr := c.askRunnerMode(request, offer)
 		if askErr != nil {
@@ -824,7 +841,7 @@ type enumeratedChoice struct {
 
 type enumeratedQuestion struct {
 	introduction          string
-	defaultValue          string
+	defaultValues         []string
 	promptLabel           string
 	readDescription       string
 	unansweredDescription string
@@ -833,11 +850,20 @@ type enumeratedQuestion struct {
 	unsupported           func(string) error
 	unsupportedPrompt     func(string) string
 	choices               []enumeratedChoice
+	// multiple accepts several choices in one answer. A single-choice question
+	// refuses an answer that names more than one.
+	multiple bool
 }
 
+// enumeratedOffer is the answer proposed for an unanswered question: the
+// recorded choices when there are any, otherwise the question's default.
 type enumeratedOffer struct {
-	value   string
+	values  []string
 	current bool
+}
+
+func singleOffer(value string, current bool) enumeratedOffer {
+	return enumeratedOffer{values: []string{value}, current: current}
 }
 
 func (c *initConsole) askRunnerMode(
@@ -865,7 +891,7 @@ func (c *initConsole) askRunnerMode(
 			request.Context,
 		),
 		choices:               choices,
-		defaultValue:          string(request.Default),
+		defaultValues:         []string{string(request.Default)},
 		promptLabel:           "Mode",
 		readDescription:       request.Name + " runner mode",
 		unansweredDescription: fmt.Sprintf("runner %q mode", request.Name),
@@ -885,30 +911,45 @@ func (c *initConsole) askRunnerMode(
 			)
 		},
 	}
-	value, err := c.askEnumeratedChoice(question, offer)
-	return runner.Mode(value), err
+	values, err := c.askEnumeratedChoice(question, offer)
+	if err != nil {
+		return "", err
+	}
+	return runner.Mode(values[0]), nil
 }
 
 func (c *initConsole) askEnumeratedChoice(
 	question enumeratedQuestion,
 	offer enumeratedOffer,
-) (string, error) {
+) ([]string, error) {
 	if err := writeInitOutput(c.output, "%s", question.introduction); err != nil {
-		return "", err
+		return nil, err
 	}
-	for _, choice := range question.choices {
+	for index, choice := range question.choices {
+		// Only a question answered with several choices numbers them, because
+		// only its answer needs a short way to name more than one.
+		number, warningIndent := "", "    "
+		if question.multiple {
+			number, warningIndent = fmt.Sprintf("%d) ", index+1), "     "
+		}
 		if err := writeInitOutput(
 			c.output,
-			"  %s%s - %s\n",
+			"  %s%s%s - %s\n",
+			number,
 			choice.value,
-			enumeratedChoiceLabel(choice.value, question.defaultValue, offer),
+			enumeratedChoiceLabel(choice.value, question.defaultValues, offer),
 			choice.description,
 		); err != nil {
-			return "", err
+			return nil, err
 		}
 		if choice.warning != "" {
-			if err := writeInitOutput(c.output, "    WARNING: %s\n", choice.warning); err != nil {
-				return "", err
+			if err := writeInitOutput(
+				c.output,
+				"%sWARNING: %s\n",
+				warningIndent,
+				choice.warning,
+			); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -917,14 +958,14 @@ func (c *initConsole) askEnumeratedChoice(
 
 func enumeratedChoiceLabel(
 	value string,
-	declaredDefault string,
+	defaults []string,
 	offer enumeratedOffer,
 ) string {
 	labels := make([]string, 0, 2)
-	if offer.current && value == offer.value {
+	if offer.current && slices.Contains(offer.values, value) {
 		labels = append(labels, "current")
 	}
-	if value == declaredDefault {
+	if slices.Contains(defaults, value) {
 		labels = append(labels, "default")
 	}
 	if len(labels) == 0 {
@@ -936,7 +977,7 @@ func enumeratedChoiceLabel(
 func (c *initConsole) readEnumeratedChoice(
 	question enumeratedQuestion,
 	offer enumeratedOffer,
-) (string, error) {
+) ([]string, error) {
 	source := "default"
 	if offer.current {
 		source = "current"
@@ -946,43 +987,97 @@ func (c *initConsole) readEnumeratedChoice(
 			c.output,
 			"%s [%s, %s]: ",
 			question.promptLabel,
-			offer.value,
+			strings.Join(offer.values, ","),
 			source,
 		); err != nil {
-			return "", err
+			return nil, err
 		}
 		answer, err := c.input.ReadString('\n')
 		trimmed := strings.TrimSpace(answer)
 		if err != nil && !errors.Is(err, io.EOF) {
-			return "", fmt.Errorf("read %s: %w", question.readDescription, err)
+			return nil, fmt.Errorf("read %s: %w", question.readDescription, err)
 		}
 		if trimmed == "" {
 			if errors.Is(err, io.EOF) {
 				if writeErr := writeInitOutput(c.output, "\n"); writeErr != nil {
-					return "", writeErr
+					return nil, writeErr
 				}
-				return "", fmt.Errorf(
+				return nil, fmt.Errorf(
 					"%s was unanswered at end of input; use %s for non-interactive init",
 					question.unansweredDescription,
 					question.flagName,
 				)
 			}
-			return offer.value, nil
+			return offer.values, nil
 		}
-		if value, found := question.parse(trimmed); found {
-			return value, nil
+		values, prompt, answerErr := resolveEnumeratedAnswer(question, trimmed)
+		if answerErr == nil {
+			return values, nil
 		}
 		if errors.Is(err, io.EOF) {
-			return "", question.unsupported(trimmed)
+			return nil, answerErr
 		}
-		if writeErr := writeInitOutput(
-			c.output,
-			"%s",
-			question.unsupportedPrompt(trimmed),
-		); writeErr != nil {
-			return "", writeErr
+		if writeErr := writeInitOutput(c.output, "%s", prompt); writeErr != nil {
+			return nil, writeErr
 		}
 	}
+}
+
+// resolveEnumeratedAnswer turns one typed answer into the values it names. It
+// returns the console prompt for a rejected answer beside the error carrying
+// the same rejection, so a closed console fails with the reason it would have
+// printed. A single-choice question reads the whole answer as one name, so only
+// a question answered with several choices splits it or accepts a number.
+func resolveEnumeratedAnswer(
+	question enumeratedQuestion,
+	answer string,
+) ([]string, string, error) {
+	if !question.multiple {
+		value, found := question.parse(answer)
+		if !found {
+			return nil, question.unsupportedPrompt(answer), question.unsupported(answer)
+		}
+		return []string{value}, "", nil
+	}
+	tokens := splitAnswerTokens(answer)
+	if len(tokens) == 0 {
+		return nil, question.unsupportedPrompt(answer), question.unsupported(answer)
+	}
+	values := make([]string, 0, len(tokens))
+	for _, token := range tokens {
+		value, found := resolveEnumeratedToken(question, token)
+		if !found {
+			return nil, question.unsupportedPrompt(token), question.unsupported(token)
+		}
+		if slices.Contains(values, value) {
+			return nil, fmt.Sprintf("%q is named twice.\n", value), fmt.Errorf(
+				"%q is named twice",
+				value,
+			)
+		}
+		values = append(values, value)
+	}
+	return values, "", nil
+}
+
+// resolveEnumeratedToken accepts either the number printed beside a choice or
+// the choice's own name, so an operator never has to retype a name to answer.
+func resolveEnumeratedToken(question enumeratedQuestion, token string) (string, bool) {
+	if index, err := strconv.Atoi(token); err == nil {
+		if index < 1 || index > len(question.choices) {
+			return "", false
+		}
+		return question.choices[index-1].value, true
+	}
+	return question.parse(token)
+}
+
+// splitAnswerTokens cuts an answer on everything a choice name cannot contain,
+// so numbers and names may be separated by commas, spaces, or both.
+func splitAnswerTokens(answer string) []string {
+	return strings.FieldsFunc(answer, func(char rune) bool {
+		return !unicode.IsLetter(char) && !unicode.IsDigit(char) && char != '-' && char != '_'
+	})
 }
 
 func findRequestedMode(request runner.PermissionRequest, value string) (runner.Mode, bool) {
@@ -1002,49 +1097,75 @@ func requestModeNames(request runner.PermissionRequest) string {
 	return strings.Join(names, ", ")
 }
 
-func (c *initConsole) askAIProfile(offer enumeratedOffer) (aiprofile.Profile, error) {
+func (c *initConsole) askAIFamilies(offer enumeratedOffer) (aiprofile.Selection, error) {
+	choices := make([]enumeratedChoice, 0, len(aiprofile.Declarable()))
+	for _, family := range aiprofile.Declarable() {
+		config, found := agentinit.AIFamilyConfig(family)
+		if !found {
+			return nil, fmt.Errorf("no generated configuration declares AI family %q", family)
+		}
+		choices = append(choices, enumeratedChoice{
+			value:       string(family),
+			description: "declare it in " + config,
+		})
+	}
 	question := enumeratedQuestion{
-		introduction: "\nWhich AI family should the managed just-mcp-work server present?\n" +
+		introduction: "\nWhich AI families should the managed just-mcp-work server declare?\n" +
+			"Each family is declared in the configuration its own client reads, so a " +
+			"workspace used by several of them names several; answer with the numbers " +
+			"or the names, in any order.\n" +
 			"This is recorded provenance and changes presentation only; runner and shell " +
 			"permissions stay unchanged.\n",
-		choices: []enumeratedChoice{
-			{
-				value:       string(aiprofile.FamilyUnknown),
-				description: "do not declare an AI family",
-			},
-			{
-				value:       string(aiprofile.FamilyCodex),
-				description: "declare the Codex presentation profile",
-			},
-			{
-				value:       string(aiprofile.FamilyClaude),
-				description: "declare the Claude presentation profile",
-			},
-		},
-		defaultValue:          string(aiprofile.FamilyUnknown),
-		promptLabel:           "AI family",
-		readDescription:       "AI family",
-		unansweredDescription: "AI family",
-		flagName:              "--ai unknown|codex|claude",
+		choices:               choices,
+		defaultValues:         familyNames(defaultAIFamilies()),
+		promptLabel:           "AI families",
+		readDescription:       "AI families",
+		unansweredDescription: "AI families",
+		flagName:              "--ai " + initAIFlagValues(),
+		multiple:              true,
 		parse: func(value string) (string, bool) {
-			profile, err := parseInitAIProfile(value)
-			return string(profile.Family), err == nil
+			if !slices.Contains(aiprofile.Declarable(), aiprofile.Family(value)) {
+				return "", false
+			}
+			return value, true
 		},
 		unsupported: func(value string) error {
 			return fmt.Errorf("unsupported AI family %q", value)
 		},
 		unsupportedPrompt: func(value string) string {
 			return fmt.Sprintf(
-				"Unsupported AI family %q; choose one of unknown, codex, claude.\n",
+				"Unsupported AI family %q; choose any of %s.\n",
 				value,
+				strings.Join(familyNames(aiprofile.Declarable()), ", "),
 			)
 		},
 	}
-	value, err := c.askEnumeratedChoice(question, offer)
+	values, err := c.askEnumeratedChoice(question, offer)
 	if err != nil {
-		return aiprofile.Profile{}, err
+		return nil, err
 	}
-	return parseInitAIProfile(value)
+	// The console already refused every answer this can reject, so a failure
+	// here is a disagreement between the question and the family set itself.
+	families, err := aiprofile.ParseSelection(values)
+	if err != nil {
+		return nil, fmt.Errorf("select AI families %v: %w", values, err)
+	}
+	return families, nil
+}
+
+func familyNames(families []aiprofile.Family) []string {
+	names := make([]string, 0, len(families))
+	for _, family := range families {
+		names = append(names, string(family))
+	}
+	return names
+}
+
+// initAIFlagValues documents --ai the way it is answered: one family, or
+// several separated by commas.
+func initAIFlagValues() string {
+	names := familyNames(aiprofile.Declarable())
+	return strings.Join(names, "|") + "|" + strings.Join(names, ",")
 }
 
 func (c *initConsole) askShellPermission(
@@ -1063,7 +1184,7 @@ func (c *initConsole) askShellPermission(
 				description: "use the Claude ask list and Codex prompt mode",
 			},
 		},
-		defaultValue:          string(agentinit.ShellPermissionAsk),
+		defaultValues:         []string{string(agentinit.ShellPermissionAsk)},
 		promptLabel:           "Shell permission",
 		readDescription:       "shell permission",
 		unansweredDescription: "shell permission",
@@ -1082,8 +1203,11 @@ func (c *initConsole) askShellPermission(
 			)
 		},
 	}
-	value, err := c.askEnumeratedChoice(question, offer)
-	return agentinit.ShellPermission(value), err
+	values, err := c.askEnumeratedChoice(question, offer)
+	if err != nil {
+		return "", err
+	}
+	return agentinit.ShellPermission(values[0]), nil
 }
 
 // confirmClaudePermissions asks the operator on the same buffered console used

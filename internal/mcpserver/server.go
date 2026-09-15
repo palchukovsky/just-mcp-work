@@ -956,7 +956,7 @@ type runDetails struct {
 	Args                []string          `json:"args,omitempty"`
 	CWD                 string            `json:"cwd,omitempty"`
 	WriteScope          []string          `json:"write_scope,omitempty"`
-	AIProfile           aiprofile.Profile `json:"ai_profile"`
+	AIProfile           aiprofile.Profile `json:"ai_profile,omitzero"`
 	PID                 int               `json:"pid,omitempty"`
 	OwnerPID            int               `json:"owner_pid,omitempty"`
 	ProcessAlive        *bool             `json:"process_alive,omitempty"`

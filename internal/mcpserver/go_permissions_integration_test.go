@@ -175,7 +175,7 @@ func TestAIProfileDoesNotChangeTaskSurfaceOrAuthorization(t *testing.T) {
 func testAIProfiles(t *testing.T) []aiprofile.Profile {
 	t.Helper()
 	return []aiprofile.Profile{
-		aiprofile.Unknown(),
+		{},
 		mustTestAIProfile(t, "codex"),
 		mustTestAIProfile(t, "claude"),
 	}
@@ -196,7 +196,7 @@ func assertGoPermissionModeAtMCPBoundary(
 		t.Fatal(err)
 	}
 	registry := newGoPermissionRegistry(t, mode)
-	server, store := newPermissionBoundaryServer(t, root, registry, aiprofile.Unknown())
+	server, store := newPermissionBoundaryServer(t, root, registry, aiprofile.Profile{})
 	_, listed, err := server.listTasks(
 		context.Background(),
 		nil,
@@ -315,7 +315,7 @@ func TestTaskInputValidationPrecedesRunnerVersionAndProcessStart(t *testing.T) {
 		t,
 		root,
 		registry,
-		aiprofile.Unknown(),
+		aiprofile.Profile{},
 	)
 	_, rejected, err := server.runTask(
 		context.Background(),

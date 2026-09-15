@@ -1763,7 +1763,7 @@ func TestReceiptForHandleUsesImmutableWorktreeIdentity(t *testing.T) {
 
 func TestRejectedReceiptForHandleUsesMutableAIProfile(t *testing.T) {
 	server := newShellTestServer(t, t.TempDir())
-	originalProfile := aiprofile.Unknown()
+	originalProfile := aiprofile.Profile{}
 	handle, err := server.store.Begin(runstore.Meta{
 		TaskID:    "just:receipt-profile",
 		AIProfile: originalProfile,
@@ -1858,6 +1858,58 @@ func TestAIProfileJSONShapeInReceiptAndPersistedMetadata(t *testing.T) {
 			}
 			if !reflect.DeepEqual(gotProfile, wantProfile) {
 				t.Fatalf("ai_profile = %#v, want exactly %#v", gotProfile, wantProfile)
+			}
+		})
+	}
+}
+
+// TestUndeclaredAIProfileIsAbsentFromReceiptAndPersistedMetadata pins that a
+// server started without --ai presents no profile at all: neither the MCP
+// receipt nor meta.json carries an ai_profile key.
+func TestUndeclaredAIProfileIsAbsentFromReceiptAndPersistedMetadata(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	handle, err := server.store.Begin(runstore.Meta{TaskID: "just:undeclared-profile-json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if finishErr := handle.Finish(
+			runstore.StatusOK,
+			0,
+			"",
+			false,
+			false,
+		); finishErr != nil {
+			t.Errorf("finish undeclared profile fixture: %v", finishErr)
+		}
+	}()
+
+	receiptJSON, err := json.Marshal(
+		receiptForHandle(handle, executor.Result{RunID: handle.Meta.RunID}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metadataJSON, err := os.ReadFile(
+		filepath.Join(server.store.LogRoot(), handle.Meta.RunID, "meta.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		name    string
+		encoded []byte
+	}{
+		{name: "MCP receipt", encoded: receiptJSON},
+		{name: "persisted meta.json", encoded: metadataJSON},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(testCase.encoded, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if profileJSON, found := envelope["ai_profile"]; found {
+				t.Fatalf("ai_profile = %s, want no key for an undeclared profile", profileJSON)
 			}
 		})
 	}

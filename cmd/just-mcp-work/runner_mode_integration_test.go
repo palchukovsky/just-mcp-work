@@ -34,7 +34,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 		[]string{
 			"--dir", root,
 			"--agents", "codex",
-			"--ai", "unknown",
+			"--ai", "codex",
 			"--shell-permission", "ask",
 			"--runner-mode", "just=all",
 			"--runner-mode", "agent=safe",
@@ -65,10 +65,11 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 	if !loaded.Found || !slices.Equal(loaded.Selections, wantSelections) {
 		t.Fatalf("workspace policy = %+v, want selections %#v", loaded, wantSelections)
 	}
-	wantArgs := []string{"serve", "--root", root}
+	// Only codex is declared, so only the Codex configuration carries --ai.
 	configs := []struct {
 		name string
 		args []string
+		want []string
 	}{
 		{
 			name: "mcp json",
@@ -76,6 +77,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 				t,
 				filepath.Join(root, ".mcp.json"),
 			),
+			want: []string{"serve", "--root", root},
 		},
 		{
 			name: "codex toml",
@@ -83,12 +85,13 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 				t,
 				filepath.Join(root, ".codex", "config.toml"),
 			),
+			want: []string{"serve", "--root", root, "--ai", "codex"},
 		},
 	}
 	for _, config := range configs {
 		t.Run(config.name, func(t *testing.T) {
-			if !slices.Equal(config.args, wantArgs) {
-				t.Fatalf("managed serve args = %#v, want %#v", config.args, wantArgs)
+			if !slices.Equal(config.args, config.want) {
+				t.Fatalf("managed serve args = %#v, want %#v", config.args, config.want)
 			}
 		})
 	}

@@ -48,6 +48,7 @@ func TestApplyUpdatesJunctionedCodexConfigDirectory(t *testing.T) {
 		Dir:             dir,
 		Agents:          []string{"codex"},
 		WriteMCPConfig:  true,
+		AIFamilies:      testAIFamilies(),
 		RunnerModes:     testRunnerModes(t),
 	})
 	if err != nil {
