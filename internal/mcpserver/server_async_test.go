@@ -814,6 +814,35 @@ func TestRunStatusUsesPersistedTaskTimeout(t *testing.T) {
 	}
 }
 
+// TestRunStatusCompletedRunOmitsTimeoutCountdowns pins what the guide promises
+// about a finished run: the task timeout itself stays, both countdowns to it go.
+// An agent told to expect them on a completed status call finds nothing and can
+// read the receipt as incomplete.
+func TestRunStatusCompletedRunOmitsTimeoutCountdowns(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	timeout := int64((10 * time.Second) / time.Millisecond)
+	handle, err := server.store.Begin(
+		runstore.Meta{TaskID: "shell:command", TaskTimeoutMS: &timeout},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if finishErr := handle.Finish(runstore.StatusOK, 0, "", false, false); finishErr != nil {
+		t.Fatal(finishErr)
+	}
+	_, status, err := server.getRunStatus(
+		context.Background(),
+		nil,
+		getRunStatusInput{RunID: handle.Meta.RunID},
+	)
+	if err != nil ||
+		status.Completed == nil || !*status.Completed ||
+		status.TaskTimeoutMS == nil ||
+		status.TimeToTaskTimeoutMS != nil || status.TimeToTimeoutMS != nil {
+		t.Fatalf("completed run countdowns = %#v, %v", status.runDetails, err)
+	}
+}
+
 func TestShutdownBudgetCoversTerminationAndWaitDelay(t *testing.T) {
 	const grace = 3 * time.Second
 	if got, want := shutdownBudget(grace), 2*grace+time.Second; got != want {

@@ -409,11 +409,12 @@ normal receipt with an explanation in `message`, not as a tool error.
 Live receipts and status calls carry lifecycle detail worth reading before you
 act: `completed`, `process_alive`, `owned_by_this_server`,
 `last_output_age_ms`, `no_output_yet`, `stdout_bytes`, `stderr_bytes`,
-`task_timeout_ms`, and `time_to_task_timeout_ms`. Completed synchronous
-receipts and completed status views additionally carry `stdout_truncated` and
-`stderr_truncated` when the executor's corresponding fixed in-memory tail
-exceeded its limit. Those flags are independent of requested `tail_bytes` and
-appear only when true. When `serve` runs with `--ai`, receipts and status calls
+`task_timeout_ms`, and `time_to_task_timeout_ms` (present only while the run is
+still running). Completed synchronous receipts and completed status views
+additionally carry `stdout_truncated` and `stderr_truncated` when the
+executor's corresponding fixed in-memory tail exceeded its limit. Those flags
+are independent of requested `tail_bytes` and appear only when true. When
+`serve` runs with `--ai`, receipts and status calls
 also carry `ai_profile` with `family`, `profile_id`, `profile_version`, and
 `transport`; without it the key is absent. `Store.Begin`
 records the profile in the run ledger, and `get_run` returns that persisted
