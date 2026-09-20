@@ -1838,6 +1838,7 @@ func TestPromptDescribesTheTokenSavingContract(t *testing.T) {
 		"integer outside 2^53 would reach you with different digits",
 		"stdout_truncated",
 		"stderr_truncated",
+		"search_run_logs",
 		"get_run_logs",
 		"tail_bytes: 0",
 		"Omitted tail_bytes means 4096 bytes on status tools",
@@ -1866,6 +1867,7 @@ func TestManagedBlockCarriesTheSameContract(t *testing.T) {
 		"list_tasks -> run_task/start_task",
 		"receipt or short tail is enough",
 		"tail_bytes on run_task or run_shell_command",
+		"search_run_logs",
 		"too large for a tail",
 		"sub-agents",
 		"withheld it through a runner mode",
@@ -1904,6 +1906,7 @@ func TestPromptAndManagedBlockShareTheContract(t *testing.T) {
 		"run_task",
 		"start_task",
 		"tail_bytes",
+		"search_run_logs",
 		"too large for a tail",
 	}
 	for name, text := range map[string]string{
@@ -2126,6 +2129,7 @@ func TestPromptReferenceCarriesMovedToolDetails(t *testing.T) {
 		"working_directory is workspace-relative and defaults to the workspace root.",
 		"do not edit build files unless asked",
 		"default limit of 65536 bytes and a maximum of 1048576 bytes",
+		"search_run_logs returns bounded matches whose offsets go straight to get_run_logs.",
 		"Receipt fields include status, exit_code, message, run_id, duration_ms, promoted",
 		"argv blocks bypass the shell",
 		"arguments is accepted only with an argv block_id",

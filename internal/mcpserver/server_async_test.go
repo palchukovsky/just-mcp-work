@@ -7,6 +7,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1070,4 +1071,85 @@ func stopRunOrFail(t *testing.T, server *Server, runID string) {
 	if err != nil || stopped.Status != runstore.StatusCancelled {
 		t.Fatalf("stopRun = %#v, %v", stopped, err)
 	}
+}
+
+type appendDuringSearchContext struct {
+	context.Context
+	err       error
+	appendLog func() error
+	called    bool
+}
+
+func (c *appendDuringSearchContext) Err() error {
+	if !c.called {
+		c.called = true
+		c.err = c.appendLog()
+	}
+	return nil
+}
+
+//nolint:gocyclo // The assertions keep both reads and the deterministic append together.
+func TestSearchRunLogsDoesNotFollowAnAppendPastItsSnapshot(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	handle, err := server.store.Begin(runstore.Meta{TaskID: "test:search-live-append"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			if finishErr := handle.Finish(
+				runstore.StatusOK,
+				0,
+				"",
+				false,
+				false,
+			); finishErr != nil {
+				t.Errorf("finish live-append fixture: %v", finishErr)
+			}
+		}
+	}()
+	initial := []byte("before snapshot\n")
+	if _, err = handle.Stdout().Write(initial); err != nil {
+		t.Fatal(err)
+	}
+	query := "needle"
+	ctx := &appendDuringSearchContext{
+		Context: context.Background(),
+		appendLog: func() error {
+			_, writeErr := handle.Stdout().Write([]byte("needle after snapshot\n"))
+			if writeErr != nil {
+				return fmt.Errorf("append live-search log: %w", writeErr)
+			}
+			return nil
+		},
+	}
+	_, first, err := server.searchRunLogs(
+		ctx,
+		nil,
+		searchRunLogsInput{RunID: handle.Meta.RunID, Query: &query, Stream: "stdout"},
+	)
+	if err != nil || first.Error != nil || ctx.err != nil || !ctx.called {
+		t.Fatalf("snapshot search = %#v, search error %v, append error %v", first, err, ctx.err)
+	}
+	if len(first.Streams) != 1 ||
+		!first.Streams[0].Complete ||
+		first.Streams[0].NextOffset != int64(len(initial)) ||
+		len(first.Streams[0].Matches) != 0 {
+		t.Fatalf("snapshot search followed the append: %#v", first.Streams)
+	}
+
+	_, second, err := server.searchRunLogs(
+		context.Background(),
+		nil,
+		searchRunLogsInput{RunID: handle.Meta.RunID, Query: &query, Stream: "stdout"},
+	)
+	if err != nil || second.Error != nil || len(second.Streams) != 1 ||
+		len(second.Streams[0].Matches) != 1 {
+		t.Fatalf("second search did not see the append: %#v, %v", second, err)
+	}
+	if err = handle.Finish(runstore.StatusOK, 0, "", false, false); err != nil {
+		t.Fatal(err)
+	}
+	finished = true
 }

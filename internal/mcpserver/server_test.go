@@ -282,8 +282,8 @@ func TestTaskDescriptionsRetainTheirSafetyContract(t *testing.T) {
 
 func TestRegisteredToolContextBudget(t *testing.T) {
 	tools := registeredTools(t)
-	if len(tools) != 14 {
-		t.Fatalf("registered tools = %d, want 14", len(tools))
+	if len(tools) != 15 {
+		t.Fatalf("registered tools = %d, want 15", len(tools))
 	}
 	descriptionBytes := 0
 	schemaBytes := 0
@@ -295,18 +295,19 @@ func TestRegisteredToolContextBudget(t *testing.T) {
 		}
 		schemaBytes += len(encoded)
 	}
-	if descriptionBytes > 2200 {
-		t.Errorf("tool descriptions = %d bytes, want at most 2200", descriptionBytes)
+	// Set both budgets from the measured total by rounding up to the next multiple
+	// of 250, taking one more step when that leaves less than 100 bytes of
+	// headroom. Moving either decides what every agent pays in every session:
+	// measure the new total and argue the budget; do not round up to whatever just failed.
+	// Tool descriptions measure 2480 bytes; rounding up to 2500 leaves 20 bytes,
+	// so the required extra step sets the budget at 2750.
+	if descriptionBytes > 2750 {
+		t.Errorf("tool descriptions = %d bytes, want at most 2750", descriptionBytes)
 	}
-	// Every session pays for the encoded input schemas of all 14 tools before an
-	// agent asks anything, so this ceiling is a budget, not a high-water mark.
-	// Set it from the measured total - currently 5295 bytes - by rounding up to
-	// the next multiple of 250, taking one more step when that would leave less
-	// than 100 bytes of headroom. Moving it decides what every agent pays in
-	// every session: measure the new total and argue the budget, do not round up
-	// to whatever just failed.
-	if schemaBytes > 5500 {
-		t.Errorf("tool input schemas = %d bytes, want at most 5500", schemaBytes)
+	// Encoded input schemas measure 5890 bytes; rounding up to 6000 leaves 110
+	// bytes, so no extra step is required.
+	if schemaBytes > 6000 {
+		t.Errorf("tool input schemas = %d bytes, want at most 6000", schemaBytes)
 	}
 }
 

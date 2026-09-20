@@ -288,6 +288,14 @@ func (s *Server) newMCPServer() *mcp.Server {
 	mcp.AddTool(
 		server,
 		&mcp.Tool{
+			Name:        "search_run_logs",
+			Description: searchRunLogsDescription(),
+		},
+		recoverTool(withUpdateNotification(s, s.searchRunLogs)),
+	)
+	mcp.AddTool(
+		server,
+		&mcp.Tool{
 			Name:        "get_run_status",
 			Description: "Get a run snapshot.",
 		},

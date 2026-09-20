@@ -65,7 +65,7 @@ flowchart TD
     R -.->|contributes| T
     P -.->|exposes| R
     T -->|run_task / start_task| N
-    N -->|get_run_status, wait_run, get_run_logs| L
+    N -->|get_run_status, wait_run, search_run_logs, get_run_logs| L
 ```
 
 - **Workspace** - one root directory, fixed at server start. Nothing above it
@@ -382,7 +382,8 @@ normal receipt with an explanation in `message`, not as a tool error.
   range fails before the run begins with
   `tail_bytes must be between 0 and 65536`. Completed receipts also report
   `stdout_bytes` and `stderr_bytes` for nonempty streams. Compare a returned
-  tail's length with its stream's size; if it is smaller, use `get_run_logs`.
+  tail's length with its stream's size; if it is smaller, search with
+  `search_run_logs` before using `get_run_logs`.
 - **Structured synchronous stdout.** `run_shell_command` accepts
   `stdout_format: "json"`. A run that reached the end of its own output -
   status `ok` or `nonzero` - parses the whole stdout log when it is at most
@@ -531,6 +532,9 @@ Observation:
   `runner_version`, PIDs, byte counts, and truncation flags. Input: `run_id`.
 - **`get_run_logs`** - a byte range of one stream. Inputs: `run_id`, `stream`,
   `offset`, `limit`, `encoding`.
+- **`search_run_logs`** - bounded matches in persisted streams. Inputs: `run_id`,
+  exactly one of `query` / `regex`, `stream`, `offset`, `max_matches`,
+  `context_lines`.
 - **`list_runs`** - recent runs, newest first. Inputs: `status`,
   `project_path`, `task_id`, `limit`, `cursor`.
 - **`version_status`** - compare the installed version with the latest stable
@@ -574,6 +578,27 @@ default `encoding: utf8` refuses a range that is not complete valid UTF-8 - move
 the range, or ask for `base64`. Reach for this tool only when the tails did not
 explain the failure.
 
+`search_run_logs` finds lines by exactly one case-sensitive selector: literal
+`query` or RE2 `regex` (`(?i)` makes a regex case-insensitive); regexes that
+can match the empty string (for example, `.*`) are refused. Without `stream`, it
+searches `stderr` before `stdout`; the streams share `max_matches` (default 20,
+maximum 200) and a 64 KiB reported-text budget. `offset` requires an explicit
+stream. `context_lines` accepts 0..5 (default 0) and adds `before` and `after`.
+Each match offset is its line's first byte: pass it unchanged to `get_run_logs`
+to page from that line. An `offset` you supply that lands inside a line is
+searched as a line and reported as given, so resume from `next_offset` rather
+than a guess.
+`next_offset` resumes the scan; `more_matches` means it points at the
+first unreturned matching line, otherwise it simply resumes scanning.
+`complete` describes the end of the log as it stood when this call read it, not
+whether the run stopped writing. `clipped` marks an excerpt of a match or
+context line (at most 1024 bytes and containing the match start);
+`clipped_lines` means a line was searched only in part at the 1 MiB line limit
+or the 32 MiB scan boundary.
+`lossy` marks reported invalid UTF-8 replaced with U+FFFD; fetch exact bytes
+with `get_run_logs` and `encoding: base64`. Search neither changes logs nor
+reads an entire log into memory.
+
 ### Listing history
 
 `list_runs` returns `run_id`, `status`, `project_path`, `task_id`, `args`,
@@ -600,7 +625,8 @@ field is expected and is not data loss.
 3. `wait_run` with a `max_wait_ms` you are willing to spend, repeated while
    `completed` is false.
 4. Green: stop there. Report the status and exit code.
-5. Red: read `stderr_tail`, then `stdout_tail`, and only then `get_run_logs`.
+5. Red: read `stderr_tail`, then `stdout_tail`, then `search_run_logs`, and
+   only then `get_run_logs`.
 
 **Diagnose a run that looks stuck.** Call `get_run_status` with
 `tail_bytes: 0`, then compare `last_output_age_ms` against
@@ -610,11 +636,11 @@ usually waiting on something, not hung.
 **Run something that has no task.** Use `run_shell_command` with a
 workspace-relative `working_directory`, default `.`, and only when a compact
 receipt or a `tail_bytes` output slice is worth more than the full output. Shell
-runs land in the same ledger under the task ID `shell:command`, so `list_runs`
-and `get_run_logs` work on them too. This is for genuinely ad-hoc work, not a
-task hidden by a runner mode; do not edit a build file to expose or recreate
-such a task. Set `stdout_format: "json"` when a synchronous command emits one
-bounded JSON value that you want directly in the receipt.
+runs land in the same ledger under the task ID `shell:command`, so `list_runs`,
+`search_run_logs`, and `get_run_logs` work on them too. This is for genuinely
+ad-hoc work, not a task hidden by a runner mode; do not edit a build file to
+expose or recreate such a task. Set `stdout_format: "json"` when a synchronous
+command emits one bounded JSON value that you want directly in the receipt.
 
 For a long block you will run more than once in one server session, define it
 once with `define_shell_block` and repeat it by `block_id`; that keeps the
@@ -766,7 +792,7 @@ runner modes; otherwise keep it per-machine, and a fresh checkout without it
 starts with every runner disabled. The repository ignore rule covers the
 `.just-mcp-work/` directory, not `.just-mcp-work.json`.
 
-This ledger is the source of truth for `get_run`, `get_run_logs`, `list_runs`,
-and the duration statistics. Later runs prune it according to `--retention`.
-Treat the logs as build output that may contain whatever a task echoed,
-including secrets.
+This ledger is the source of truth for `get_run`, `search_run_logs`,
+`get_run_logs`, `list_runs`, and the duration statistics. Later runs prune it
+according to `--retention`. Treat the logs as build output that may contain
+whatever a task echoed, including secrets.

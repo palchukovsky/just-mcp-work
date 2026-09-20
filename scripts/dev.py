@@ -138,6 +138,7 @@ def smoke(_: argparse.Namespace) -> None:
                 "start_shell_command",
                 "get_run",
                 "get_run_logs",
+                "search_run_logs",
                 "get_run_status",
                 "wait_run",
                 "stop_run",
@@ -155,6 +156,11 @@ def smoke(_: argparse.Namespace) -> None:
                 tools_by_name["start_task"],
                 properties={"project_path", "task_id", "arguments"},
                 required={"project_path", "task_id"},
+            )
+            assert_input_schema(
+                tools_by_name["search_run_logs"],
+                properties={"run_id", "query", "regex", "stream", "offset", "max_matches", "context_lines"},
+                required={"run_id"},
             )
             assert_input_schema(
                 tools_by_name["get_run_status"],
@@ -234,21 +240,51 @@ def smoke(_: argparse.Namespace) -> None:
             )
             if not receipt["ok"] or "hello" in json.dumps(receipt):
                 raise RuntimeError("task receipt was not compact and successful")
-            logs = call_tool(
+            task_logs = call_tool(
                 process,
                 responses,
                 8,
                 "get_run_logs",
-                {"run_id": receipt["run_id"], "stream": "stdout", "offset": 0, "limit": 64},
+                {
+                    "run_id": receipt["run_id"],
+                    "stream": "stdout",
+                    "offset": 0,
+                    "limit": 64,
+                },
             )
-            if logs["data"] != "hello\n":
-                raise RuntimeError(f"unexpected task output: {logs['data']!r}")
+            if task_logs["data"] != "hello\n":
+                raise RuntimeError(f"unexpected task output: {task_logs['data']!r}")
+            search = call_tool(
+                process,
+                responses,
+                9,
+                "search_run_logs",
+                {"run_id": receipt["run_id"], "query": "hello", "stream": "stdout"},
+            )
+            streams = search.get("streams")
+            if not isinstance(streams, list) or len(streams) != 1:
+                raise RuntimeError(f"unexpected search result: {search!r}")
+            matches = streams[0].get("matches")
+            if not isinstance(matches, list) or len(matches) != 1:
+                raise RuntimeError(f"search did not find task output: {search!r}")
+            match = matches[0]
+            if not isinstance(match, dict) or not isinstance(match.get("offset"), int) or not isinstance(match.get("text"), str):
+                raise RuntimeError(f"search returned an invalid match: {search!r}")
+            logs = call_tool(
+                process,
+                responses,
+                10,
+                "get_run_logs",
+                {"run_id": receipt["run_id"], "stream": "stdout", "offset": match["offset"], "limit": 64},
+            )
+            if not logs["data"].startswith(match["text"]):
+                raise RuntimeError(f"search offset did not page from the matched line: search={search!r} logs={logs!r}")
 
             shell_marker = "just-mcp-work-shell-smoke"
             shell_receipt = call_tool(
                 process,
                 responses,
-                9,
+                11,
                 "run_shell_command",
                 {"command": "echo " + shell_marker, "working_directory": "."},
             )
@@ -257,7 +293,7 @@ def smoke(_: argparse.Namespace) -> None:
             shell_logs = call_tool(
                 process,
                 responses,
-                10,
+                12,
                 "get_run_logs",
                 {
                     "run_id": shell_receipt["run_id"],
@@ -273,7 +309,7 @@ def smoke(_: argparse.Namespace) -> None:
             defined_block = call_tool(
                 process,
                 responses,
-                11,
+                13,
                 "define_shell_block",
                 {"command": "echo " + block_marker, "working_directory": "."},
             )
@@ -283,7 +319,7 @@ def smoke(_: argparse.Namespace) -> None:
             block_receipt = call_tool(
                 process,
                 responses,
-                12,
+                14,
                 "run_shell_command",
                 {"block_id": block_id},
             )
@@ -292,7 +328,7 @@ def smoke(_: argparse.Namespace) -> None:
             block_logs = call_tool(
                 process,
                 responses,
-                13,
+                15,
                 "get_run_logs",
                 {
                     "run_id": block_receipt["run_id"],
@@ -306,7 +342,7 @@ def smoke(_: argparse.Namespace) -> None:
             conflicting_selector = request(
                 process,
                 responses,
-                14,
+                16,
                 "tools/call",
                 {
                     "name": "run_shell_command",
@@ -323,7 +359,7 @@ def smoke(_: argparse.Namespace) -> None:
             unknown_block = request(
                 process,
                 responses,
-                15,
+                17,
                 "tools/call",
                 {
                     "name": "run_shell_command",
@@ -343,7 +379,7 @@ def smoke(_: argparse.Namespace) -> None:
             started = call_tool(
                 process,
                 responses,
-                16,
+                18,
                 "start_task",
                 {"project_path": project_path, "task_id": long_task_id, "arguments": []},
             )
@@ -354,7 +390,7 @@ def smoke(_: argparse.Namespace) -> None:
             status = call_tool(
                 process,
                 responses,
-                17,
+                19,
                 "get_run_status",
                 {"run_id": run_id, "tail_bytes": 0},
             )
@@ -363,7 +399,7 @@ def smoke(_: argparse.Namespace) -> None:
             waiting = call_tool(
                 process,
                 responses,
-                18,
+                20,
                 "wait_run",
                 {"run_id": run_id, "max_wait_ms": 0, "tail_bytes": 0},
             )
@@ -372,7 +408,7 @@ def smoke(_: argparse.Namespace) -> None:
             listed = call_tool(
                 process,
                 responses,
-                19,
+                21,
                 "list_runs",
                 {"status": ["running"], "task_id": long_task_id},
             )
@@ -381,7 +417,7 @@ def smoke(_: argparse.Namespace) -> None:
             stopped = call_tool(
                 process,
                 responses,
-                20,
+                22,
                 "stop_run",
                 {"run_id": run_id, "tail_bytes": 0},
             )
@@ -391,14 +427,14 @@ def smoke(_: argparse.Namespace) -> None:
             shell_started = call_tool(
                 process,
                 responses,
-                21,
+                23,
                 "start_shell_command",
                 {"command": "echo " + shell_marker, "working_directory": "."},
             )
             if not shell_started.get("run_id"):
                 raise RuntimeError(f"start_shell_command did not return a run: {shell_started!r}")
 
-            version_status = call_tool(process, responses, 22, "version_status", {})
+            version_status = call_tool(process, responses, 24, "version_status", {})
             assert_typed_fields(
                 "version_status",
                 version_status,

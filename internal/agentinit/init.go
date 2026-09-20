@@ -92,7 +92,8 @@ USE JMW WHEN
   check/verify gates. The receipt carries status and exit code; it may add
   short output tails on failure or a nonzero tail request.
 - You need trailing output: set tail_bytes (1..65536) on run_task or
-  run_shell_command; use get_run_logs for an arbitrary byte range of a large log.
+  run_shell_command; search_run_logs for bounded matches in a large log, and
+  get_run_logs for an arbitrary byte range.
 - The command is long or should not block: start_task returns a run_id at once,
   wait_run and get_run_status follow it, stop_run ends it.
 - You delegate. Give sub-agents, workflow stages, and other executors the same
@@ -108,8 +109,8 @@ SPEND AS FEW TOKENS AS THE WORK ALLOWS
 - On success, trust the receipt. ok: true with exit code 0 is the answer; do not
   fetch logs to double-check a green run unless the current task needs that
   output.
-- On failure, start with stdout_tail and stderr_tail. Reach for get_run_logs only
-  when the tails do not explain the failure.
+- On failure, start with stdout_tail and stderr_tail. When they do not explain
+  the failure, search with search_run_logs before paging get_run_logs.
 - Use tail_bytes: 0 to clear both tails. Omitted tail_bytes means 4096 bytes on
   status tools, but leaves run_task and run_shell_command receipts unchanged.
 - A receipt with status: running and a run_id is normal, not a failure: follow it
@@ -184,7 +185,8 @@ Run data
 - Completed synchronous receipts and completed status views set
   stdout_truncated or stderr_truncated when the corresponding in-memory tail
   exceeded its limit.
-- get_run reads persisted metadata. get_run_logs reads stdout or stderr by raw
+- get_run reads persisted metadata. search_run_logs returns bounded matches whose
+  offsets go straight to get_run_logs. get_run_logs reads stdout or stderr by raw
   byte offset (default 0), with a default limit of 65536 bytes and a maximum of
   1048576 bytes, as utf8 (default) or base64.
 - wait_run defaults to 30000 ms (maximum 600000) and does not stop the run when
@@ -202,9 +204,11 @@ tokens. Run a task through it (list_tasks -> run_task/start_task) whenever a
 receipt or short tail is enough for a build, test, lint, format, or check/verify
 gate, and trust its receipt instead of re-reading the log of a successful run.
 Request a short output slice in the same call with tail_bytes on run_task or
-run_shell_command. Run a command directly only when the full output you need is
-too large for a tail. Pass the same rule on to sub-agents and other executors. A
-task may be absent because the operator withheld it through a runner mode; never
+run_shell_command; when the tail does not explain a failure, search with
+search_run_logs before paging get_run_logs. Run a command directly only when the
+full output you need is too large for a tail. Pass the same rule on to
+sub-agents and other executors. A task may be absent because the operator
+withheld it through a runner mode; never
 recreate or run such a task through run_shell_command, start_shell_command, or
 another shell path. Shell tools remain available for genuinely ad-hoc commands
 outside the discovered or withheld task surfaces.`
@@ -284,6 +288,7 @@ func ClaudeManagedTools(shell ShellPermission) (ClaudeToolPermissions, error) {
 			"get_run_status",
 			"get_run",
 			"get_run_logs",
+			"search_run_logs",
 			"list_runs",
 			"stop_run",
 			"list_projects",
