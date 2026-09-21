@@ -248,6 +248,7 @@ func serve(args []string) (resultErr error) {
 		return nil
 	}
 
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	root, err := resolveServeRoot(options)
 	if err != nil {
 		return err
@@ -255,18 +256,14 @@ func serve(args []string) (resultErr error) {
 	// Before resolution, failures use an already-parsed --root, else JMW_ROOT, else ".".
 	// Afterwards they use root, so an earlier refusal may differ from what a later start clears.
 	startupRoot = root
-	if options.RetiredRunnerMode {
-		return fmt.Errorf(
-			"--runner-mode is no longer accepted by serve; the runner policy now lives in %s; "+
-				"run just-mcp-work init to write it",
-			policy.Path(root),
-		)
+	stateRoot, managedSurfaces, err := resolveWorkspaceState(
+		root,
+		options.RetiredRunnerMode,
+		logger,
+	)
+	if err != nil {
+		return err
 	}
-	managedSurfaces, verifyErr := agentinit.VerifyManagedSurfaces(root)
-	if verifyErr != nil {
-		return fmt.Errorf("verify managed surfaces: %w", verifyErr)
-	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	if options.AIProfile.Declared() {
 		logger.Info(
 			"AI profile selected",
@@ -278,7 +275,7 @@ func serve(args []string) (resultErr error) {
 	} else {
 		logger.Info("AI profile not declared")
 	}
-	registry, err := runnerRegistry(root, logger)
+	registry, err := runnerRegistry(stateRoot, logger)
 	if err != nil {
 		return err
 	}
@@ -334,6 +331,50 @@ func resolveServeRoot(options serveOptions) (string, error) {
 		return worktreeRoot, nil
 	}
 	return options.Root, nil
+}
+
+// resolveWorkspaceState returns the directory holding the runner policy and the
+// managed manifest for root, together with the surfaces verified there. init
+// anchors both at the workspace boundary it resolves rather than at its --dir,
+// so serve resolves the same boundary; a --root below that boundary would
+// otherwise find neither and start with every runner disabled.
+//
+// The boundary never lies below root: without an anchoring .mcp.json above it,
+// resolution returns root itself, so a served subtree keeps its own state. The
+// served root still selects the discovered projects and the run store.
+//
+// The retired --runner-mode refusal is placed ahead of the verification on
+// purpose: it answers a mistake in the command the operator just typed, which is
+// more useful to them than a workspace-integrity error that command did not
+// cause. It also needs the resolved policy path for its message. Verification
+// stays ahead of the policy, so an edited managed block still stops the server
+// before its runner selection is read.
+func resolveWorkspaceState(
+	root string,
+	retiredRunnerMode bool,
+	logger *slog.Logger,
+) (string, agentinit.ManagedSurfaces, error) {
+	stateRoot, err := agentinit.ResolveScope(root)
+	if err != nil {
+		return "", agentinit.ManagedSurfaces{}, fmt.Errorf("resolve workspace state root: %w", err)
+	}
+	// Logged unconditionally. This path is the answer to "which policy is this
+	// server running", and deciding whether to mention it by comparing the
+	// resolved path with an unnormalized --root announces a move on every
+	// ordinary start, where --root defaults to ".".
+	logger.Info("workspace state root resolved", "state_root", stateRoot)
+	if retiredRunnerMode {
+		return "", agentinit.ManagedSurfaces{}, fmt.Errorf(
+			"--runner-mode is no longer accepted by serve; the runner policy now lives in %s; "+
+				"run just-mcp-work init to write it",
+			policy.Path(stateRoot),
+		)
+	}
+	surfaces, err := agentinit.VerifyManagedSurfaces(stateRoot)
+	if err != nil {
+		return "", agentinit.ManagedSurfaces{}, fmt.Errorf("verify managed surfaces: %w", err)
+	}
+	return stateRoot, surfaces, nil
 }
 
 // runnerCatalog is the shared production registration boundary used by serve

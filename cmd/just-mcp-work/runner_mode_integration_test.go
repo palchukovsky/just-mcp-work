@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/BurntSushi/toml"
+	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 )
@@ -126,6 +127,156 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 	}
 	if !slices.Equal(gotIDs, wantIDs) {
 		t.Fatalf("persisted all-mode Go tasks = %#v, want %#v", gotIDs, wantIDs)
+	}
+}
+
+// initWorkspaceBelowScope writes a workspace whose .mcp.json anchors the scope
+// one level above the project init is pointed at, and runs init there. That
+// layout separates the directory init writes its state to from the --root a
+// hand-written serve invocation is given, which no init-generated configuration
+// produces on its own.
+func initWorkspaceBelowScope(t *testing.T) (scope string, project string) {
+	t.Helper()
+	scope, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	project = filepath.Join(scope, "project")
+	if mkdirErr := os.MkdirAll(project, 0o750); mkdirErr != nil {
+		t.Fatal(mkdirErr)
+	}
+	for path, contents := range map[string]string{
+		filepath.Join(scope, ".mcp.json"): "{}\n",
+		filepath.Join(project, "go.mod"): "module example.com/root-below-scope\n" +
+			"\ngo 1.25.0\n",
+	} {
+		if writeErr := os.WriteFile(path, []byte(contents), 0o600); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if initErr := initCommandWithIO(
+		false,
+		[]string{
+			"--dir", project,
+			"--agents", "codex",
+			"--ai", "codex",
+			"--shell-permission", "ask",
+			"--runner-mode", "just=all",
+			"--runner-mode", "agent=safe",
+			"--runner-mode", "cmake=all",
+			"--runner-mode", "docker=disabled",
+			"--runner-mode", "go=all",
+			"--runner-mode", "make=all",
+		},
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); initErr != nil {
+		t.Fatal(initErr)
+	}
+	return scope, project
+}
+
+// The two tests below exercise resolveWorkspaceState directly, so they pin the
+// resolution rather than serve's use of it. The two that follow drive serve and
+// are what would fail if the wiring were reverted.
+func TestResolveWorkspaceStateFindsPolicyAndManifestInitWroteAboveRoot(t *testing.T) {
+	scope, project := initWorkspaceBelowScope(t)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stateRoot, surfaces, err := resolveWorkspaceState(project, false, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stateRoot != scope {
+		t.Fatalf("state root for --root %q = %q, want init scope %q", project, stateRoot, scope)
+	}
+	if surfaces.AgentGuidePath == "" {
+		t.Fatal("managed manifest at the state root recorded no agent guide")
+	}
+	loaded, err := policy.Load(stateRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.Found {
+		t.Fatalf("runner policy %s was not found", policy.Path(stateRoot))
+	}
+	// Neither file exists below the scope, and the manifest's absence is silently
+	// accepted, so reading them at the served root would restore the defect.
+	if _, statErr := os.Stat(policy.Path(project)); !os.IsNotExist(statErr) {
+		t.Fatalf("stat %s = %v, want no policy below the scope", policy.Path(project), statErr)
+	}
+	below, err := agentinit.VerifyManagedSurfaces(project)
+	if err != nil || below != (agentinit.ManagedSurfaces{}) {
+		t.Fatalf("managed surfaces below the scope = %+v, %v, want an empty result", below, err)
+	}
+}
+
+func TestResolvedStateRootKeepsRunnersEnabledBelowWorkspaceScope(t *testing.T) {
+	_, project := initWorkspaceBelowScope(t)
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	stateRoot, _, err := resolveWorkspaceState(project, false, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	registry, err := runnerRegistry(stateRoot, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := registry.Get("go"); !found {
+		t.Fatal("Go runner enabled by the workspace policy is absent")
+	}
+	if _, found := registry.Get("docker"); found {
+		t.Fatal("Docker runner disabled by the workspace policy was constructed")
+	}
+	// The registry must stay a strict read of the one root it is given: an upward
+	// search inside it would be an unrequested fallback rather than this fix.
+	below, err := runnerRegistry(project, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found := below.Get("go"); found {
+		t.Fatal("runnerRegistry searched above the root it was given")
+	}
+}
+
+func TestServeReadsWorkspaceStateAtTheScopeInitWroteIt(t *testing.T) {
+	scope, project := initWorkspaceBelowScope(t)
+
+	// Reaching an unparsable policy at the scope proves serve verified the
+	// manifest there too: an unverified manifest below would have been accepted
+	// silently and never named.
+	if err := os.WriteFile(policy.Path(scope), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A parsable but incomplete policy below the scope. A serve still reading the
+	// served root refuses over this one instead of starting and blocking the test.
+	if err := os.WriteFile(
+		policy.Path(project),
+		[]byte(`{"version":1,"runners":[{"name":"go","mode":"all"}]}`+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	err := serve([]string{"--root", project})
+	if err == nil ||
+		!strings.Contains(err.Error(), "load runner policy") ||
+		!strings.Contains(err.Error(), policy.Path(scope)) ||
+		strings.Contains(err.Error(), policy.Path(project)) {
+		t.Fatalf("serve error = %v, want the runner policy read at scope %s", err, scope)
+	}
+}
+
+func TestServeRetiredRunnerModeNamesThePolicyAtTheScope(t *testing.T) {
+	scope, project := initWorkspaceBelowScope(t)
+
+	err := serve([]string{"--root", project, "--runner-mode", "go=all"})
+	if err == nil ||
+		!strings.Contains(err.Error(), policy.Path(scope)) ||
+		strings.Contains(err.Error(), policy.Path(project)) {
+		t.Fatalf("serve error = %v, want the migration message to name %s", err, policy.Path(scope))
 	}
 }
 
