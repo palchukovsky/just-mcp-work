@@ -2372,6 +2372,27 @@ func TestVerifyManagedSurfacesTreatsReleaseAsContextOnly(t *testing.T) {
 	}
 }
 
+// An upgrade asks for init only when the new binary would generate different
+// content. This drives the real upgrade path - the binary version changes while
+// every managed surface stays identical - so no generated text may carry the
+// release.
+func TestVerifyManagedSurfacesAcceptsUpgradeWithUnchangedInstructions(t *testing.T) {
+	previous := version.Version
+	t.Cleanup(func() { version.Version = previous })
+
+	version.Version = "v1.2.3"
+	root := applyVerificationWorkspace(t)
+	recorded, _ := readManagedManifest(t, root)
+
+	version.Version = "v1.3.0"
+	if upgraded := version.Current().Display(); recorded.Release == upgraded {
+		t.Fatalf("release stayed %q, so the upgrade is invisible to the check", upgraded)
+	}
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() demanded init after a silent upgrade: %v", err)
+	}
+}
+
 func TestVerifyManagedSurfacesDoesNotSearchParent(t *testing.T) {
 	parent := applyVerificationWorkspace(t)
 	manifest, _ := readManagedManifest(t, parent)

@@ -244,11 +244,21 @@ Changing this answer with a narrower `--agents` selection is blocked only by
 recorded Claude settings outside that selection, not by machine instruction
 files whose bytes do not depend on the shell permission.
 
-Run `init` again after an update. In a beta-test workspace, use
-`init-beta-test` to stay in beta mode; plain `init` asks before it removes beta
-feedback guidance and leaves beta testing. Reaching end of input answers that
-question as yes, so plain `init` continues to its preflight and leaves the beta
-test when that preflight succeeds.
+An update does not require `init` on its own. At startup, `serve` checks every
+surface recorded in the workspace against what the installed binary would
+generate now, so a release that changes none of them starts without any
+further step. When a release does change one, `serve` refuses to start and
+names that file; the refusal, not the update, is what asks for `init`. A
+workspace initialized before the managed manifest existed has no record to
+check against, so run `init` there once to gain one. A machine instruction
+file is not a recorded surface either, so nothing detects a release that
+changes the block in it; run `init` after an update when the block lives
+there.
+
+In a beta-test workspace, use `init-beta-test` to stay in beta mode; plain
+`init` asks before it removes beta feedback guidance and leaves beta testing.
+Reaching end of input answers that question as yes, so plain `init` continues
+to its preflight and leaves the beta test when that preflight succeeds.
 `init --help` and `serve --help` list the agent targets and the server options.
 
 ## Configuration
