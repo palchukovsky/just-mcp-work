@@ -768,8 +768,8 @@ The operator sets these; an agent cannot change them at runtime.
 | `--exclude` | - | none | Extra directories to skip. |
 
 `just-mcp-work init` writes the managed instruction block and the MCP
-configuration for the selected agents, and writes the runner policy. The
-[README](../README.md) covers that setup flow.
+configuration for the selected agents, and writes the runner policy.
+[Set up a workspace](setup.md) covers that setup flow.
 
 ## On-disk layout
 
