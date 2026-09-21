@@ -91,7 +91,7 @@ type erroringWriter struct {
 }
 
 func defaultRunnerInput() *strings.Reader {
-	return strings.NewReader(strings.Repeat("\n", 8))
+	return strings.NewReader(strings.Repeat("\n", 9))
 }
 
 func initArgsWithRunnerModes(dir string) []string {
@@ -101,6 +101,7 @@ func initArgsWithRunnerModes(dir string) []string {
 func initArgsWithRunnerModesWithoutAI(dir string) []string {
 	return []string{
 		"--dir", dir,
+		"--instructions-target", "workspace",
 		"--agents", "codex",
 		"--write-mcp-config=false",
 		"--runner-mode", "just=all",
@@ -485,14 +486,14 @@ func TestInitOffersBothAIFamiliesByDefault(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if initErr := initCommandWithIO(
 		false,
 		initArgsWithRunnerModesWithoutAI(dir),
 		strings.NewReader("\n"),
 		&result,
 		&diagnostics,
-	); err != nil {
-		t.Fatal(err)
+	); initErr != nil {
+		t.Fatal(initErr)
 	}
 	for _, want := range []string{
 		"Which AI families should the managed just-mcp-work server declare?",
@@ -852,7 +853,11 @@ func TestInitRejectsUnusableAIFamiliesBeforeWriting(t *testing.T) {
 			dir := t.TempDir()
 			err := initCommandWithIO(
 				false,
-				[]string{"--dir", dir, "--ai", testCase.value},
+				[]string{
+					"--dir", dir,
+					"--instructions-target", "workspace",
+					"--ai", testCase.value,
+				},
 				strings.NewReader(""),
 				io.Discard,
 				io.Discard,
@@ -1057,7 +1062,11 @@ func TestInitRunnerQuestionRepromptsAndSharesInputWithClaudeConfirmation(t *test
 	input := strings.NewReader("\nsafe\nall\nsafe\nall\nall\nSAFE\nsafe\nall\n\ny\n")
 	err := initCommandWithIO(
 		false,
-		[]string{"--dir", dir, "--agents", "claude"},
+		[]string{
+			"--dir", dir,
+			"--instructions-target", "workspace",
+			"--agents", "claude",
+		},
 		input,
 		io.Discard,
 		&output,
@@ -1082,7 +1091,12 @@ func TestInitEOFRejectsUnansweredRunnerQuestion(t *testing.T) {
 	var diagnostics bytes.Buffer
 	err := initCommandWithIO(
 		false,
-		[]string{"--dir", dir, "--agents", "codex", "--ai", "codex"},
+		[]string{
+			"--dir", dir,
+			"--instructions-target", "workspace",
+			"--agents", "codex",
+			"--ai", "codex",
+		},
 		strings.NewReader(""),
 		&result,
 		&diagnostics,
@@ -1645,6 +1659,8 @@ func TestRunSelectsTheRequestedManagedBlock(t *testing.T) {
 				test.command,
 				"--dir",
 				dir,
+				"--instructions-target",
+				"workspace",
 				"--agents",
 				"codex",
 				"--write-mcp-config=false",
@@ -3023,6 +3039,302 @@ func TestInitCodexOnlyWithoutMCPConfigDoesNotAskShellPermission(t *testing.T) {
 	}
 	if bytes.Contains(manifest, []byte("shell_permission")) {
 		t.Fatalf("Codex-only manifest records a shell permission:\n%s", manifest)
+	}
+}
+
+func TestInitInstructionsTargetFlagWorksWithClosedConsole(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := initArgsWithRunnerModesWithoutAI(project)
+	args[3] = string(agentinit.InstructionsTargetProject)
+	args = append(args, "--ai", "codex")
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(project, "AGENTS.md")); err != nil {
+		t.Fatalf("project target did not write project instructions: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "AGENTS.md")); !os.IsNotExist(err) {
+		t.Fatalf("project target wrote workspace instructions: %v", err)
+	}
+	if !strings.Contains(
+		diagnostics.String(),
+		"Agent instructions target project resolves to directory "+project,
+	) {
+		t.Fatalf("target diagnostic missing:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitMachineTargetRejectsUnsupportedAgentsBeforeLaterQuestions(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		args        func(string) []string
+		input       string
+		wantChoices bool
+	}{
+		{
+			name: "flag",
+			args: func(dir string) []string {
+				return []string{"--dir", dir, "--instructions-target", "machine"}
+			},
+		},
+		{
+			name: "console",
+			args: func(dir string) []string {
+				return []string{"--dir", dir}
+			},
+			input:       "machine\n",
+			wantChoices: true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			var diagnostics bytes.Buffer
+			err := initCommandWithIO(
+				false,
+				testCase.args(root),
+				strings.NewReader(testCase.input),
+				io.Discard,
+				&diagnostics,
+			)
+			if err == nil {
+				t.Fatal("machine target with default agents error = nil")
+			}
+			for _, want := range []string{
+				"--agents \"claude,codex,cursor\"",
+				"cursor",
+				"--agents claude,codex,windsurf",
+			} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("early machine-agent error does not contain %q: %v", want, err)
+				}
+			}
+			if strings.Contains(err.Error(), "AI families") ||
+				strings.Contains(diagnostics.String(), "Which AI families") {
+				t.Fatalf("machine-agent validation ran after AI question: %v\n%s", err, diagnostics.String())
+			}
+			if testCase.wantChoices &&
+				!strings.Contains(
+					diagnostics.String(),
+					"machine-wide instruction files for claude, codex, and windsurf",
+				) {
+				t.Fatalf("machine choice omitted supported agents:\n%s", diagnostics.String())
+			}
+			if _, statErr := os.Stat(filepath.Join(root, ".just-mcp-work")); !os.IsNotExist(statErr) {
+				t.Fatalf("early machine-agent refusal wrote workspace state: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInitMachineTargetDiagnosticAndPlanShareCanonicalHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	actualHome := t.TempDir()
+	linkRoot := t.TempDir()
+	homeLink := filepath.Join(linkRoot, "home")
+	if err := os.Symlink(actualHome, homeLink); err != nil {
+		t.Skipf("create home symlink: %v", err)
+	}
+	t.Setenv("HOME", homeLink)
+	t.Setenv("USERPROFILE", homeLink)
+	root := t.TempDir()
+	args := initArgsWithRunnerModesWithoutAI(root)
+	args[3] = string(agentinit.InstructionsTargetMachine)
+	args[5] = "claude"
+	args = append(args, "--ai", "codex", "--shell-permission", "ask", "--dry-run")
+	var result bytes.Buffer
+	var diagnostics bytes.Buffer
+
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader(""),
+		&result,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	canonicalHome, err := filepath.EvalSymlinks(actualHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath := filepath.Join(canonicalHome, ".claude", "CLAUDE.md")
+	if !strings.Contains(
+		diagnostics.String(),
+		"machine resolves to directory "+canonicalHome,
+	) {
+		t.Fatalf("machine target diagnostic did not use canonical home:\n%s", diagnostics.String())
+	}
+	if !strings.Contains(result.String(), "+++ "+resolvedPath) {
+		t.Fatalf("machine dry-run plan did not use resolved diagnostic directory:\n%s", result.String())
+	}
+	if strings.Contains(diagnostics.String(), "directory "+homeLink) ||
+		strings.Contains(result.String(), homeLink) {
+		t.Fatalf("machine target exposed divergent lexical home:\n%s\n%s", diagnostics.String(), result.String())
+	}
+}
+
+func TestInitInstructionsTargetQuestionRequiresAnAnswerAtEOF(t *testing.T) {
+	dir := t.TempDir()
+	var diagnostics bytes.Buffer
+	err := initCommandWithIO(
+		false,
+		[]string{"--dir", dir, "--ai", "codex"},
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	)
+	if err == nil || !strings.Contains(
+		err.Error(),
+		"--instructions-target project|workspace|machine",
+	) {
+		t.Fatalf("unanswered instructions-target error = %v", err)
+	}
+	if !strings.Contains(diagnostics.String(), "Where should the managed agent-instruction block") ||
+		strings.Contains(diagnostics.String(), "Which AI families") {
+		t.Fatalf("instructions target was not asked before AI families:\n%s", diagnostics.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".just-mcp-work")); !os.IsNotExist(statErr) {
+		t.Fatalf("unanswered instructions target wrote workspace state: %v", statErr)
+	}
+}
+
+func TestInitRejectsUnsupportedInstructionsTargetBeforeQuestion(t *testing.T) {
+	dir := t.TempDir()
+	var diagnostics bytes.Buffer
+	err := initCommandWithIO(
+		false,
+		[]string{"--dir", dir, "--instructions-target", "elsewhere"},
+		erroringReader{err: errors.New("console was read")},
+		io.Discard,
+		&diagnostics,
+	)
+	if err == nil || !strings.Contains(err.Error(), "unsupported instructions target") {
+		t.Fatalf("unsupported instructions target error = %v", err)
+	}
+	if strings.Contains(diagnostics.String(), "Where should") {
+		t.Fatalf("unsupported target asked a question:\n%s", diagnostics.String())
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, ".just-mcp-work")); !os.IsNotExist(statErr) {
+		t.Fatalf("unsupported instructions target wrote workspace state: %v", statErr)
+	}
+}
+
+func TestInitOffersRecordedInstructionsTargetAsCurrent(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := initArgsWithRunnerModesWithoutAI(project)
+	args[3] = string(agentinit.InstructionsTargetProject)
+	args = append(args, "--ai", "codex")
+	if err := initCommandWithIO(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	args = append(args[:2], args[4:]...)
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(diagnostics.String(), "project (current)") ||
+		!strings.Contains(diagnostics.String(), "Instructions target [project, current]:") {
+		t.Fatalf("recorded instructions target was not offered as current:\n%s", diagnostics.String())
+	}
+}
+
+func TestInitWorkspaceTargetNamesDirectoryOutsideDirInDryRun(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	args := append(initArgsWithRunnerModesWithoutAI(project), "--ai", "codex", "--dry-run")
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	text := diagnostics.String()
+	if !strings.Contains(text, "workspace resolves to directory "+root) ||
+		!strings.Contains(text, "not in the directory --dir named ("+project+")") {
+		t.Fatalf("workspace target diagnostics:\n%s", text)
+	}
+}
+
+func TestInitDryRunPrintsStaleMachineNoteWithoutWritingHome(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	args := initArgsWithRunnerModesWithoutAI(root)
+	args[3] = string(agentinit.InstructionsTargetMachine)
+	args = append(args, "--ai", "codex")
+	if err := initCommandWithIO(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	path, err := filepath.EvalSymlinks(filepath.Join(home, ".codex", "AGENTS.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args[3] = string(agentinit.InstructionsTargetWorkspace)
+	args = append(args, "--dry-run")
+	var diagnostics bytes.Buffer
+	if initErr := initCommandWithIO(
+		false,
+		args,
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); initErr != nil {
+		t.Fatal(initErr)
+	}
+	if !strings.Contains(diagnostics.String(), path) ||
+		!strings.Contains(diagnostics.String(), "stale") {
+		t.Fatalf("dry-run stale note missing:\n%s", diagnostics.String())
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("dry-run rewrote stale machine file %s", path)
 	}
 }
 

@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -474,6 +475,34 @@ func parseInitPermissions(
 	return permissions, shellPermission, nil
 }
 
+func validateInstructionsAgents(
+	target agentinit.InstructionsTarget,
+	agentsValue string,
+) error {
+	if target != agentinit.InstructionsTargetMachine {
+		return nil
+	}
+	var unsupported []string
+	for _, agent := range splitCSV(agentsValue) {
+		switch agent {
+		case "claude", "codex", "windsurf":
+		default:
+			unsupported = append(unsupported, agent)
+		}
+	}
+	if len(unsupported) == 0 {
+		return nil
+	}
+	return fmt.Errorf(
+		"instructions target machine cannot be used with --agents %q: selected agents "+
+			"without a machine-wide instruction path: %s; re-run with "+
+			"--agents claude,codex,windsurf",
+		agentsValue,
+		strings.Join(unsupported, ","),
+	)
+}
+
+//nolint:gocyclo // Keep the required question order and the single Apply handoff explicit.
 func initCommandWithIO(
 	betaTest bool,
 	args []string,
@@ -512,6 +541,11 @@ func initCommandWithIO(
 		"shell tool handling in Claude permission lists and Codex approval modes: "+
 			"allow or ask; empty asks on the console",
 	)
+	instructionsTargetFlag := flags.String(
+		"instructions-target",
+		"",
+		"agent-instruction destination: project|workspace|machine; empty asks on the console",
+	)
 	aiFamily := flags.String(
 		"ai",
 		"",
@@ -533,6 +567,7 @@ func initCommandWithIO(
 			flags.Output(),
 			"Usage: just-mcp-work "+command+" [--dir <dir>] [--agents <names>] [--dry-run] "+
 				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
+				"[--instructions-target project|workspace|machine] "+
 				"[--ai "+initAIFlagValues()+"] "+
 				"[--runner-mode <name>=<mode>]...",
 		)
@@ -554,6 +589,13 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("parse %s flags: %w", command, err)
 	}
+	var instructionsTarget agentinit.InstructionsTarget
+	if *instructionsTargetFlag != "" {
+		instructionsTarget, err = agentinit.ParseInstructionsTarget(*instructionsTargetFlag)
+		if err != nil {
+			return fmt.Errorf("parse %s flags: %w", command, err)
+		}
+	}
 	catalog, err := runnerCatalog()
 	if err != nil {
 		return fmt.Errorf("create runner catalog: %w", err)
@@ -568,6 +610,19 @@ func initCommandWithIO(
 			return confirmErr
 		}
 	}
+	if instructionsTarget == "" {
+		instructionsTarget, err = console.selectInstructionsTarget(scope)
+		if err != nil {
+			return fmt.Errorf("select instructions target: %w", err)
+		}
+	}
+	selectedAgents := splitCSV(*agents)
+	if validateErr := validateInstructionsAgents(
+		instructionsTarget,
+		*agents,
+	); validateErr != nil {
+		return fmt.Errorf("validate %s flags: %w", command, validateErr)
+	}
 	families, err := console.selectAIFamilies(scope, *aiFamily)
 	if err != nil {
 		return fmt.Errorf("select AI families: %w", err)
@@ -580,18 +635,47 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("select runner modes: %w", err)
 	}
-	selectedAgents := splitCSV(*agents)
+	requestedDirectory, err := filepath.Abs(*dir)
+	if err != nil {
+		return fmt.Errorf("resolve --dir for instructions target: %w", err)
+	}
+	targetDirectory, err := agentinit.InstructionsDirectory(
+		scope,
+		*dir,
+		instructionsTarget,
+	)
+	if err != nil {
+		return fmt.Errorf("resolve instructions target directory: %w", err)
+	}
+	if writeErr := writeInitOutput(
+		diagnosticOutput,
+		"Agent instructions target %s resolves to directory %s.\n",
+		instructionsTarget,
+		filepath.Clean(targetDirectory),
+	); writeErr != nil {
+		return writeErr
+	}
+	if filepath.Clean(targetDirectory) != filepath.Clean(requestedDirectory) {
+		if writeErr := writeInitOutput(
+			diagnosticOutput,
+			"The instruction files are not in the directory --dir named (%s).\n",
+			requestedDirectory,
+		); writeErr != nil {
+			return writeErr
+		}
+	}
 	result, err := agentinit.Apply(
 		agentinit.Options{
-			Dir:               *dir,
-			Agents:            selectedAgents,
-			BetaTest:          betaTest,
-			DryRun:            *dryRun,
-			WriteMCPConfig:    *writeMCPConfig,
-			AIFamilies:        families,
-			RunnerModes:       canonicalModes,
-			ClaudePermissions: permissions,
-			ShellPermission:   parsedShellPermission,
+			Dir:                *dir,
+			Agents:             selectedAgents,
+			BetaTest:           betaTest,
+			DryRun:             *dryRun,
+			WriteMCPConfig:     *writeMCPConfig,
+			InstructionsTarget: instructionsTarget,
+			AIFamilies:         families,
+			RunnerModes:        canonicalModes,
+			ClaudePermissions:  permissions,
+			ShellPermission:    parsedShellPermission,
 			AskShellPermission: func(
 				offer agentinit.ShellPermission,
 				current bool,
@@ -603,6 +687,11 @@ func initCommandWithIO(
 	)
 	if err != nil {
 		return fmt.Errorf("apply agent instructions: %w", err)
+	}
+	for _, note := range result.Notes {
+		if writeErr := writeInitOutput(diagnosticOutput, "%s\n", note); writeErr != nil {
+			return writeErr
+		}
 	}
 	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig, families)
 }
@@ -671,6 +760,59 @@ func parseInitAIFamilies(value string) (aiprofile.Selection, error) {
 // client this product generates a configuration for is declared.
 func defaultAIFamilies() aiprofile.Selection {
 	return aiprofile.Selection{aiprofile.FamilyCodex, aiprofile.FamilyClaude}
+}
+
+func (c *initConsole) selectInstructionsTarget(
+	scope string,
+) (agentinit.InstructionsTarget, error) {
+	current, found, err := agentinit.ReadRecordedInstructionsTarget(scope)
+	if err != nil {
+		return "", fmt.Errorf("read current instructions target: %w", err)
+	}
+	offer := enumeratedOffer{values: []string{string(agentinit.InstructionsTargetWorkspace)}}
+	if found {
+		offer = enumeratedOffer{values: []string{string(current)}, current: true}
+	}
+	question := enumeratedQuestion{
+		introduction: "\nWhere should the managed agent-instruction block be written?\n",
+		choices: []enumeratedChoice{
+			{
+				value:       string(agentinit.InstructionsTargetProject),
+				description: "the instruction files of the directory --dir names",
+			},
+			{
+				value:       string(agentinit.InstructionsTargetWorkspace),
+				description: "the instruction files of the workspace scope root (today's behaviour)",
+			},
+			{
+				value:       string(agentinit.InstructionsTargetMachine),
+				description: "the machine-wide instruction files for claude, codex, and windsurf, outside this tree",
+			},
+		},
+		defaultValues:         []string{string(agentinit.InstructionsTargetWorkspace)},
+		promptLabel:           "Instructions target",
+		readDescription:       "instructions target",
+		unansweredDescription: "instructions target",
+		flagName:              "--instructions-target project|workspace|machine",
+		parse: func(value string) (string, bool) {
+			target, parseErr := agentinit.ParseInstructionsTarget(value)
+			return string(target), parseErr == nil
+		},
+		unsupported: func(value string) error {
+			return fmt.Errorf("unsupported instructions target %q", value)
+		},
+		unsupportedPrompt: func(value string) string {
+			return fmt.Sprintf(
+				"Unsupported instructions target %q; choose one of project, workspace, machine.\n",
+				value,
+			)
+		},
+	}
+	values, err := c.askEnumeratedChoice(question, offer)
+	if err != nil {
+		return "", err
+	}
+	return agentinit.InstructionsTarget(values[0]), nil
 }
 
 func (c *initConsole) selectAIFamilies(

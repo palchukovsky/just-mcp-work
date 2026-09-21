@@ -45,8 +45,16 @@ type managedManifest struct {
 	AIFamilies aiprofile.Selection `json:"ai_families"`
 	// An omitted ShellPermission predates this field and means ask, the only
 	// shell permission those manifests could have recorded.
-	ShellPermission string            `json:"shell_permission,omitempty"`
-	Surfaces        []manifestSurface `json:"surfaces"`
+	ShellPermission string `json:"shell_permission,omitempty"`
+	// An absent AgentInstructions means workspace: every release before this
+	// field wrote agent instructions to the workspace scope by construction.
+	AgentInstructions *agentInstructions `json:"agent_instructions,omitempty"`
+	Surfaces          []manifestSurface  `json:"surfaces"`
+}
+
+type agentInstructions struct {
+	Target string   `json:"target"`
+	Agents []string `json:"agents"`
 }
 
 type manifestSurface struct {
@@ -68,17 +76,19 @@ func planManifest(
 	scope string,
 	planned []plannedEdit,
 	surfaces []manifestSurface,
+	instructionDestinations map[string]string,
 	betaTest bool,
 	shellPermission ShellPermission,
 	families aiprofile.Selection,
 	selected map[string]struct{},
-) ([]plannedEdit, error) {
+	instructionsTarget InstructionsTarget,
+) ([]plannedEdit, []string, error) {
 	path, err := findScopedConfig(
 		scope,
 		scopedConfig{relative: manifestFile, name: "managed manifest", lower: "managed manifest"},
 	)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// The recorded document is read from the manifest's own resolved path, so a
 	// path that resolves onto a surface this init already plans to write would
@@ -88,13 +98,14 @@ func planManifest(
 	pending = append(pending, planned...)
 	pending = append(pending, plannedEdit{surface: manifestFile, collisionPath: path})
 	if collisionErr := validatePlannedEditPaths(pending); collisionErr != nil {
-		return nil, collisionErr
+		return nil, nil, collisionErr
 	}
 	before, beforeExists, err := readOptionalFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var edits []plannedEdit
+	var notes []string
 	recordedShellPermission := ""
 	for _, surface := range surfaces {
 		if surface.Kind == manifestKindClaudeSettings ||
@@ -109,49 +120,81 @@ func planManifest(
 		// stops init instead of silently planning without them.
 		recorded, decodeErr := decodeManagedManifest(path, before)
 		if decodeErr != nil {
-			return nil, decodeErr
+			return nil, nil, decodeErr
 		}
 		if recorded.SchemaVersion == manifestSchemaVersion {
+			recordedTarget, targetErr := recordedInstructionsTarget(recorded)
+			if targetErr != nil {
+				return nil, nil, fmt.Errorf(
+					"read instructions target from managed manifest %s: %w",
+					path,
+					targetErr,
+				)
+			}
+			for _, recordedSurface := range recorded.Surfaces {
+				if recordedSurface.Kind != manifestKindAgentInstructions {
+					continue
+				}
+				for _, named := range agentTargets() {
+					if _, isSelected := selected[named.name]; isSelected ||
+						!surfacePathMatchesTarget(recordedSurface.Path, named.target.path) {
+						continue
+					}
+					surfaces = append(surfaces, recordedSurface)
+					break
+				}
+			}
 			retiredGuideEdit, hasRetiredGuideEdit, retiredGuideErr := planRetiredAgentGuide(
 				scope,
 				recorded.Surfaces,
 			)
 			if retiredGuideErr != nil {
-				return nil, retiredGuideErr
+				return nil, nil, retiredGuideErr
 			}
 			if hasRetiredGuideEdit {
 				edits = append(edits, retiredGuideEdit)
 			}
 			if recorded.BetaTest != betaTest {
 				var missingPaths []string
+				missingAgents := make(map[string]struct{})
 				for _, surface := range recorded.Surfaces {
 					if surface.Kind != manifestKindAgentInstructions {
 						continue
 					}
 					for _, named := range agentTargets() {
-						if surface.Path != filepath.ToSlash(named.target.path) {
+						if !surfacePathMatchesTarget(surface.Path, named.target.path) {
 							continue
 						}
 						if _, ok := selected[named.name]; !ok &&
 							!slices.Contains(missingPaths, surface.Path) {
 							missingPaths = append(missingPaths, surface.Path)
+							missingAgents[named.name] = struct{}{}
 						}
 						break
 					}
 				}
+				if recordedTarget == InstructionsTargetMachine {
+					machinePaths, machineAgents, machineErr :=
+						recordedMachineInstructionsOutsideSelection(recorded, selected)
+					if machineErr != nil {
+						return nil, nil, machineErr
+					}
+					missingPaths = append(missingPaths, machinePaths...)
+					for name := range machineAgents {
+						missingAgents[name] = struct{}{}
+					}
+				}
 				if len(missingPaths) > 0 {
-					var selectedNames, requiredNames []string
+					selectedNames := selectedInstructionAgentNames(selected)
+					requiredNames := make([]string, 0, len(selectedNames)+len(missingAgents))
 					for _, named := range agentTargets() {
 						_, isSelected := selected[named.name]
-						if isSelected {
-							selectedNames = append(selectedNames, named.name)
-						}
-						if isSelected ||
-							slices.Contains(missingPaths, filepath.ToSlash(named.target.path)) {
+						_, isMissing := missingAgents[named.name]
+						if isSelected || isMissing {
 							requiredNames = append(requiredNames, named.name)
 						}
 					}
-					return nil, fmt.Errorf(
+					return nil, nil, fmt.Errorf(
 						"cannot change beta-test mode with --agents %s: managed agent-instruction "+
 							"files outside the selection: %s; re-run with --agents %s",
 						strings.Join(selectedNames, ","),
@@ -182,30 +225,31 @@ func planManifest(
 			if existingShellPermission == "" {
 				existingShellPermission = ShellPermissionAsk
 			}
-			_, claudeSelected := selected["claude"]
 			if recordedShellPermission != "" &&
-				existingShellPermission != ShellPermission(recordedShellPermission) &&
-				!claudeSelected {
+				existingShellPermission != ShellPermission(recordedShellPermission) {
 				var missingPaths []string
-				for _, recordedSurface := range recorded.Surfaces {
-					if recordedSurface.Kind != manifestKindClaudeSettings ||
-						slices.Contains(missingPaths, recordedSurface.Path) {
-						continue
+				missingAgents := make(map[string]struct{})
+				if _, claudeSelected := selected["claude"]; !claudeSelected {
+					for _, recordedSurface := range recorded.Surfaces {
+						if recordedSurface.Kind != manifestKindClaudeSettings ||
+							slices.Contains(missingPaths, recordedSurface.Path) {
+							continue
+						}
+						missingPaths = append(missingPaths, recordedSurface.Path)
+						missingAgents["claude"] = struct{}{}
 					}
-					missingPaths = append(missingPaths, recordedSurface.Path)
 				}
 				if len(missingPaths) > 0 {
-					var selectedNames, requiredNames []string
+					selectedNames := selectedInstructionAgentNames(selected)
+					requiredNames := make([]string, 0, len(selectedNames)+len(missingAgents))
 					for _, named := range agentTargets() {
 						_, isSelected := selected[named.name]
-						if isSelected {
-							selectedNames = append(selectedNames, named.name)
-						}
-						if isSelected || named.name == "claude" {
+						_, isMissing := missingAgents[named.name]
+						if isSelected || isMissing {
 							requiredNames = append(requiredNames, named.name)
 						}
 					}
-					return nil, fmt.Errorf(
+					return nil, nil, fmt.Errorf(
 						"cannot change shell permission with --agents %s: managed permission "+
 							"files outside the selection: %s; re-run with --agents %s",
 						strings.Join(selectedNames, ","),
@@ -214,6 +258,20 @@ func planManifest(
 					)
 				}
 			}
+			destinationEdits, destinationNotes, destinationErr :=
+				planChangedInstructionDestinations(
+					scope,
+					instructionDestinations,
+					recorded,
+					recordedTarget,
+					instructionsTarget,
+					selected,
+				)
+			if destinationErr != nil {
+				return nil, nil, destinationErr
+			}
+			edits = append(edits, destinationEdits...)
+			notes = append(notes, destinationNotes...)
 		}
 	}
 	after, err := json.MarshalIndent(
@@ -223,20 +281,235 @@ func planManifest(
 			BetaTest:        betaTest,
 			AIFamilies:      families,
 			ShellPermission: recordedShellPermission,
-			Surfaces:        surfaces,
+			AgentInstructions: &agentInstructions{
+				Target: string(instructionsTarget),
+				Agents: selectedInstructionAgentNames(selected),
+			},
+			Surfaces: surfaces,
 		},
 		"",
 		"  ",
 	)
 	if err != nil {
-		return nil, fmt.Errorf("encode managed manifest: %w", err)
+		return nil, nil, fmt.Errorf("encode managed manifest: %w", err)
 	}
 	after = append(after, '\n')
 	edits = appendEdit(
 		edits,
 		newEdit(manifestFile, path, before, after, 0o644, beforeExists, false),
 	)
-	return edits, nil
+	return edits, notes, nil
+}
+
+func recordedInstructionsTarget(manifest managedManifest) (InstructionsTarget, error) {
+	if manifest.AgentInstructions == nil {
+		return InstructionsTargetWorkspace, nil
+	}
+	return ParseInstructionsTarget(manifest.AgentInstructions.Target)
+}
+
+func selectedInstructionAgentNames(selected map[string]struct{}) []string {
+	names := make([]string, 0, len(selected))
+	for _, named := range agentTargets() {
+		if _, ok := selected[named.name]; ok {
+			names = append(names, named.name)
+		}
+	}
+	return names
+}
+
+func surfacePathMatchesTarget(surfacePath string, targetPath string) bool {
+	targetPath = filepath.ToSlash(targetPath)
+	return surfacePath == targetPath || strings.HasSuffix(surfacePath, "/"+targetPath)
+}
+
+func recordedMachineInstructionsOutsideSelection(
+	recorded managedManifest,
+	selected map[string]struct{},
+) ([]string, map[string]struct{}, error) {
+	paths := make([]string, 0)
+	agents := make(map[string]struct{})
+	if recorded.AgentInstructions == nil {
+		return paths, agents, nil
+	}
+	needsHome := false
+	for _, named := range agentTargets() {
+		if _, isSelected := selected[named.name]; isSelected ||
+			!slices.Contains(recorded.AgentInstructions.Agents, named.name) ||
+			named.machinePath == "" {
+			continue
+		}
+		needsHome = true
+		break
+	}
+	if !needsHome {
+		return paths, agents, nil
+	}
+	home, err := machineInstructionsHome()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, named := range agentTargets() {
+		if _, isSelected := selected[named.name]; isSelected ||
+			!slices.Contains(recorded.AgentInstructions.Agents, named.name) ||
+			named.machinePath == "" {
+			continue
+		}
+		paths = append(
+			paths,
+			filepath.Clean(filepath.Join(home, filepath.FromSlash(named.machinePath))),
+		)
+		agents[named.name] = struct{}{}
+	}
+	return paths, agents, nil
+}
+
+//nolint:gocyclo // Machine advisories and scoped cleanup share one destination comparison.
+func planChangedInstructionDestinations(
+	scope string,
+	currentDestinations map[string]string,
+	recorded managedManifest,
+	recordedTarget InstructionsTarget,
+	instructionsTarget InstructionsTarget,
+	selected map[string]struct{},
+) ([]plannedEdit, []string, error) {
+	if recordedTarget == InstructionsTargetMachine &&
+		instructionsTarget != InstructionsTargetMachine {
+		// A machine file is shared by every workspace on the machine. One workspace
+		// must not delete a block that another workspace still relies on.
+		notes := make([]string, 0, len(selected))
+		home := ""
+		for _, named := range agentTargets() {
+			if _, ok := selected[named.name]; !ok ||
+				named.machinePath == "" ||
+				recorded.AgentInstructions == nil ||
+				!slices.Contains(recorded.AgentInstructions.Agents, named.name) {
+				continue
+			}
+			if home == "" {
+				var err error
+				home, err = machineInstructionsHome()
+				if err != nil {
+					return nil, nil, err
+				}
+			}
+			path := filepath.Clean(filepath.Join(home, filepath.FromSlash(named.machinePath)))
+			// #nosec G304 -- this fixed machine path is read only to report stale ownership.
+			content, err := os.ReadFile(path)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"read previous machine agent instruction %s: %w",
+					path,
+					err,
+				)
+			}
+			if strings.Contains(string(content), beginMarker) {
+				notes = append(
+					notes,
+					fmt.Sprintf(
+						"Managed agent-instruction block in %s is now stale and has to be removed by hand.",
+						path,
+					),
+				)
+			}
+		}
+		return nil, notes, nil
+	}
+	if recordedTarget == InstructionsTargetMachine {
+		return nil, nil, nil
+	}
+
+	unselectedDestinations := make(map[string]map[string]struct{})
+	for _, surface := range recorded.Surfaces {
+		if surface.Kind != manifestKindAgentInstructions {
+			continue
+		}
+		for _, named := range agentTargets() {
+			if _, isSelected := selected[named.name]; isSelected ||
+				!surfacePathMatchesTarget(surface.Path, named.target.path) {
+				continue
+			}
+			recordedInstruction := target{path: filepath.FromSlash(surface.Path)}
+			_, collisionPath, err := findAgentInstruction(scope, recordedInstruction)
+			if err != nil {
+				return nil, nil, err
+			}
+			collisionPath = filepath.Clean(collisionPath)
+			if unselectedDestinations[collisionPath] == nil {
+				unselectedDestinations[collisionPath] = make(map[string]struct{})
+			}
+			unselectedDestinations[collisionPath][named.name] = struct{}{}
+			break
+		}
+	}
+
+	edits := make([]plannedEdit, 0)
+	for _, named := range agentTargets() {
+		if _, ok := selected[named.name]; !ok {
+			continue
+		}
+		currentDestination := filepath.Clean(currentDestinations[named.name])
+		for _, surface := range recorded.Surfaces {
+			if surface.Kind != manifestKindAgentInstructions ||
+				!surfacePathMatchesTarget(surface.Path, named.target.path) {
+				continue
+			}
+			recordedInstruction := target{path: filepath.FromSlash(surface.Path)}
+			path, collisionPath, err := findAgentInstruction(scope, recordedInstruction)
+			if err != nil {
+				return nil, nil, err
+			}
+			collisionPath = filepath.Clean(collisionPath)
+			if collisionPath == currentDestination {
+				continue
+			}
+			if sharedAgents := unselectedDestinations[collisionPath]; len(sharedAgents) > 0 {
+				selectedNames := selectedInstructionAgentNames(selected)
+				requiredNames := make([]string, 0, len(selectedNames)+len(sharedAgents))
+				for _, targetAgent := range agentTargets() {
+					_, isSelected := selected[targetAgent.name]
+					_, isShared := sharedAgents[targetAgent.name]
+					if isSelected || isShared {
+						requiredNames = append(requiredNames, targetAgent.name)
+					}
+				}
+				return nil, nil, fmt.Errorf(
+					"cannot change instructions target with --agents %s: previous "+
+						"agent-instruction destination %s is shared with agents outside "+
+						"the selection; re-run with --agents %s",
+					strings.Join(selectedNames, ","),
+					collisionPath,
+					strings.Join(requiredNames, ","),
+				)
+			}
+			before, exists, err := readOptionalFile(path)
+			if err != nil {
+				return nil, nil, err
+			}
+			if !exists {
+				continue
+			}
+			after, found, err := removeManagedBlock(before)
+			if err != nil {
+				return nil, nil, fmt.Errorf(
+					"remove previous managed block from %s: %w",
+					path,
+					err,
+				)
+			}
+			if !found {
+				continue
+			}
+			edit := newEdit(surface.Path, path, before, after, 0o644, true, false)
+			edit.agentInstructions = true
+			edit.collisionPath = collisionPath
+			edits = appendEdit(edits, edit)
+		}
+	}
+	return edits, nil, nil
 }
 
 // ErrUnrecognizedAIFamilies reports a managed manifest whose AI families this
@@ -540,6 +813,36 @@ func ReadRecordedShellPermission(root string) (ShellPermission, bool, error) {
 		)
 	}
 	return permission, true, nil
+}
+
+// ReadRecordedInstructionsTarget returns the destination chosen by a compatible
+// managed manifest. Manifests written before the field existed record workspace
+// by construction.
+func ReadRecordedInstructionsTarget(root string) (InstructionsTarget, bool, error) {
+	manifestPath := filepath.Join(root, manifestFile)
+	data, exists, err := readOptionalFile(manifestPath)
+	if err != nil {
+		return "", false, err
+	}
+	if !exists {
+		return "", false, nil
+	}
+
+	var manifest managedManifest
+	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
+		manifest.SchemaVersion != manifestSchemaVersion {
+		//nolint:nilerr // No recorded choice is offered when the manifest is not usable.
+		return "", false, nil
+	}
+	target, err := recordedInstructionsTarget(manifest)
+	if err != nil {
+		return "", false, fmt.Errorf(
+			"read instructions target from managed manifest %s: %w",
+			manifestPath,
+			err,
+		)
+	}
+	return target, true, nil
 }
 
 // ReadRecordedAIFamilies reports the AI families recorded in the workspace

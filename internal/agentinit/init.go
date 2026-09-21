@@ -265,6 +265,68 @@ func ParseShellPermission(value string) (ShellPermission, error) {
 	}
 }
 
+// InstructionsTarget selects where agent instruction files are managed.
+type InstructionsTarget string
+
+const (
+	InstructionsTargetProject   InstructionsTarget = "project"
+	InstructionsTargetWorkspace InstructionsTarget = "workspace"
+	InstructionsTargetMachine   InstructionsTarget = "machine"
+)
+
+// ParseInstructionsTarget resolves an agent-instruction destination choice.
+func ParseInstructionsTarget(value string) (InstructionsTarget, error) {
+	switch target := InstructionsTarget(strings.ToLower(strings.TrimSpace(value))); target {
+	case InstructionsTargetProject, InstructionsTargetWorkspace, InstructionsTargetMachine:
+		return target, nil
+	default:
+		return "", fmt.Errorf(
+			"unsupported instructions target %q: use project, workspace, or machine",
+			value,
+		)
+	}
+}
+
+// InstructionsDirectory resolves the directory selected for agent instructions.
+func InstructionsDirectory(
+	scope string,
+	dir string,
+	target InstructionsTarget,
+) (string, error) {
+	switch target {
+	case InstructionsTargetWorkspace:
+		return filepath.Clean(scope), nil
+	case InstructionsTargetProject:
+		project, err := filepath.Abs(dir)
+		if err != nil {
+			return "", fmt.Errorf("resolve project instruction directory: %w", err)
+		}
+		relative, err := filepath.Rel(scope, project)
+		if err != nil {
+			return "", fmt.Errorf(
+				"resolve project instruction directory %s against workspace scope %s: %w",
+				project,
+				scope,
+				err,
+			)
+		}
+		if relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
+			filepath.IsAbs(relative) {
+			return "", fmt.Errorf(
+				"project instruction directory %s is outside workspace scope %s",
+				project,
+				scope,
+			)
+		}
+		return filepath.Clean(project), nil
+	case InstructionsTargetMachine:
+		return machineInstructionsHome()
+	default:
+		return "", fmt.Errorf("unsupported instructions target %q", target)
+	}
+}
+
 // ClaudeToolPrefix is the Claude permission entry prefix of this server's tools.
 const ClaudeToolPrefix = claudeServerRule + "__"
 
@@ -332,6 +394,9 @@ type Options struct {
 	BetaTest       bool
 	DryRun         bool
 	WriteMCPConfig bool
+	// InstructionsTarget selects the directory family that receives agent
+	// instruction files. An empty value is invalid.
+	InstructionsTarget InstructionsTarget
 	// AIFamilies selects the presentation profiles carried by generated managed
 	// server arguments and names at least one family. Each family reaches the
 	// one configuration its client reads; a configuration whose family is not
@@ -362,6 +427,7 @@ type Result struct {
 	Scope string
 	Paths []string
 	Diffs []string
+	Notes []string
 }
 
 // ResolveScope returns the workspace boundary that Apply uses for dir.
@@ -374,16 +440,17 @@ func ResolveScope(dir string) (string, error) {
 }
 
 type plannedEdit struct {
-	apply         func() error
-	surface       string
-	path          string
-	collisionPath string
-	before        []byte
-	after         []byte
-	mode          os.FileMode
-	changed       bool
-	beforeExists  bool
-	remove        bool
+	apply               func() error
+	surface             string
+	path                string
+	collisionPath       string
+	before              []byte
+	after               []byte
+	mode                os.FileMode
+	changed             bool
+	beforeExists        bool
+	remove              bool
+	machineInstructions bool
 	// agentInstructions permits one intentional alias only when both writes are identical.
 	agentInstructions bool
 }
@@ -391,9 +458,16 @@ type plannedEdit struct {
 // Apply makes the current invocation authoritative for every workspace-local
 // surface owned by JMW. All paths and contents are planned before the first
 // write, so a malformed later target cannot leave an earlier one updated.
+//
+//nolint:gocyclo // Keep the ordered transaction preflight and policy-last write visible together.
 func Apply(options Options) (Result, error) {
-	if _, err := options.RunnerModes.Selections(); err != nil {
-		return Result{}, fmt.Errorf("validate runner selections: %w", err)
+	instructionsTarget, err := ParseInstructionsTarget(string(options.InstructionsTarget))
+	if err != nil {
+		return Result{}, fmt.Errorf("validate Options.InstructionsTarget: %w", err)
+	}
+	options.InstructionsTarget = instructionsTarget
+	if _, selectionsErr := options.RunnerModes.Selections(); selectionsErr != nil {
+		return Result{}, fmt.Errorf("validate runner selections: %w", selectionsErr)
 	}
 	families, err := options.AIFamilies.Canonical()
 	if err != nil {
@@ -424,7 +498,11 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	agentEdits, surfaces, err := planAgentInstructions(scope, selected, options.BetaTest)
+	agentEdits, surfaces, instructionDestinations, err := planAgentInstructions(
+		scope,
+		selected,
+		options,
+	)
 	if err != nil {
 		return Result{}, err
 	}
@@ -440,14 +518,16 @@ func Apply(options Options) (Result, error) {
 	}
 	edits = append(edits, workspaceEdits...)
 	surfaces = append(surfaces, workspaceSurfaces...)
-	manifestEdits, err := planManifest(
+	manifestEdits, notes, err := planManifest(
 		scope,
 		edits,
 		surfaces,
+		instructionDestinations,
 		options.BetaTest,
 		options.ShellPermission,
 		options.AIFamilies,
 		selected,
+		options.InstructionsTarget,
 	)
 	if err != nil {
 		return Result{}, err
@@ -461,6 +541,7 @@ func Apply(options Options) (Result, error) {
 	}
 	result := resultForEdits(edits)
 	result.Scope = scope
+	result.Notes = notes
 	if options.DryRun {
 		return result, nil
 	}
@@ -570,42 +651,211 @@ func planWorkspaceConfiguration(
 func planAgentInstructions(
 	scope string,
 	selected map[string]struct{},
-	betaTest bool,
-) ([]plannedEdit, []manifestSurface, error) {
+	options Options,
+) ([]plannedEdit, []manifestSurface, map[string]string, error) {
 	edits := make([]plannedEdit, 0, len(selected))
 	surfaces := make([]manifestSurface, 0, len(selected))
+	destinations := make(map[string]string, len(selected))
+	instructionsDirectory, err := InstructionsDirectory(
+		scope,
+		options.Dir,
+		options.InstructionsTarget,
+	)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	relativePrefix := ""
+	if options.InstructionsTarget != InstructionsTargetMachine {
+		relative, relativeErr := filepath.Rel(scope, instructionsDirectory)
+		if relativeErr != nil {
+			return nil, nil, nil, fmt.Errorf(
+				"resolve instruction directory %s against workspace scope %s: %w",
+				instructionsDirectory,
+				scope,
+				relativeErr,
+			)
+		}
+		if relative != "." {
+			relativePrefix = relative
+		}
+	}
 	for _, named := range agentTargets() {
 		if _, keep := selected[named.name]; !keep {
 			continue
 		}
-		path, collisionPath, err := findAgentInstruction(scope, named.target)
-		if err != nil {
-			return nil, nil, err
+		if options.InstructionsTarget == InstructionsTargetMachine {
+			if named.machinePath == "" {
+				return nil, nil, nil, fmt.Errorf(
+					"agent %q has no machine-wide instruction path; "+
+						"machine target supports claude, codex, and windsurf",
+					named.name,
+				)
+			}
+			edit, planErr := planMachineAgentInstruction(
+				instructionsDirectory,
+				named,
+				options.BetaTest,
+			)
+			if planErr != nil {
+				return nil, nil, nil, planErr
+			}
+			destinations[named.name] = edit.collisionPath
+			edits = appendEdit(edits, edit)
+			continue
 		}
-		before, beforeExists, err := readOptionalFile(path)
-		if err != nil {
-			return nil, nil, err
+
+		instructionTarget := named.target
+		instructionTarget.path = filepath.Join(relativePrefix, instructionTarget.path)
+		path, collisionPath, findErr := findAgentInstruction(scope, instructionTarget)
+		if findErr != nil {
+			return nil, nil, nil, findErr
 		}
-		after, err := managedContent(before, named.target.header, betaTest)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s: %w", path, err)
+		before, beforeExists, readErr := readOptionalFile(path)
+		if readErr != nil {
+			return nil, nil, nil, readErr
 		}
-		surface, err := blockManifestSurface(
-			named.target.path,
+		after, contentErr := managedContent(before, instructionTarget.header, options.BetaTest)
+		if contentErr != nil {
+			return nil, nil, nil, fmt.Errorf("%s: %w", path, contentErr)
+		}
+		surface, surfaceErr := blockManifestSurface(
+			instructionTarget.path,
 			manifestKindAgentInstructions,
 			after,
 			managedBlockRange,
 		)
-		if err != nil {
-			return nil, nil, fmt.Errorf("record %s: %w", path, err)
+		if surfaceErr != nil {
+			return nil, nil, nil, fmt.Errorf("record %s: %w", path, surfaceErr)
 		}
 		surfaces = append(surfaces, surface)
-		edit := newEdit(named.target.path, path, before, after, 0o644, beforeExists, false)
+		edit := newEdit(
+			instructionTarget.path,
+			path,
+			before,
+			after,
+			0o644,
+			beforeExists,
+			false,
+		)
 		edit.agentInstructions = true
 		edit.collisionPath = collisionPath
+		destinations[named.name] = collisionPath
 		edits = appendEdit(edits, edit)
 	}
-	return edits, surfaces, nil
+	return edits, surfaces, destinations, nil
+}
+
+func machineInstructionsHome() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory for machine instructions: %w", err)
+	}
+	if home == "" {
+		return "", errors.New("resolve user home directory for machine instructions: home is empty")
+	}
+	absolute, err := filepath.Abs(home)
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory for machine instructions: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(filepath.Clean(absolute))
+	if err != nil {
+		return "", fmt.Errorf("resolve user home directory for machine instructions: %w", err)
+	}
+	return filepath.Clean(resolved), nil
+}
+
+//nolint:gocyclo // Boundary resolution and the unchanged leaf rules are one preflight.
+func planMachineAgentInstruction(
+	home string,
+	named namedTarget,
+	betaTest bool,
+) (*plannedEdit, error) {
+	lexicalPath := filepath.Clean(
+		filepath.Join(home, filepath.FromSlash(named.machinePath)),
+	)
+	resolvedParent, err := resolveWorkspaceScope(filepath.Dir(lexicalPath))
+	if err != nil {
+		return nil, fmt.Errorf(
+			"resolve machine agent instruction parent for %s: %w",
+			lexicalPath,
+			err,
+		)
+	}
+	resolvedPath := filepath.Join(resolvedParent, filepath.Base(lexicalPath))
+	relative, err := filepath.Rel(home, resolvedParent)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"check machine agent instruction %s resolved as %s against home %s: %w",
+			lexicalPath,
+			resolvedPath,
+			home,
+			err,
+		)
+	}
+	if relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
+		filepath.IsAbs(relative) {
+		return nil, fmt.Errorf(
+			"machine agent instruction %s resolves to %s outside resolved home %s",
+			lexicalPath,
+			resolvedPath,
+			home,
+		)
+	}
+
+	// Inspect the resolved path used by the edit, so swapping a symlinked parent
+	// after planning cannot redirect the write. The package keeps its existing
+	// plan-then-write split: replacing the resolved leaf after this inspection
+	// remains possible to a process with write access to the operator's own home.
+	info, err := os.Lstat(resolvedPath)
+	beforeExists := err == nil
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("inspect machine agent instruction %s: %w", resolvedPath, err)
+	}
+	var before []byte
+	if beforeExists {
+		if !info.Mode().IsRegular() {
+			kind := info.Mode().String()
+			switch {
+			case info.Mode()&os.ModeSymlink != 0:
+				kind = "symlink"
+			case info.IsDir():
+				kind = "directory"
+			}
+			return nil, fmt.Errorf(
+				"machine agent instruction %s is a %s, not a regular file",
+				resolvedPath,
+				kind,
+			)
+		}
+		// #nosec G304 -- resolvedPath passed the canonical home boundary above.
+		before, err = os.ReadFile(resolvedPath)
+		if err != nil {
+			return nil, fmt.Errorf("read machine agent instruction %s: %w", resolvedPath, err)
+		}
+		_, _, found, rangeErr := managedBlockRange(string(before))
+		if rangeErr != nil {
+			return nil, fmt.Errorf("machine agent instruction %s: %w", resolvedPath, rangeErr)
+		}
+		if !found {
+			return nil, fmt.Errorf(
+				"machine agent instruction %s has no managed block; writing the two marker "+
+					"lines %q and %q by hand where the block should go makes the next init manage it",
+				resolvedPath,
+				beginMarker,
+				endMarker,
+			)
+		}
+	}
+	after, err := managedContent(before, "", betaTest)
+	if err != nil {
+		return nil, fmt.Errorf("machine agent instruction %s: %w", resolvedPath, err)
+	}
+	edit := newEdit(resolvedPath, resolvedPath, before, after, 0o644, beforeExists, false)
+	edit.agentInstructions = true
+	edit.machineInstructions = true
+	edit.collisionPath = filepath.Clean(resolvedPath)
+	return edit, nil
 }
 
 func planAgentGuide(scope string) (*plannedEdit, manifestSurface, error) {
@@ -884,13 +1134,19 @@ func resultForEdits(edits []plannedEdit) Result {
 		if !edit.changed {
 			continue
 		}
+		before := edit.before
+		after := edit.after
+		if edit.machineInstructions {
+			before = managedInstructionDiffContent(before)
+			after = managedInstructionDiffContent(after)
+		}
 		result.Paths = append(result.Paths, edit.path)
 		result.Diffs = append(
 			result.Diffs,
 			simpleDiffWithRemoval(
 				edit.path,
-				edit.before,
-				edit.after,
+				before,
+				after,
 				edit.beforeExists,
 				edit.remove,
 			),
@@ -919,8 +1175,8 @@ func applyEdits(edits []plannedEdit) error {
 			}
 			continue
 		}
-		// #nosec G306,G703 -- every edit path was resolved and validated within
-		// the current workspace scope before this write phase began.
+		// #nosec G306,G703 -- every edit path was preflighted against its workspace
+		// or machine-instruction boundary before this write phase began.
 		if err := os.WriteFile(edit.path, edit.after, edit.mode); err != nil {
 			return fmt.Errorf("write %s: %w", edit.path, err)
 		}
@@ -1398,14 +1654,23 @@ type target struct {
 }
 
 type namedTarget struct {
-	name   string
-	target target
+	name        string
+	target      target
+	machinePath string
 }
 
 func agentTargets() []namedTarget {
 	return []namedTarget{
-		{name: "claude", target: target{path: "CLAUDE.md", header: "# Workspace instructions\n\n"}},
-		{name: "codex", target: target{path: "AGENTS.md", header: "# Workspace instructions\n\n"}},
+		{
+			name:        "claude",
+			target:      target{path: "CLAUDE.md", header: "# Workspace instructions\n\n"},
+			machinePath: ".claude/CLAUDE.md",
+		},
+		{
+			name:        "codex",
+			target:      target{path: "AGENTS.md", header: "# Workspace instructions\n\n"},
+			machinePath: ".codex/AGENTS.md",
+		},
 		{
 			name: "cursor",
 			target: target{
@@ -1418,8 +1683,9 @@ func agentTargets() []namedTarget {
 			target: target{path: ".github/copilot-instructions.md", header: "# Copilot instructions\n\n"},
 		},
 		{
-			name:   "windsurf",
-			target: target{path: ".windsurfrules", header: "# Workspace instructions\n\n"},
+			name:        "windsurf",
+			target:      target{path: ".windsurfrules", header: "# Workspace instructions\n\n"},
+			machinePath: ".codeium/windsurf/memories/global_rules.md",
 		},
 	}
 }
@@ -1486,6 +1752,20 @@ func managedBlockRange(text string) (int, int, bool, error) {
 		end = len(text) - len(suffix)
 	}
 	return start, end, true, nil
+}
+
+func removeManagedBlock(before []byte) ([]byte, bool, error) {
+	text := string(before)
+	start, end, found, err := managedBlockRange(text)
+	if err != nil || !found {
+		return before, found, err
+	}
+	prefix := trimManagedSeparator(text[:start])
+	suffix := text[end:]
+	if prefix != "" && suffix != "" && !strings.HasSuffix(prefix, "\n") {
+		prefix += documentLineBreak(before)
+	}
+	return []byte(prefix + suffix), true, nil
 }
 
 // serverEntry is the managed MCP server definition of this executable. The
@@ -2165,6 +2445,14 @@ func unique(values []string) []string {
 
 func simpleDiff(path string, before, after []byte, beforeExists bool) string {
 	return simpleDiffWithRemoval(path, before, after, beforeExists, false)
+}
+
+func managedInstructionDiffContent(content []byte) []byte {
+	fragment, found, err := managedBlockFragment(content, managedBlockRange)
+	if err != nil || !found {
+		return nil
+	}
+	return fragment
 }
 
 func simpleDiffWithRemoval(

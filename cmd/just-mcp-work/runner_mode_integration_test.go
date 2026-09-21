@@ -34,6 +34,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 		false,
 		[]string{
 			"--dir", root,
+			"--instructions-target", "workspace",
 			"--agents", "codex",
 			"--ai", "codex",
 			"--shell-permission", "ask",
@@ -158,6 +159,7 @@ func initWorkspaceBelowScope(t *testing.T) (scope string, project string) {
 		false,
 		[]string{
 			"--dir", project,
+			"--instructions-target", "workspace",
 			"--agents", "codex",
 			"--ai", "codex",
 			"--shell-permission", "ask",

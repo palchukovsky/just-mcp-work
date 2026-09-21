@@ -44,12 +44,13 @@ func TestApplyUpdatesJunctionedCodexConfigDirectory(t *testing.T) {
 	}
 
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err != nil {
 		t.Fatal(err)

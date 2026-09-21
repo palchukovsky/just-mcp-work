@@ -128,18 +128,51 @@ or, if you want to be a JMW beta-tester:
 just-mcp-work init-beta-test
 ```
 
+`init` asks where to put its managed instruction block: `project` means the
+directory named by `--dir`, `workspace` means the resolved workspace scope, and
+`machine` means the agent's machine-wide file. Pass
+`--instructions-target project|workspace|machine` to answer without a prompt.
+`workspace` is the default and the previous behavior; a later run offers the
+target recorded by the previous `init`.
+
+The machine target supports Claude Code (`~/.claude/CLAUDE.md`), Codex
+(`~/.codex/AGENTS.md`), and Windsurf
+(`~/.codeium/windsurf/memories/global_rules.md`). The default `--agents
+claude,codex,cursor` is therefore not valid with `machine`: select only
+supported agents, for example `--agents claude,codex,windsurf`. The CLI checks
+this immediately after the target is selected, before asking its later
+questions, and never silently drops an agent.
+
+The home and each machine file's parent directory are resolved before planning.
+The resolved parent must remain inside the resolved home; a dotfiles link that
+stays there works, while an escaping link is refused with both its lexical and
+resolved paths. The leaf itself must be a regular file, not a symlink. A
+missing leaf is created with the managed block; an existing regular file has
+only the block between its markers replaced and is refused when the markers
+are absent or malformed. Machine files are outside the workspace: `serve`
+neither verifies nor repairs them. In `--dry-run`, their diff contains only
+the managed block, never personal text around it. `.mcp.json`,
+`.codex/config.toml`,
+`.claude/settings.json`, `.just-mcp-work/`, and the runner policy remain at the
+workspace scope for every target.
+
 Each invocation is authoritative inside the workspace scope resolved from
 `--dir`, for the surfaces it manages. It adds the canonical instruction block
 for the selected agents - Claude Code, Codex, Cursor, Copilot, and Windsurf -
-and never reads or changes the instruction file of an agent that is not
-selected. `.claude/settings.json` is touched only when `claude` is one of the
+and never reads the contents of or changes the instruction file of an agent
+that is not selected. Its recorded surface remains in the manifest so
+`serve` continues verifying it and a later run that reselects the agent can
+clean an old destination. `.claude/settings.json` is touched only when
+`claude` is one of the
 selected agents, and then follows the permission answer. `.mcp.json` and
 `.codex/config.toml` follow `--write-mcp-config` rather than `--agents`: they
 are rewritten when it is true and stripped of their JMW entries when it is
 false, whether or not `codex` was selected. Two selected agent targets that
 resolve to one document are accepted only when both edits produce identical
 content; otherwise `init` refuses before writing and names both surfaces and
-their shared path. A deselected aliased target remains untouched.
+their shared path. A deselected aliased target remains untouched. If moving a
+selected agent would remove a block from a path also recorded for an unselected
+agent, `init` refuses and gives the `--agents` value that makes the move safe.
 
 It also writes `.just-mcp-work/guide.txt`, a generated reference for agents
 working with JMW. Once `serve` verifies it, the short MCP instructions point to
@@ -155,7 +188,11 @@ JMW-only `.mcp.json` scope anchor is kept as an empty object whenever deleting
 it would change the scope of an identical repeated `init`. Instruction files
 are never removed: an agent dropped from `--agents` keeps the block an earlier
 run wrote for it and goes on obeying it, so delete that block by hand once the
-agent should stop.
+agent should stop. A selected agent is different when its target changes: its
+previous project or workspace file loses the managed block but remains. A
+previous machine file is reported and left alone because it can be shared by
+other workspaces on that machine; the advisory is limited to agents this
+workspace's manifest says it wrote.
 
 Every target this invocation manages is planned before any of them is written,
 so a failure on a later target cannot leave an earlier one already changed.
@@ -203,6 +240,9 @@ or write access. To change runner selection, run `init`, not
 offers the recorded one instead. The answer goes to `.claude/settings.json` and
 the managed block in `.codex/config.toml` when they are managed. Pass
 `--shell-permission allow|ask` to answer it up front in a scripted run.
+Changing this answer with a narrower `--agents` selection is blocked only by
+recorded Claude settings outside that selection, not by machine instruction
+files whose bytes do not depend on the shell permission.
 
 Run `init` again after an update. In a beta-test workspace, use
 `init-beta-test` to stay in beta mode; plain `init` asks before it removes beta

@@ -82,11 +82,12 @@ func TestApplyIsIdempotentAndPreservesExistingContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	first, err := Apply(options)
 	if err != nil {
@@ -148,7 +149,8 @@ func TestApplyWritesAgentGuide(t *testing.T) {
 				}
 			}
 			result, err := Apply(Options{
-				Dir: dir, Agents: []string{"cursor"}, RunnerModes: testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				Dir:                dir, Agents: []string{"cursor"}, RunnerModes: testRunnerModes(t),
 				AIFamilies: testAIFamilies(),
 			})
 			if err != nil {
@@ -183,7 +185,8 @@ func TestApplyWritesAgentGuide(t *testing.T) {
 		}
 		path := filepath.Join(resolvedDirectory, guideFile)
 		result, err := Apply(Options{
-			Dir: dir, Agents: []string{"windsurf"}, DryRun: true,
+			InstructionsTarget: InstructionsTargetWorkspace,
+			Dir:                dir, Agents: []string{"windsurf"}, DryRun: true,
 			AIFamilies:  testAIFamilies(),
 			RunnerModes: testRunnerModes(t),
 		})
@@ -206,11 +209,12 @@ func TestApplyWritesAgentGuide(t *testing.T) {
 func TestApplyMigratesRetiredAgentGuide(t *testing.T) {
 	dir := t.TempDir()
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -267,11 +271,12 @@ func TestApplyMigratesRetiredAgentGuide(t *testing.T) {
 func TestRetiredAgentGuideRefusesStaleContentUntilInitMigrates(t *testing.T) {
 	dir := t.TempDir()
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -309,11 +314,12 @@ func TestRetiredAgentGuideRefusesStaleContentUntilInitMigrates(t *testing.T) {
 func TestApplyPreservesUnrecordedRetiredAgentGuide(t *testing.T) {
 	dir := t.TempDir()
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -352,11 +358,12 @@ func TestApplyRejectsRetiredGuideCollisionThroughScopedDirectorySymlink(t *testi
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err = Apply(options); err != nil {
 		t.Fatal(err)
@@ -410,11 +417,12 @@ func TestApplyRejectsRetiredGuideFileSymlinkBeforeWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err = Apply(options); err != nil {
 		t.Fatal(err)
@@ -519,15 +527,17 @@ func TestApplyCodexConfigRoundTripPreservesTerminatedForeignContent(t *testing.T
 			}
 			modes := testRunnerModes(t)
 			if _, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
 				AIFamilies: testAIFamilies(),
 			}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
 				AIFamilies: testAIFamilies(),
 			}); err != nil {
 				t.Fatal(err)
@@ -556,12 +566,13 @@ func TestApplyBetaTestSelectsTheManagedBlock(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			if _, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir,
-				Agents:          []string{"codex"},
-				BetaTest:        testCase.betaTest,
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"codex"},
+				BetaTest:           testCase.betaTest,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -587,12 +598,13 @@ func TestApplyBetaTestAndPlainModesAreIdempotent(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			options := Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir,
-				Agents:          []string{"claude", "codex"},
-				BetaTest:        testCase.betaTest,
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"claude", "codex"},
+				BetaTest:           testCase.betaTest,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			}
 			first, err := Apply(options)
 			if err != nil {
@@ -645,12 +657,13 @@ func TestApplySwitchesBetaTestBlockCleanly(t *testing.T) {
 			dir := t.TempDir()
 			fresh := t.TempDir()
 			initial := Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir,
-				Agents:          []string{"codex"},
-				BetaTest:        testCase.initial,
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"codex"},
+				BetaTest:           testCase.initial,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			}
 			if _, err := Apply(initial); err != nil {
 				t.Fatal(err)
@@ -708,13 +721,14 @@ func TestApplyBetaTestPreservesOperatorTextOutsideManagedBlocks(t *testing.T) {
 		want[path] = []byte(prefix + canonicalBlock(true) + suffix)
 	}
 	if _, err := Apply(Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude", "codex", "cursor"},
-		BetaTest:          true,
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       testRunnerModes(t),
-		ClaudePermissions: ClaudePermissionsNo,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude", "codex", "cursor"},
+		BetaTest:           true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
+		ClaudePermissions:  ClaudePermissionsNo,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -753,14 +767,15 @@ func TestApplyBetaTestPreservesForeignConfigurations(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Apply(Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude", "codex"},
-		BetaTest:          true,
-		WriteMCPConfig:    true,
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       testRunnerModes(t),
-		ClaudePermissions: ClaudePermissionsYes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude", "codex"},
+		BetaTest:           true,
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
+		ClaudePermissions:  ClaudePermissionsYes,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -794,15 +809,17 @@ func TestApplyCodexConfigCleanupKeepsLegacyTextValid(t *testing.T) {
 	}
 	modes := testRunnerModes(t)
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	}); err != nil {
 		t.Fatal(err)
@@ -836,8 +853,9 @@ func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
 			dir := t.TempDir()
 			all := []string{"claude", "codex", "cursor", "copilot", "windsurf"}
 			if _, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: all, RunnerModes: testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: all, RunnerModes: testRunnerModes(t),
 				AIFamilies:        testAIFamilies(),
 				ClaudePermissions: ClaudePermissionsYes,
 			}); err != nil {
@@ -850,8 +868,9 @@ func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
 				t.Fatal(err)
 			}
 			result, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 				AIFamilies:        testAIFamilies(),
 				ClaudePermissions: testCase.permissions,
 			})
@@ -891,12 +910,13 @@ func TestApplyModeChangeRejectsDeselectedManagedInstructions(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			first, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir,
-				Agents:          []string{"claude", "codex", "cursor"},
-				BetaTest:        testCase.initial,
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"claude", "codex", "cursor"},
+				BetaTest:           testCase.initial,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -911,12 +931,13 @@ func TestApplyModeChangeRejectsDeselectedManagedInstructions(t *testing.T) {
 			}
 
 			_, err = Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir,
-				Agents:          []string{"codex"},
-				BetaTest:        testCase.targetMode,
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"codex"},
+				BetaTest:           testCase.targetMode,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			})
 			if err == nil {
 				t.Fatal("narrow mode-changing Apply() error = nil")
@@ -975,16 +996,18 @@ func TestApplyKeepsAliasedInstructionOfDeselectedAgent(t *testing.T) {
 			}
 			modes := testRunnerModes(t)
 			if _, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: []string{"claude", "codex"}, RunnerModes: modes,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: []string{"claude", "codex"}, RunnerModes: modes,
 				AIFamilies:        testAIFamilies(),
 				ClaudePermissions: ClaudePermissionsNo,
 			}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: []string{selected}, RunnerModes: modes,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: []string{selected}, RunnerModes: modes,
 				AIFamilies:        testAIFamilies(),
 				ClaudePermissions: ClaudePermissionsNo,
 			}); err != nil {
@@ -1034,11 +1057,12 @@ func TestApplyRejectsAliasedAgentInstructionsWithDifferentContent(t *testing.T) 
 	}
 
 	_, err = Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex", "cursor"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex", "cursor"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	wantError := fmt.Sprintf(
 		"managed surfaces %q and %q resolve to the same path %s",
@@ -1059,15 +1083,17 @@ func TestApplyWriteMCPConfigFalseRemovesManagedConfigs(t *testing.T) {
 	dir := t.TempDir()
 	modes := testRunnerModes(t)
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	})
 	if err != nil {
@@ -1104,8 +1130,9 @@ func TestApplyNestedCleanupPreservesMCPConfigScopeAnchor(t *testing.T) {
 		t.Fatal(writeErr)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	}
 	first, err := Apply(options)
@@ -1160,8 +1187,9 @@ func TestApplyLocalCleanupPreservesScopeWhenHigherMCPConfigExists(t *testing.T) 
 		t.Fatal(writeErr)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	}
 	first, err := Apply(options)
@@ -1216,8 +1244,9 @@ func TestApplyRejectsNonRegularHigherMCPConfigBeforeLocalCleanup(t *testing.T) {
 		t.Fatal(writeErr)
 	}
 	_, err = Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "is not a regular file") {
@@ -1250,15 +1279,17 @@ func TestApplyCleanupPreservesForeignConfigContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: false, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	}); err != nil {
 		t.Fatal(err)
@@ -1305,8 +1336,9 @@ func TestApplyClaudePermissionNoAndDeclineRemoveManagedPermissions(t *testing.T)
 			dir := t.TempDir()
 			modes := testRunnerModes(t)
 			if _, err := Apply(Options{
-				ShellPermission: ShellPermissionAllow,
-				Dir:             dir, Agents: []string{"claude"}, RunnerModes: modes,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAllow,
+				Dir:                dir, Agents: []string{"claude"}, RunnerModes: modes,
 				AIFamilies:        testAIFamilies(),
 				WriteMCPConfig:    true,
 				ClaudePermissions: ClaudePermissionsYes,
@@ -1314,14 +1346,15 @@ func TestApplyClaudePermissionNoAndDeclineRemoveManagedPermissions(t *testing.T)
 				t.Fatal(err)
 			}
 			result, err := Apply(Options{
-				ShellPermission:   testCase.shell,
-				Dir:               dir,
-				Agents:            []string{"claude"},
-				WriteMCPConfig:    true,
-				AIFamilies:        testAIFamilies(),
-				RunnerModes:       modes,
-				ClaudePermissions: testCase.permissions,
-				Confirm:           testCase.confirm,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    testCase.shell,
+				Dir:                dir,
+				Agents:             []string{"claude"},
+				WriteMCPConfig:     true,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        modes,
+				ClaudePermissions:  testCase.permissions,
+				Confirm:            testCase.confirm,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1356,12 +1389,13 @@ func TestApplyClaudePermissionCleanupSweepsEveryListAndKeepsForeignEntries(t *te
 		t.Fatal(err)
 	}
 	if _, err := Apply(Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude"},
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       testRunnerModes(t),
-		ClaudePermissions: ClaudePermissionsNo,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
+		ClaudePermissions:  ClaudePermissionsNo,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1395,12 +1429,13 @@ func TestApplyClaudeCleanupKeepsForeignEmptyPermissionKeys(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := Apply(Options{
-				ShellPermission:   ShellPermissionAsk,
-				Dir:               dir,
-				Agents:            []string{"claude"},
-				AIFamilies:        testAIFamilies(),
-				RunnerModes:       testRunnerModes(t),
-				ClaudePermissions: ClaudePermissionsNo,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"claude"},
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
+				ClaudePermissions:  ClaudePermissionsNo,
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -1467,13 +1502,14 @@ func TestApplyDryRunPlansCleanupWithoutWriting(t *testing.T) {
 	dir := t.TempDir()
 	modes := testRunnerModes(t)
 	if _, err := Apply(Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude", "codex", "cursor", "copilot", "windsurf"},
-		WriteMCPConfig:    true,
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       modes,
-		ClaudePermissions: ClaudePermissionsYes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude", "codex", "cursor", "copilot", "windsurf"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        modes,
+		ClaudePermissions:  ClaudePermissionsYes,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1500,14 +1536,15 @@ func TestApplyDryRunPlansCleanupWithoutWriting(t *testing.T) {
 	}
 	confirmed := false
 	result, err := Apply(Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude", "codex"},
-		DryRun:            true,
-		WriteMCPConfig:    false,
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       modes,
-		ClaudePermissions: ClaudePermissionsAsk,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude", "codex"},
+		DryRun:             true,
+		WriteMCPConfig:     false,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        modes,
+		ClaudePermissions:  ClaudePermissionsAsk,
 		Confirm: func(ShellPermission, string, string) (bool, error) {
 			confirmed = true
 			return true, nil
@@ -1547,8 +1584,9 @@ func TestApplyDryRunDistinguishesEmptyExistingFromMissingAgentFile(t *testing.T)
 				}
 			}
 			result, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: []string{"codex"}, DryRun: true,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: []string{"codex"}, DryRun: true,
 				AIFamilies:  testAIFamilies(),
 				RunnerModes: testRunnerModes(t),
 			})
@@ -1591,8 +1629,9 @@ func TestApplyPreflightsEverySurfaceBeforeWriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"claude", "codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"claude", "codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "decode existing .claude/settings.json") {
@@ -1611,13 +1650,14 @@ func TestApplyReportsPolicyAfterManagedConfigurations(t *testing.T) {
 	dir := t.TempDir()
 	result, err := Apply(
 		Options{
-			ShellPermission:   ShellPermissionAsk,
-			Dir:               dir,
-			Agents:            []string{"claude"},
-			WriteMCPConfig:    true,
-			AIFamilies:        testAIFamilies(),
-			RunnerModes:       testRunnerModes(t),
-			ClaudePermissions: ClaudePermissionsYes,
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"claude"},
+			WriteMCPConfig:     true,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
+			ClaudePermissions:  ClaudePermissionsYes,
 		},
 	)
 	if err != nil {
@@ -1677,11 +1717,12 @@ func TestApplyWriteFailureLeavesPreviousPolicyUnchanged(t *testing.T) {
 		},
 	)
 	_, err = Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     widened,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        widened,
 	})
 	if err == nil || !strings.Contains(err.Error(), agentPath) {
 		t.Fatalf("Apply() error = %v, want write failure for %s", err, agentPath)
@@ -1702,13 +1743,14 @@ func TestApplyPlanningFailureLeavesWorkspaceUntouched(t *testing.T) {
 	}
 	_, err := Apply(
 		Options{
-			ShellPermission:   ShellPermissionAsk,
-			Dir:               dir,
-			Agents:            []string{"claude"},
-			WriteMCPConfig:    true,
-			AIFamilies:        testAIFamilies(),
-			RunnerModes:       testRunnerModes(t),
-			ClaudePermissions: ClaudePermissionsYes,
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"claude"},
+			WriteMCPConfig:     true,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
+			ClaudePermissions:  ClaudePermissionsYes,
 		},
 	)
 	if err == nil {
@@ -1726,11 +1768,12 @@ func TestApplyReplacesMalformedPolicy(t *testing.T) {
 	}
 	if _, err := Apply(
 		Options{
-			ShellPermission: ShellPermissionAsk,
-			Dir:             dir,
-			Agents:          []string{"codex"},
-			AIFamilies:      testAIFamilies(),
-			RunnerModes:     testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"codex"},
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 		},
 	); err != nil {
 		t.Fatalf("Apply() error = %v", err)
@@ -2172,11 +2215,12 @@ func TestApplyReplacesModifiedManagedBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"claude"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatalf("Apply: %v", err)
@@ -2200,8 +2244,9 @@ func TestApplyUpdatesEarlierManagedPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	})
 	if err != nil {
@@ -2229,12 +2274,13 @@ func TestApplyMergesMCPConfigWithoutClobberingOtherServers(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -2273,12 +2319,13 @@ func TestApplyPersistsRunnerPolicyAndKeepsServerArgsMinimal(t *testing.T) {
 	}
 	validated := validatedTestRunnerModes(t, selections)
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     validated,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        validated,
 	}
 	result, err := Apply(options)
 	if err != nil {
@@ -2340,8 +2387,9 @@ func TestApplyPersistsRunnerPolicyAndKeepsServerArgsMinimal(t *testing.T) {
 func TestApplyRejectsUnvalidatedRunnerModesBeforeWriting(t *testing.T) {
 	dir := t.TempDir()
 	_, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true,
 	})
 	if err == nil || !strings.Contains(err.Error(), "not validated by a catalog") {
 		t.Fatalf("Apply error = %v, want unvalidated runner selection rejection", err)
@@ -2378,12 +2426,13 @@ func TestApplyKeepsForeignMCPConfigFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -2442,8 +2491,9 @@ func TestApplyKeepsForeignClaudeSettingsFormatting(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
 		AIFamilies:        testAIFamilies(),
 		ClaudePermissions: ClaudePermissionsYes,
 	}
@@ -2499,13 +2549,14 @@ func TestApplyKeepsCRLFLineEndings(t *testing.T) {
 		}
 	}
 	options := Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude", "codex"},
-		WriteMCPConfig:    true,
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       testRunnerModes(t),
-		ClaudePermissions: ClaudePermissionsYes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude", "codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
+		ClaudePermissions:  ClaudePermissionsYes,
 	}
 	first, err := Apply(options)
 	if err != nil {
@@ -2566,12 +2617,13 @@ func TestApplyRepairsLegacyLFBlocksInCRLFDocuments(t *testing.T) {
 		}
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -2629,12 +2681,13 @@ func TestApplyKeepsCodexBlockInPlace(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -2688,12 +2741,13 @@ func TestApplyRejectsManagedCodexReplacementThatDuplicatesOperatorKey(t *testing
 	}
 
 	_, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err == nil || !strings.Contains(err.Error(), path) ||
 		!strings.Contains(err.Error(), "default_tools_approval_mode") {
@@ -2731,12 +2785,13 @@ func assertApplyWritesCodexShellApprovalModes(t *testing.T, shell ShellPermissio
 	t.Helper()
 	dir := t.TempDir()
 	options := Options{
-		ShellPermission: shell,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    shell,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -2848,12 +2903,13 @@ func assertApplySwitchesCodexShellApproval(t *testing.T, lineBreak string) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -2976,12 +3032,13 @@ func TestApplyMergesNearestMCPConfig(t *testing.T) {
 
 	result, err := Apply(
 		Options{
-			ShellPermission: ShellPermissionAsk,
-			Dir:             project,
-			Agents:          []string{"codex"},
-			WriteMCPConfig:  true,
-			AIFamilies:      testAIFamilies(),
-			RunnerModes:     testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                project,
+			Agents:             []string{"codex"},
+			WriteMCPConfig:     true,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 		},
 	)
 	if err != nil {
@@ -3059,12 +3116,13 @@ func TestApplyKeepsManagedConfigurationInsideActiveWorktree(t *testing.T) {
 	}
 
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             nested,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                nested,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3119,8 +3177,9 @@ func TestApplyDirectLinkedWorktreeCleanupPreservesHigherLocalAnchor(t *testing.T
 		t.Fatal(writeErr)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                scope, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	}
 	first, err := Apply(options)
@@ -3184,12 +3243,13 @@ func TestApplyNestedRepositoryMarkersStopAtRepositoryBoundary(t *testing.T) {
 			}
 
 			result, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             selectedDir,
-				Agents:          []string{"codex"},
-				WriteMCPConfig:  true,
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                selectedDir,
+				Agents:             []string{"codex"},
+				WriteMCPConfig:     true,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -3210,12 +3270,13 @@ func TestApplyCreatesMCPConfigInWorkspaceWhenNoneExists(t *testing.T) {
 	dir := t.TempDir()
 	result, err := Apply(
 		Options{
-			ShellPermission: ShellPermissionAsk,
-			Dir:             dir,
-			Agents:          []string{"codex"},
-			WriteMCPConfig:  true,
-			AIFamilies:      testAIFamilies(),
-			RunnerModes:     testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"codex"},
+			WriteMCPConfig:     true,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 		},
 	)
 	if err != nil {
@@ -3262,13 +3323,14 @@ func TestApplySupportsMissingStandaloneWorkspace(t *testing.T) {
 			dir := filepath.Join(base, "missing", "workspace")
 			result, err := Apply(
 				Options{
-					ShellPermission: ShellPermissionAsk,
-					Dir:             dir,
-					Agents:          []string{"codex"},
-					DryRun:          test.dryRun,
-					WriteMCPConfig:  true,
-					AIFamilies:      testAIFamilies(),
-					RunnerModes:     testRunnerModes(t),
+					InstructionsTarget: InstructionsTargetWorkspace,
+					ShellPermission:    ShellPermissionAsk,
+					Dir:                dir,
+					Agents:             []string{"codex"},
+					DryRun:             test.dryRun,
+					WriteMCPConfig:     true,
+					AIFamilies:         testAIFamilies(),
+					RunnerModes:        testRunnerModes(t),
 				},
 			)
 			if err != nil {
@@ -3308,12 +3370,13 @@ func TestApplyMergesWorkspaceCodexMCPConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -3349,12 +3412,13 @@ func TestApplyRejectsUnmanagedCodexServerWithoutChangingFiles(t *testing.T) {
 	}
 
 	_, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err == nil || !strings.Contains(err.Error(), "unmanaged "+codexTable) {
 		t.Fatalf("Apply error = %v, want an unmanaged Codex server error", err)
@@ -3400,8 +3464,9 @@ func TestApplyDisableRejectsUnmanagedCodexServerWithoutPartialChanges(t *testing
 	}
 
 	_, err = Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: false,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: false,
 		AIFamilies:  testAIFamilies(),
 		RunnerModes: testRunnerModes(t),
 	})
@@ -3443,12 +3508,13 @@ func TestApplyRejectsInlineCodexServerWithoutChangingFiles(t *testing.T) {
 	}
 
 	_, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err == nil || !strings.Contains(err.Error(), "unmanaged "+codexTable) {
 		t.Fatalf("Apply error = %v, want an unmanaged Codex server error", err)
@@ -3489,12 +3555,13 @@ func TestApplyUpdatesSafeSymlinkedCodexConfigDirectory(t *testing.T) {
 	}
 
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3535,12 +3602,13 @@ func TestApplyUpdatesSafeSymlinkedCodexConfigFile(t *testing.T) {
 	}
 
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -3593,8 +3661,9 @@ func TestApplyDisablePreservesSafeSymlinkedCodexConfigFile(t *testing.T) {
 	}
 	modes := testRunnerModes(t)
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	}
 	dryRunOptions := options
@@ -3619,8 +3688,9 @@ func TestApplyDisablePreservesSafeSymlinkedCodexConfigFile(t *testing.T) {
 		t.Fatalf("Codex symlink target kept managed content:\n%s", after)
 	}
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true, RunnerModes: modes,
 		AIFamilies: testAIFamilies(),
 	}); err != nil {
 		t.Fatal(err)
@@ -3658,12 +3728,13 @@ func TestApplyClaudePermissionNoPreservesSafeSymlinkedClaudeSettingsFile(t *test
 	}
 	modes := testRunnerModes(t)
 	options := Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude"},
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       modes,
-		ClaudePermissions: ClaudePermissionsNo,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        modes,
+		ClaudePermissions:  ClaudePermissionsNo,
 	}
 	dryRunOptions := options
 	dryRunOptions.DryRun = true
@@ -3687,12 +3758,13 @@ func TestApplyClaudePermissionNoPreservesSafeSymlinkedClaudeSettingsFile(t *test
 		t.Fatalf("Claude symlink target kept managed content:\n%s", after)
 	}
 	if _, err := Apply(Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude"},
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       modes,
-		ClaudePermissions: ClaudePermissionsYes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        modes,
+		ClaudePermissions:  ClaudePermissionsYes,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -3715,12 +3787,13 @@ func TestApplyRejectsEscapingCodexConfigSymlinkWithoutChanges(t *testing.T) {
 	}
 
 	_, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		WriteMCPConfig:  true,
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace scope") {
 		t.Fatalf("Apply error = %v, want an escaping Codex directory error", err)
@@ -3752,7 +3825,8 @@ func TestApplyRejectsEscapingAgentGuideSymlinkBeforeWriting(t *testing.T) {
 	}
 
 	_, err := Apply(Options{
-		Dir: dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		Dir:                dir, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	})
 	if err == nil || !strings.Contains(err.Error(), "resolves outside workspace scope") {
@@ -3795,11 +3869,12 @@ func TestApplyRejectsManagedSurfacePathCollisionBeforeWriting(t *testing.T) {
 			}
 
 			_, err = Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir,
-				Agents:          []string{"codex"},
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"codex"},
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			})
 			wantError := fmt.Sprintf(
 				"managed surfaces %q and %q resolve to the same path %s",
@@ -3855,11 +3930,12 @@ func TestApplyRejectsReverseManagedSurfacePathCollisionBeforeWriting(t *testing.
 			}
 
 			_, err = Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir,
-				Agents:          []string{"codex"},
-				AIFamilies:      testAIFamilies(),
-				RunnerModes:     testRunnerModes(t),
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"codex"},
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
 			})
 			wantError := fmt.Sprintf(
 				"managed surfaces %q and %q resolve to the same path %s",
@@ -3906,11 +3982,12 @@ func TestApplyRejectsCollisionWithUnchangedManagedSurface(t *testing.T) {
 	}
 
 	_, err = Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	wantError := fmt.Sprintf(
 		"managed surfaces %q and %q resolve to the same path %s",
@@ -3957,11 +4034,12 @@ func TestApplyRejectsPolicyCollisionThroughSymlinkedWorkspace(t *testing.T) {
 	}
 
 	_, err = Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             linkedScope,
-		Agents:          []string{"codex"},
-		AIFamilies:      testAIFamilies(),
-		RunnerModes:     modes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                linkedScope,
+		Agents:             []string{"codex"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        modes,
 	})
 	wantError := fmt.Sprintf(
 		"managed surfaces %q and %q resolve to the same path %s",
@@ -4026,8 +4104,9 @@ func TestApplyRejectsInvalidCodexConfigSymlinks(t *testing.T) {
 
 			_, err := Apply(
 				Options{
-					ShellPermission: ShellPermissionAsk,
-					Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true,
+					InstructionsTarget: InstructionsTargetWorkspace,
+					ShellPermission:    ShellPermissionAsk,
+					Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true,
 					AIFamilies:  testAIFamilies(),
 					RunnerModes: testRunnerModes(t),
 				},
@@ -4050,12 +4129,13 @@ func TestApplyRejectsNonRegularNearestMCPConfig(t *testing.T) {
 	}
 	_, err := Apply(
 		Options{
-			ShellPermission: ShellPermissionAsk,
-			Dir:             dir,
-			Agents:          []string{"codex"},
-			WriteMCPConfig:  true,
-			AIFamilies:      testAIFamilies(),
-			RunnerModes:     testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"codex"},
+			WriteMCPConfig:     true,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 		},
 	)
 	if err == nil || !strings.Contains(err.Error(), "not a regular file") {
@@ -4075,8 +4155,9 @@ func TestApplyKeepsAgentInstructionsWithinResolvedScope(t *testing.T) {
 	}
 
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	})
 	if err != nil {
@@ -4120,8 +4201,9 @@ func TestApplyDoesNotSearchAboveResolvedWorkspaceScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	}); err != nil {
 		t.Fatal(err)
@@ -4163,8 +4245,9 @@ func TestApplyUpdatesSafeSymlinkedAgentInstruction(t *testing.T) {
 	}
 
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                project, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	})
 	if err != nil {
@@ -4237,8 +4320,9 @@ func TestApplyDisableKeepsSafeCodexConfigDirectorySymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	result, err := Apply(Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             workspace, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                workspace, Agents: []string{"codex"}, RunnerModes: testRunnerModes(t),
 		AIFamilies: testAIFamilies(),
 	})
 	if err != nil {
@@ -4443,12 +4527,13 @@ func TestApplyWritesClaudePermissionsWhenAccepted(t *testing.T) {
 	dir := t.TempDir()
 	path := claudeSettingsPath(t, dir)
 	options := Options{
-		ShellPermission:   ShellPermissionAsk,
-		Dir:               dir,
-		Agents:            []string{"claude"},
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       testRunnerModes(t),
-		ClaudePermissions: ClaudePermissionsYes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             []string{"claude"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
+		ClaudePermissions:  ClaudePermissionsYes,
 	}
 	result, err := Apply(options)
 	if err != nil {
@@ -4499,12 +4584,13 @@ func TestApplyPlacesShellToolsInSelectedClaudeList(t *testing.T) {
 				t.Fatal(err)
 			}
 			if _, err := Apply(Options{
-				ShellPermission:   testCase.shell,
-				Dir:               dir,
-				Agents:            []string{"claude"},
-				AIFamilies:        testAIFamilies(),
-				RunnerModes:       testRunnerModes(t),
-				ClaudePermissions: ClaudePermissionsYes,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    testCase.shell,
+				Dir:                dir,
+				Agents:             []string{"claude"},
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
+				ClaudePermissions:  ClaudePermissionsYes,
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -4538,12 +4624,13 @@ func TestApplyOmitsEmptyOwnedListAndMovesShellToolsOnRerun(t *testing.T) {
 	dir := t.TempDir()
 	path := claudeSettingsPath(t, dir)
 	options := Options{
-		ShellPermission:   ShellPermissionAllow,
-		Dir:               dir,
-		Agents:            []string{"claude"},
-		AIFamilies:        testAIFamilies(),
-		RunnerModes:       testRunnerModes(t),
-		ClaudePermissions: ClaudePermissionsYes,
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAllow,
+		Dir:                dir,
+		Agents:             []string{"claude"},
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
+		ClaudePermissions:  ClaudePermissionsYes,
 	}
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
@@ -4605,12 +4692,13 @@ func TestApplyReplacesEveryManagedClaudeEntry(t *testing.T) {
 	}
 	result, err := Apply(
 		Options{
-			ShellPermission:   ShellPermissionAsk,
-			Dir:               dir,
-			Agents:            []string{"claude"},
-			AIFamilies:        testAIFamilies(),
-			RunnerModes:       testRunnerModes(t),
-			ClaudePermissions: ClaudePermissionsYes,
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"claude"},
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
+			ClaudePermissions:  ClaudePermissionsYes,
 		},
 	)
 	if err != nil {
@@ -4659,32 +4747,36 @@ func TestApplySkipsClaudePermissionsWithoutApproval(t *testing.T) {
 		name    string
 	}{
 		{name: "declined", options: Options{
-			ShellPermission:   ShellPermissionAsk,
-			ClaudePermissions: ClaudePermissionsAsk,
-			AIFamilies:        testAIFamilies(),
-			RunnerModes:       testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			ClaudePermissions:  ClaudePermissionsAsk,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 			Confirm: func(ShellPermission, string, string) (bool, error) {
 				return false, nil
 			},
 		}},
 		{name: "no confirmation available", options: Options{
-			ShellPermission:   ShellPermissionAsk,
-			ClaudePermissions: ClaudePermissionsAsk,
-			AIFamilies:        testAIFamilies(),
-			RunnerModes:       testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			ClaudePermissions:  ClaudePermissionsAsk,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 		}},
 		{name: "opted out", options: Options{
-			ShellPermission:   ShellPermissionAsk,
-			ClaudePermissions: ClaudePermissionsNo,
-			AIFamilies:        testAIFamilies(),
-			RunnerModes:       testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			ClaudePermissions:  ClaudePermissionsNo,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 		}},
 		{name: "claude not selected", options: Options{
-			ShellPermission:   ShellPermissionAsk,
-			Agents:            []string{"codex"},
-			AIFamilies:        testAIFamilies(),
-			RunnerModes:       testRunnerModes(t),
-			ClaudePermissions: ClaudePermissionsYes,
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Agents:             []string{"codex"},
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
+			ClaudePermissions:  ClaudePermissionsYes,
 		}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -4714,12 +4806,13 @@ func TestApplyReportsClaudePermissionsDiffWithoutAskingOnDryRun(t *testing.T) {
 	confirmed := false
 	result, err := Apply(
 		Options{
-			ShellPermission: ShellPermissionAsk,
-			Dir:             dir,
-			Agents:          []string{"claude"},
-			DryRun:          true,
-			AIFamilies:      testAIFamilies(),
-			RunnerModes:     testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"claude"},
+			DryRun:             true,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 			Confirm: func(ShellPermission, string, string) (bool, error) {
 				confirmed = true
 				return true, nil
@@ -4783,12 +4876,13 @@ func TestApplyRejectsInvalidClaudePermissionLists(t *testing.T) {
 			}
 			_, err := Apply(
 				Options{
-					ShellPermission:   ShellPermissionAsk,
-					Dir:               dir,
-					Agents:            []string{"claude"},
-					AIFamilies:        testAIFamilies(),
-					RunnerModes:       testRunnerModes(t),
-					ClaudePermissions: ClaudePermissionsYes,
+					InstructionsTarget: InstructionsTargetWorkspace,
+					ShellPermission:    ShellPermissionAsk,
+					Dir:                dir,
+					Agents:             []string{"claude"},
+					AIFamilies:         testAIFamilies(),
+					RunnerModes:        testRunnerModes(t),
+					ClaudePermissions:  ClaudePermissionsYes,
 				},
 			)
 			if err == nil || !strings.Contains(err.Error(), testCase.wantError) {
@@ -4820,8 +4914,9 @@ func TestApplyWritesClaudePermissionsOverNullLists(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := Options{
-		ShellPermission: ShellPermissionAsk,
-		Dir:             dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir, Agents: []string{"claude"}, RunnerModes: testRunnerModes(t),
 		AIFamilies:        testAIFamilies(),
 		ClaudePermissions: ClaudePermissionsYes,
 	}
@@ -4873,8 +4968,9 @@ func TestApplyRejectsUnusableMCPConfig(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err := Apply(Options{
-				ShellPermission: ShellPermissionAsk,
-				Dir:             dir, Agents: []string{"codex"}, WriteMCPConfig: true,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir, Agents: []string{"codex"}, WriteMCPConfig: true,
 				AIFamilies:  testAIFamilies(),
 				RunnerModes: testRunnerModes(t),
 			})
@@ -4897,11 +4993,12 @@ func TestApplyReportsClaudePermissionConfirmationFailure(t *testing.T) {
 	dir := t.TempDir()
 	_, err := Apply(
 		Options{
-			ShellPermission: ShellPermissionAsk,
-			Dir:             dir,
-			Agents:          []string{"claude"},
-			AIFamilies:      testAIFamilies(),
-			RunnerModes:     testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    ShellPermissionAsk,
+			Dir:                dir,
+			Agents:             []string{"claude"},
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 			Confirm: func(ShellPermission, string, string) (bool, error) {
 				return false, os.ErrClosed
 			},
@@ -4992,9 +5089,10 @@ func TestClaudeManagedToolsPlacesShellRulesWithoutChangingTheUnion(t *testing.T)
 func TestApplyRejectsInvalidShellPermission(t *testing.T) {
 	for _, shellPermission := range []ShellPermission{"sometimes"} {
 		_, err := Apply(Options{
-			ShellPermission: shellPermission,
-			AIFamilies:      testAIFamilies(),
-			RunnerModes:     testRunnerModes(t),
+			InstructionsTarget: InstructionsTargetWorkspace,
+			ShellPermission:    shellPermission,
+			AIFamilies:         testAIFamilies(),
+			RunnerModes:        testRunnerModes(t),
 		})
 		if err == nil || !strings.Contains(err.Error(), "Options.ShellPermission") {
 			t.Fatalf(
@@ -5021,11 +5119,12 @@ func TestApplyAllowsUnsetShellPermissionWithoutClaudeSettingsSurface(t *testing.
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			_, err := Apply(Options{
-				Dir:               t.TempDir(),
-				Agents:            testCase.agents,
-				AIFamilies:        testAIFamilies(),
-				RunnerModes:       testRunnerModes(t),
-				ClaudePermissions: testCase.permissions,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				Dir:                t.TempDir(),
+				Agents:             testCase.agents,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
+				ClaudePermissions:  testCase.permissions,
 			})
 			if err != nil {
 				t.Fatalf("Apply() error = %v, want nil", err)
@@ -5037,11 +5136,12 @@ func TestApplyAllowsUnsetShellPermissionWithoutClaudeSettingsSurface(t *testing.
 func TestApplyRequiresShellPermissionCallbackWhenChoiceIsUnset(t *testing.T) {
 	dir := t.TempDir()
 	_, err := Apply(Options{
-		Dir:            dir,
-		Agents:         []string{"codex"},
-		WriteMCPConfig: true,
-		AIFamilies:     testAIFamilies(),
-		RunnerModes:    testRunnerModes(t),
+		InstructionsTarget: InstructionsTargetWorkspace,
+		Dir:                dir,
+		Agents:             []string{"codex"},
+		WriteMCPConfig:     true,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
 	})
 	if err == nil || !strings.Contains(err.Error(), "Options.AskShellPermission") {
 		t.Fatalf("Apply() error = %v, want missing Options.AskShellPermission", err)
@@ -5091,11 +5191,12 @@ func TestApplyResolvesShellPermissionAfterNormalizingAgents(t *testing.T) {
 			}
 			asked := 0
 			_, err := Apply(Options{
-				Dir:               dir,
-				Agents:            testCase.agents,
-				AIFamilies:        testAIFamilies(),
-				RunnerModes:       testRunnerModes(t),
-				ClaudePermissions: ClaudePermissionsYes,
+				InstructionsTarget: InstructionsTargetWorkspace,
+				Dir:                dir,
+				Agents:             testCase.agents,
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        testRunnerModes(t),
+				ClaudePermissions:  ClaudePermissionsYes,
 				AskShellPermission: func(
 					offer ShellPermission,
 					current bool,
@@ -5283,6 +5384,639 @@ func TestClaudeManagedToolsUseTheServerPrefix(t *testing.T) {
 	if isManagedClaudeTool("mcp__just-mcp-work-other__run_task") {
 		t.Fatal("another server's entry is treated as managed")
 	}
+}
+
+func TestApplyProjectInstructionsStayInNestedProject(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, mcpConfig), []byte("{}\n"))
+	rootInstructions := filepath.Join(root, "CLAUDE.md")
+	rootContent := []byte("shared workspace instructions\n")
+	writeTestFile(t, rootInstructions, rootContent)
+
+	result, err := Apply(instructionTargetTestOptions(
+		t,
+		project,
+		InstructionsTargetProject,
+		[]string{"claude"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	projectInstructions := filepath.Join(project, "CLAUDE.md")
+	if !containsPath(result.Paths, projectInstructions) {
+		t.Fatalf("updated paths = %#v, want %s", result.Paths, projectInstructions)
+	}
+	if got := readTestFile(t, rootInstructions); !bytes.Equal(got, rootContent) {
+		t.Fatalf("scope-root instructions changed:\n%s", got)
+	}
+	if got := readTestFile(t, projectInstructions); !bytes.Contains(got, []byte(beginMarker)) {
+		t.Fatalf("project instructions have no managed block:\n%s", got)
+	}
+}
+
+func TestApplyWorkspaceInstructionsKeepCanonicalBytes(t *testing.T) {
+	root := t.TempDir()
+	result, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetWorkspace,
+		[]string{"claude"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "CLAUDE.md")
+	if !containsPath(result.Paths, path) {
+		t.Fatalf("updated paths = %#v, want %s", result.Paths, path)
+	}
+	want, err := managedContent(nil, agentTargets()[0].target.header, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readTestFile(t, path); !bytes.Equal(got, want) {
+		t.Fatalf("workspace instructions:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+func TestApplyMachineInstructionsStayOutsideManifestSurfaces(t *testing.T) {
+	root := t.TempDir()
+	home := setTestHome(t)
+	result, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	machinePath := resolvedTestPath(t, filepath.Join(home, ".claude", "CLAUDE.md"))
+	if !containsPath(result.Paths, machinePath) {
+		t.Fatalf("updated paths = %#v, want %s", result.Paths, machinePath)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "CLAUDE.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("machine target touched workspace instructions: %v", statErr)
+	}
+	manifest, _ := readManagedManifest(t, root)
+	if manifest.AgentInstructions == nil ||
+		manifest.AgentInstructions.Target != string(InstructionsTargetMachine) ||
+		!slices.Equal(manifest.AgentInstructions.Agents, []string{"claude"}) {
+		t.Fatalf("recorded instructions = %#v", manifest.AgentInstructions)
+	}
+	for _, surface := range manifest.Surfaces {
+		if surface.Kind == manifestKindAgentInstructions {
+			t.Fatalf("machine instruction was recorded as a manifest surface: %#v", surface)
+		}
+	}
+	if got := readTestFile(t, machinePath); bytes.HasPrefix(got, []byte("# Workspace instructions")) ||
+		!bytes.HasPrefix(got, []byte(beginMarker)) {
+		t.Fatalf("new machine instructions contain unexpected framing:\n%s", got)
+	}
+	if err := os.Remove(machinePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces read the unrecorded machine file: %v", err)
+	}
+}
+
+func TestApplyInstructionsTargetIsIdempotent(t *testing.T) {
+	root := t.TempDir()
+	options := instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetWorkspace,
+		[]string{"claude"},
+	)
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Paths) != 0 || len(result.Diffs) != 0 {
+		t.Fatalf("repeated init changed paths %#v", result.Paths)
+	}
+}
+
+func TestApplyChangedInstructionsTargetRemovesPreviousBlock(t *testing.T) {
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, mcpConfig), []byte("{}\n"))
+	rootInstructions := filepath.Join(root, "CLAUDE.md")
+	writeTestFile(t, rootInstructions, []byte("operator text\r\n"))
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetWorkspace,
+		[]string{"claude"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Apply(instructionTargetTestOptions(
+		t,
+		project,
+		InstructionsTargetProject,
+		[]string{"claude"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsPath(result.Paths, rootInstructions) ||
+		!containsPath(result.Paths, filepath.Join(project, "CLAUDE.md")) {
+		t.Fatalf("changed target paths = %#v", result.Paths)
+	}
+	if got := readTestFile(t, rootInstructions); !bytes.Equal(got, []byte("operator text\r\n")) {
+		t.Fatalf("previous block removal changed CRLF or foreign text: %q", got)
+	}
+	if got := readTestFile(t, filepath.Join(project, "CLAUDE.md")); !bytes.Contains(got, []byte(beginMarker)) {
+		t.Fatalf("new project instructions have no managed block:\n%s", got)
+	}
+}
+
+func TestApplyLeavingMachineReportsStaleBlockWithoutWritingHome(t *testing.T) {
+	root := t.TempDir()
+	home := setTestHome(t)
+	machineOptions := instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	)
+	if _, err := Apply(machineOptions); err != nil {
+		t.Fatal(err)
+	}
+	path := resolvedTestPath(t, filepath.Join(home, ".claude", "CLAUDE.md"))
+	before := readTestFile(t, path)
+	result, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetWorkspace,
+		[]string{"claude"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Notes) != 1 || !strings.Contains(result.Notes[0], path) ||
+		!strings.Contains(result.Notes[0], "stale") ||
+		!strings.Contains(result.Notes[0], "removed by hand") {
+		t.Fatalf("stale notes = %#v", result.Notes)
+	}
+	if got := readTestFile(t, path); !bytes.Equal(got, before) {
+		t.Fatalf("leaving machine target rewrote %s", path)
+	}
+}
+
+func TestApplyMachineRefusesMarkerlessFileBeforeWriting(t *testing.T) {
+	root := t.TempDir()
+	home := setTestHome(t)
+	path := filepath.Join(home, ".claude", "CLAUDE.md")
+	writeTestFile(t, path, []byte("personal instructions\n"))
+	resolvedPath := resolvedTestPath(t, path)
+	_, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	))
+	if err == nil || !strings.Contains(err.Error(), resolvedPath) ||
+		!strings.Contains(err.Error(), "two marker lines") {
+		t.Fatalf("markerless machine file error = %v", err)
+	}
+	if got := readTestFile(t, path); !bytes.Equal(got, []byte("personal instructions\n")) {
+		t.Fatalf("markerless machine file changed: %q", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, manifestFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("machine preflight failure wrote manifest: %v", statErr)
+	}
+}
+
+func TestApplyMachineRefusesSymlink(t *testing.T) {
+	root := t.TempDir()
+	home := setTestHome(t)
+	target := filepath.Join(home, "personal.md")
+	writeTestFile(t, target, []byte(beginMarker+"\n"+endMarker+"\n"))
+	path := filepath.Join(home, ".claude", "CLAUDE.md")
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("create symlink: %v", err)
+	}
+	resolvedPath := resolvedTestPath(t, path)
+	_, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	))
+	if err == nil || !strings.Contains(err.Error(), resolvedPath) ||
+		!strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("machine symlink error = %v", err)
+	}
+}
+
+func TestApplyMachineRefusesAgentsWithoutMachinePath(t *testing.T) {
+	for _, agent := range []string{"cursor", "copilot"} {
+		t.Run(agent, func(t *testing.T) {
+			root := t.TempDir()
+			setTestHome(t)
+			_, err := Apply(instructionTargetTestOptions(
+				t,
+				root,
+				InstructionsTargetMachine,
+				[]string{agent},
+			))
+			if err == nil || !strings.Contains(err.Error(), agent) ||
+				!strings.Contains(err.Error(), "claude, codex, and windsurf") {
+				t.Fatalf("machine %s error = %v", agent, err)
+			}
+		})
+	}
+}
+
+func TestInstructionsDirectoryResolvesCanonicalMachineHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	actualHome := t.TempDir()
+	linkRoot := t.TempDir()
+	homeLink := filepath.Join(linkRoot, "home")
+	if err := os.Symlink(actualHome, homeLink); err != nil {
+		t.Skipf("create home symlink: %v", err)
+	}
+	t.Setenv("HOME", homeLink)
+	t.Setenv("USERPROFILE", homeLink)
+
+	got, err := InstructionsDirectory(
+		t.TempDir(),
+		t.TempDir(),
+		InstructionsTargetMachine,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalHome, err := filepath.EvalSymlinks(actualHome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != canonicalHome {
+		t.Fatalf("machine instruction directory = %s, want canonical home %s", got, canonicalHome)
+	}
+}
+
+func TestApplyMachineRefusesParentSymlinkOutsideHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	root := t.TempDir()
+	home := setTestHome(t)
+	outside := t.TempDir()
+	parent := filepath.Join(home, ".claude")
+	if err := os.Symlink(outside, parent); err != nil {
+		t.Skipf("create parent symlink: %v", err)
+	}
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalOutside, err := filepath.EvalSymlinks(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lexicalPath := filepath.Join(canonicalHome, ".claude", "CLAUDE.md")
+	resolvedPath := filepath.Join(canonicalOutside, "CLAUDE.md")
+
+	_, err = Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	))
+	if err == nil || !strings.Contains(err.Error(), lexicalPath) ||
+		!strings.Contains(err.Error(), resolvedPath) ||
+		!strings.Contains(err.Error(), "outside resolved home") {
+		t.Fatalf("escaping machine parent error = %v", err)
+	}
+	if _, statErr := os.Stat(resolvedPath); !os.IsNotExist(statErr) {
+		t.Fatalf("escaping machine parent wrote outside home: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, manifestFile)); !os.IsNotExist(statErr) {
+		t.Fatalf("machine boundary failure wrote manifest: %v", statErr)
+	}
+}
+
+func TestApplyMachineUsesParentSymlinkInsideHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	root := t.TempDir()
+	home := setTestHome(t)
+	resolvedParent := filepath.Join(home, "dotfiles", "claude")
+	if err := os.MkdirAll(resolvedParent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	lexicalParent := filepath.Join(home, ".claude")
+	if err := os.Symlink(resolvedParent, lexicalParent); err != nil {
+		t.Skipf("create parent symlink: %v", err)
+	}
+
+	result, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath := resolvedTestPath(t, filepath.Join(resolvedParent, "CLAUDE.md"))
+	if !containsPath(result.Paths, resolvedPath) {
+		t.Fatalf("machine paths = %#v, want resolved path %s", result.Paths, resolvedPath)
+	}
+	if got := readTestFile(t, resolvedPath); !bytes.Contains(got, []byte(beginMarker)) {
+		t.Fatalf("resolved machine instructions have no managed block:\n%s", got)
+	}
+	assertFileSymlink(t, lexicalParent)
+}
+
+func TestMachineInstructionPlanPinsResolvedParentAcrossSwap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	home := t.TempDir()
+	resolvedParent := filepath.Join(home, "dotfiles", "claude")
+	if err := os.MkdirAll(resolvedParent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	lexicalParent := filepath.Join(home, ".claude")
+	if err := os.Symlink(resolvedParent, lexicalParent); err != nil {
+		t.Skipf("create parent symlink: %v", err)
+	}
+	var claude namedTarget
+	for _, named := range agentTargets() {
+		if named.name == "claude" {
+			claude = named
+			break
+		}
+	}
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edit, err := planMachineAgentInstruction(canonicalHome, claude, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(lexicalParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, lexicalParent); err != nil {
+		t.Fatal(err)
+	}
+	if err := applyEdits([]plannedEdit{*edit}); err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath := resolvedTestPath(t, filepath.Join(resolvedParent, "CLAUDE.md"))
+	if got := readTestFile(t, resolvedPath); !bytes.Contains(got, []byte(beginMarker)) {
+		t.Fatalf("planned resolved machine instructions have no managed block:\n%s", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(outside, "CLAUDE.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("swapped lexical parent received the planned write: %v", statErr)
+	}
+}
+
+func TestApplyMachineAndPreviousWorkspaceAliasKeepOneBlock(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	home := setTestHome(t)
+	root := filepath.Join(home, "workspace")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(root, filepath.Join(home, ".claude")); err != nil {
+		t.Skipf("create machine parent symlink: %v", err)
+	}
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetWorkspace,
+		[]string{"claude"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(root, "CLAUDE.md")
+	content := readTestFile(t, path)
+	if got := strings.Count(string(content), beginMarker); got != 1 {
+		t.Fatalf("aliased machine transition left %d managed blocks in %s:\n%s", got, path, content)
+	}
+	manifest, _ := readManagedManifest(t, root)
+	if manifest.AgentInstructions == nil ||
+		manifest.AgentInstructions.Target != string(InstructionsTargetMachine) {
+		t.Fatalf("recorded instructions target = %#v", manifest.AgentInstructions)
+	}
+}
+
+func TestApplyMachineDryRunShowsOnlyManagedBlock(t *testing.T) {
+	root := t.TempDir()
+	home := setTestHome(t)
+	path := filepath.Join(home, ".claude", "CLAUDE.md")
+	before := []byte("private before\n\n" + canonicalBlock(false) + "\nprivate after\n")
+	writeTestFile(t, path, before)
+	options := instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	)
+	options.BetaTest = true
+	options.DryRun = true
+
+	result, err := Apply(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPath := resolvedTestPath(t, path)
+	diff := resultDiffForPath(t, result, resolvedPath)
+	for _, private := range []string{"private before", "private after"} {
+		if strings.Contains(diff, private) {
+			t.Fatalf("machine dry-run diff exposed %q:\n%s", private, diff)
+		}
+	}
+	if !strings.Contains(diff, beginMarker) || !strings.Contains(diff, endMarker) {
+		t.Fatalf("machine dry-run diff omitted managed markers:\n%s", diff)
+	}
+	if got := readTestFile(t, path); !bytes.Equal(got, before) {
+		t.Fatalf("machine dry-run changed personal file: %q", got)
+	}
+}
+
+func TestApplyRefusesMovingAliasedInstructionOwnedByUnselectedAgent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires privileges on Windows")
+	}
+	root := t.TempDir()
+	project := filepath.Join(root, "project")
+	if err := os.MkdirAll(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(root, mcpConfig), []byte("{}\n"))
+	sharedPath := filepath.Join(root, "CLAUDE.md")
+	writeTestFile(t, sharedPath, []byte("shared instructions\n"))
+	if err := os.Symlink("CLAUDE.md", filepath.Join(root, "AGENTS.md")); err != nil {
+		t.Skipf("create instruction alias: %v", err)
+	}
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetWorkspace,
+		[]string{"claude", "codex"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	before := readTestFile(t, sharedPath)
+	sharedCollision := resolvedTestPath(t, sharedPath)
+	_, manifestBefore := readManagedManifest(t, root)
+
+	_, err := Apply(instructionTargetTestOptions(
+		t,
+		project,
+		InstructionsTargetProject,
+		[]string{"claude"},
+	))
+	if err == nil {
+		t.Fatal("aliased instruction move error = nil")
+	}
+	for _, want := range []string{
+		"--agents claude",
+		sharedCollision,
+		"--agents claude,codex",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("aliased instruction refusal does not contain %q: %v", want, err)
+		}
+	}
+	if got := readTestFile(t, sharedPath); !bytes.Equal(got, before) {
+		t.Fatalf("refused aliased move changed shared instructions:\n%s", got)
+	}
+	manifestAfter := readTestFile(t, filepath.Join(root, manifestFile))
+	if !bytes.Equal(manifestAfter, manifestBefore) {
+		t.Fatalf("refused aliased move changed manifest:\n%s", manifestAfter)
+	}
+	if _, statErr := os.Stat(filepath.Join(project, "CLAUDE.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("refused aliased move wrote project instructions: %v", statErr)
+	}
+}
+
+func TestApplyLeavingMachineAdvisesOnlyRecordedAgents(t *testing.T) {
+	root := t.TempDir()
+	home := setTestHome(t)
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	claudePath := resolvedTestPath(t, filepath.Join(home, ".claude", "CLAUDE.md"))
+	codexPath := filepath.Join(home, ".codex", "AGENTS.md")
+	codexBefore := []byte(canonicalBlock(false))
+	writeTestFile(t, codexPath, codexBefore)
+	codexPath = resolvedTestPath(t, codexPath)
+
+	result, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetWorkspace,
+		[]string{"claude", "codex"},
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Notes) != 1 || !strings.Contains(result.Notes[0], claudePath) {
+		t.Fatalf("stale machine notes = %#v, want only %s", result.Notes, claudePath)
+	}
+	if strings.Contains(result.Notes[0], codexPath) {
+		t.Fatalf("stale machine note named unrecorded codex path: %#v", result.Notes)
+	}
+	if got := readTestFile(t, codexPath); !bytes.Equal(got, codexBefore) {
+		t.Fatalf("leaving machine rewrote unrecorded codex file: %q", got)
+	}
+}
+
+func TestApplyRejectsEmptyInstructionsTarget(t *testing.T) {
+	_, err := Apply(Options{})
+	if err == nil || !strings.Contains(err.Error(), "Options.InstructionsTarget") ||
+		!strings.Contains(err.Error(), "unsupported instructions target") {
+		t.Fatalf("empty instructions target error = %v", err)
+	}
+}
+
+func instructionTargetTestOptions(
+	t *testing.T,
+	dir string,
+	target InstructionsTarget,
+	agents []string,
+) Options {
+	t.Helper()
+	return Options{
+		InstructionsTarget: target,
+		ShellPermission:    ShellPermissionAsk,
+		Dir:                dir,
+		Agents:             agents,
+		WriteMCPConfig:     false,
+		AIFamilies:         testAIFamilies(),
+		RunnerModes:        testRunnerModes(t),
+		ClaudePermissions:  ClaudePermissionsNo,
+	}
+}
+
+func setTestHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	return home
+}
+
+func writeTestFile(t *testing.T, path string, content []byte) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readTestFile(t *testing.T, path string) []byte {
+	t.Helper()
+	// #nosec G304 -- tests pass paths below their temporary directories.
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return content
 }
 
 // claudeSettingsPath resolves the settings path the way Apply does, so a
