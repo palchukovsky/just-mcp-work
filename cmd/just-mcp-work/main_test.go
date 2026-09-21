@@ -152,6 +152,20 @@ func assertWorkspaceBetaTest(t *testing.T, dir string, want bool) {
 	}
 }
 
+func assertWorkspaceInstructionsPointer(t *testing.T, dir string, want bool) {
+	t.Helper()
+	got, known, err := agentinit.ReadRecordedInstructionsPointer(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !known || got != want {
+		t.Fatalf("workspace instructions_pointer = (%t, %t), want (%t, true)", got, known, want)
+	}
+	if _, err := agentinit.VerifyManagedSurfaces(dir); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func editManagedInstructions(t *testing.T, dir string) {
 	t.Helper()
 	path := filepath.Join(dir, "AGENTS.md")
@@ -1382,6 +1396,141 @@ func TestInitBetaTestCommandUsesInitFlagsAndOwnName(t *testing.T) {
 	)
 	if err != nil || !strings.Contains(diagnostics.String(), "Usage: just-mcp-work init-beta-test") {
 		t.Fatalf("help error = %v, output = %q", err, diagnostics.String())
+	}
+}
+
+func TestInitInstructionsPointerFlagWritesOnlyThePointer(t *testing.T) {
+	for _, betaTest := range []bool{false, true} {
+		t.Run(fmt.Sprintf("beta=%t", betaTest), func(t *testing.T) {
+			dir := t.TempDir()
+			if err := initCommandWithIO(
+				betaTest,
+				[]string{
+					"--dir", dir,
+					"--agents", "codex",
+					"--instructions-pointer",
+					"--write-mcp-config=false",
+					"--runner-mode", "go=safe",
+				},
+				defaultRunnerInput(),
+				io.Discard,
+				io.Discard,
+			); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			const pointer = "This workspace uses just-mcp-work (JMW) for its runnable tasks; " +
+				"the JMW MCP\nserver itself carries the full usage rules."
+			const betaPointer = "This workspace beta-tests just-mcp-work (JMW) itself."
+			if strings.Count(string(data), pointer) != 1 ||
+				strings.Contains(string(data), "Core rule:") ||
+				strings.Contains(string(data), "Report any JMW bug") ||
+				strings.Contains(string(data), betaPointer) != betaTest {
+				t.Fatalf("--instructions-pointer wrote unexpected guidance:\n%s", data)
+			}
+		})
+	}
+}
+
+func TestInitInstructionsPointerFlagAppearsInBothHelpForms(t *testing.T) {
+	for _, betaTest := range []bool{false, true} {
+		t.Run(fmt.Sprintf("beta=%t", betaTest), func(t *testing.T) {
+			var diagnostics bytes.Buffer
+			if err := initCommandWithIO(
+				betaTest,
+				[]string{"--help"},
+				strings.NewReader(""),
+				io.Discard,
+				&diagnostics,
+			); err != nil {
+				t.Fatal(err)
+			}
+			output := diagnostics.String()
+			if !strings.Contains(output, "[--instructions-pointer]") ||
+				!strings.Contains(output, "-instructions-pointer") ||
+				!strings.Contains(output, "as a pointer to the server's instructions") {
+				t.Fatalf("init help omits --instructions-pointer:\n%s", output)
+			}
+		})
+	}
+}
+
+func TestInitInstructionsPointerUsesExplicitOrRecordedChoice(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		explicit    string
+		hasRecorded bool
+		recorded    bool
+		nested      bool
+		want        bool
+	}{
+		{name: "fresh omitted"},
+		{
+			name:        "recorded pointer omitted from nested directory",
+			hasRecorded: true,
+			recorded:    true,
+			nested:      true,
+			want:        true,
+		},
+		{name: "recorded full omitted", hasRecorded: true},
+		{
+			name:        "explicit full overrides recorded pointer",
+			hasRecorded: true,
+			recorded:    true,
+			explicit:    "--instructions-pointer=false",
+		},
+		{
+			name:        "explicit pointer overrides recorded full",
+			hasRecorded: true,
+			explicit:    "--instructions-pointer=true",
+			want:        true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if testCase.hasRecorded {
+				initialArgs := append(
+					initArgsWithoutQuestions(dir),
+					"--write-mcp-config=true",
+					"--shell-permission=ask",
+					fmt.Sprintf("--instructions-pointer=%t", testCase.recorded),
+				)
+				if err := initCommandWithIO(
+					false,
+					initialArgs,
+					strings.NewReader(""),
+					io.Discard,
+					io.Discard,
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			targetDir := dir
+			if testCase.nested {
+				targetDir = filepath.Join(dir, "nested", "directory")
+				if err := os.MkdirAll(targetDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := initArgsWithoutQuestions(targetDir)
+			if testCase.explicit != "" {
+				args = append(args, testCase.explicit)
+			}
+			if err := initCommandWithIO(
+				false,
+				args,
+				strings.NewReader(""),
+				io.Discard,
+				io.Discard,
+			); err != nil {
+				t.Fatal(err)
+			}
+			assertWorkspaceInstructionsPointer(t, dir, testCase.want)
+		})
 	}
 }
 

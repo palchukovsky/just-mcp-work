@@ -553,6 +553,12 @@ func initCommandWithIO(
 			"configuration: any of "+strings.Join(familyNames(aiprofile.Declarable()), ", ")+
 			" separated by commas; empty asks on the console",
 	)
+	instructionsPointer := flags.Bool(
+		"instructions-pointer",
+		false,
+		"write the managed instruction block as a pointer to the server's "+
+			"instructions instead of the full contract",
+	)
 	var runnerModes runnerModeFlag
 	flags.Var(
 		&runnerModes,
@@ -569,6 +575,7 @@ func initCommandWithIO(
 				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
 				"[--instructions-target project|workspace|machine] "+
 				"[--ai "+initAIFlagValues()+"] "+
+				"[--instructions-pointer] "+
 				"[--runner-mode <name>=<mode>]...",
 		)
 		flags.PrintDefaults()
@@ -601,9 +608,13 @@ func initCommandWithIO(
 		return fmt.Errorf("create runner catalog: %w", err)
 	}
 	console := initConsole{input: bufio.NewReader(input), output: diagnosticOutput}
-	scope, err := agentinit.ResolveScope(*dir)
+	scope, pointerInstructions, err := resolveInitInstructionsPointer(
+		flags,
+		*dir,
+		*instructionsPointer,
+	)
 	if err != nil {
-		return fmt.Errorf("resolve init scope: %w", err)
+		return err
 	}
 	if !betaTest && !*dryRun {
 		if confirmErr := console.confirmLeaveBetaTest(scope); confirmErr != nil {
@@ -666,16 +677,17 @@ func initCommandWithIO(
 	}
 	result, err := agentinit.Apply(
 		agentinit.Options{
-			Dir:                *dir,
-			Agents:             selectedAgents,
-			BetaTest:           betaTest,
-			DryRun:             *dryRun,
-			WriteMCPConfig:     *writeMCPConfig,
-			InstructionsTarget: instructionsTarget,
-			AIFamilies:         families,
-			RunnerModes:        canonicalModes,
-			ClaudePermissions:  permissions,
-			ShellPermission:    parsedShellPermission,
+			Dir:                 *dir,
+			Agents:              selectedAgents,
+			BetaTest:            betaTest,
+			PointerInstructions: pointerInstructions,
+			DryRun:              *dryRun,
+			WriteMCPConfig:      *writeMCPConfig,
+			InstructionsTarget:  instructionsTarget,
+			AIFamilies:          families,
+			RunnerModes:         canonicalModes,
+			ClaudePermissions:   permissions,
+			ShellPermission:     parsedShellPermission,
 			AskShellPermission: func(
 				offer agentinit.ShellPermission,
 				current bool,
@@ -694,6 +706,34 @@ func initCommandWithIO(
 		}
 	}
 	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig, families)
+}
+
+func resolveInitInstructionsPointer(
+	flags *flag.FlagSet,
+	dir string,
+	requested bool,
+) (string, bool, error) {
+	explicit := false
+	flags.Visit(func(visited *flag.Flag) {
+		if visited.Name == "instructions-pointer" {
+			explicit = true
+		}
+	})
+	scope, err := agentinit.ResolveScope(dir)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve init scope: %w", err)
+	}
+	if explicit {
+		return scope, requested, nil
+	}
+	recorded, known, err := agentinit.ReadRecordedInstructionsPointer(scope)
+	if err != nil {
+		return "", false, fmt.Errorf("read current instruction-block mode: %w", err)
+	}
+	if known {
+		return scope, recorded, nil
+	}
+	return scope, requested, nil
 }
 
 func writeInitResult(

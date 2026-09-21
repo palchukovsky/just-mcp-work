@@ -556,23 +556,28 @@ func TestApplyCodexConfigRoundTripPreservesTerminatedForeignContent(t *testing.T
 
 func TestApplyBetaTestSelectsTheManagedBlock(t *testing.T) {
 	for _, testCase := range []struct {
-		name      string
-		betaTest  bool
-		wantCount int
+		name                string
+		betaTest            bool
+		pointerInstructions bool
+		wantFullCount       int
+		wantPointerCount    int
 	}{
-		{name: "beta", betaTest: true, wantCount: 1},
-		{name: "plain", wantCount: 0},
+		{name: "full beta", betaTest: true, wantFullCount: 1, wantPointerCount: 1},
+		{name: "full plain"},
+		{name: "pointer beta", betaTest: true, pointerInstructions: true, wantPointerCount: 1},
+		{name: "pointer plain", pointerInstructions: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			if _, err := Apply(Options{
-				InstructionsTarget: InstructionsTargetWorkspace,
-				ShellPermission:    ShellPermissionAsk,
-				Dir:                dir,
-				Agents:             []string{"codex"},
-				BetaTest:           testCase.betaTest,
-				AIFamilies:         testAIFamilies(),
-				RunnerModes:        testRunnerModes(t),
+				InstructionsTarget:  InstructionsTargetWorkspace,
+				ShellPermission:     ShellPermissionAsk,
+				Dir:                 dir,
+				Agents:              []string{"codex"},
+				BetaTest:            testCase.betaTest,
+				PointerInstructions: testCase.pointerInstructions,
+				AIFamilies:          testAIFamilies(),
+				RunnerModes:         testRunnerModes(t),
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -580,31 +585,55 @@ func TestApplyBetaTestSelectsTheManagedBlock(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if count := strings.Count(string(data), betaTestManagedBlockText); count != testCase.wantCount {
-				t.Fatalf("beta paragraph count = %d, want %d", count, testCase.wantCount)
+			if count := strings.Count(
+				string(data),
+				betaTestManagedBlockText,
+			); count != testCase.wantFullCount {
+				t.Fatalf("full beta paragraph count = %d, want %d", count, testCase.wantFullCount)
+			}
+			if count := strings.Count(
+				string(data),
+				betaTestPointerBlockText,
+			); count != testCase.wantPointerCount {
+				t.Fatalf("beta pointer count = %d, want %d", count, testCase.wantPointerCount)
+			}
+			if testCase.pointerInstructions &&
+				!strings.Contains(string(data), canonicalBlock(testCase.betaTest, true)) {
+				t.Fatalf("pointer apply did not write the canonical pointer block:\n%s", data)
 			}
 		})
 	}
 }
 
+func TestPromptWithBetaTestCarriesTheBetaContract(t *testing.T) {
+	betaPrompt := Prompt(aiprofile.Profile{}, true, "")
+	if !strings.Contains(betaPrompt, betaTestManagedBlockText) {
+		t.Fatal("Prompt with betaTest true omitted the beta contract")
+	}
+}
+
 func TestApplyBetaTestAndPlainModesAreIdempotent(t *testing.T) {
 	for _, testCase := range []struct {
-		name     string
-		betaTest bool
+		name                string
+		betaTest            bool
+		pointerInstructions bool
 	}{
-		{name: "beta", betaTest: true},
-		{name: "plain"},
+		{name: "full beta", betaTest: true},
+		{name: "full plain"},
+		{name: "pointer beta", betaTest: true, pointerInstructions: true},
+		{name: "pointer plain", pointerInstructions: true},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			options := Options{
-				InstructionsTarget: InstructionsTargetWorkspace,
-				ShellPermission:    ShellPermissionAsk,
-				Dir:                dir,
-				Agents:             []string{"claude", "codex"},
-				BetaTest:           testCase.betaTest,
-				AIFamilies:         testAIFamilies(),
-				RunnerModes:        testRunnerModes(t),
+				InstructionsTarget:  InstructionsTargetWorkspace,
+				ShellPermission:     ShellPermissionAsk,
+				Dir:                 dir,
+				Agents:              []string{"claude", "codex"},
+				BetaTest:            testCase.betaTest,
+				PointerInstructions: testCase.pointerInstructions,
+				AIFamilies:          testAIFamilies(),
+				RunnerModes:         testRunnerModes(t),
 			}
 			first, err := Apply(options)
 			if err != nil {
@@ -715,10 +744,14 @@ func TestApplyBetaTestPreservesOperatorTextOutsideManagedBlocks(t *testing.T) {
 		}
 		prefix := target.header + "Operator text before the managed block for " + target.agent + ".\n\n"
 		suffix := "\nOperator text after the managed block for " + target.agent + ".\n"
-		if err := os.WriteFile(path, []byte(prefix+canonicalBlock(false)+suffix), 0o600); err != nil {
+		if err := os.WriteFile(
+			path,
+			[]byte(prefix+canonicalBlock(false, false)+suffix),
+			0o600,
+		); err != nil {
 			t.Fatal(err)
 		}
-		want[path] = []byte(prefix + canonicalBlock(true) + suffix)
+		want[path] = []byte(prefix + canonicalBlock(true, false) + suffix)
 	}
 	if _, err := Apply(Options{
 		InstructionsTarget: InstructionsTargetWorkspace,
@@ -885,7 +918,7 @@ func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
 				path := filepath.Join(dir, named.target.path)
 				// #nosec G304 -- path is created in this test's temporary directory.
 				data, readErr := os.ReadFile(path)
-				if readErr != nil || !strings.Contains(string(data), canonicalBlock(false)) {
+				if readErr != nil || !strings.Contains(string(data), canonicalBlock(false, false)) {
 					t.Fatalf("%s instructions = %q, %v", named.name, data, readErr)
 				}
 			}
@@ -1018,7 +1051,7 @@ func TestApplyKeepsAliasedInstructionOfDeselectedAgent(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !strings.Contains(string(after), canonicalBlock(false)) {
+			if !strings.Contains(string(after), canonicalBlock(false, false)) {
 				t.Fatalf("narrow selection destroyed the aliased managed block:\n%s", after)
 			}
 			if strings.Count(string(after), beginMarker) != 1 {
@@ -1922,6 +1955,73 @@ func TestManagedBlockCarriesTheSameContract(t *testing.T) {
 	}
 }
 
+func TestFullManagedBlockRemainsByteIdentical(t *testing.T) {
+	const want = `This workspace uses just-mcp-work (JMW) for its runnable tasks; the JMW MCP
+server itself carries the full usage rules. Core rule: JMW is there to save
+tokens. Run a task through it (list_tasks -> run_task/start_task) whenever a
+receipt or short tail is enough for a build, test, lint, format, or check/verify
+gate, and trust its receipt instead of re-reading the log of a successful run.
+Request a short output slice in the same call with tail_bytes on run_task or
+run_shell_command; when the tail does not explain a failure, search with
+search_run_logs before paging get_run_logs. Run a command directly only when the
+full output you need is too large for a tail. Pass the same rule on to
+sub-agents and other executors. A task may be absent because the operator
+withheld it through a runner mode; never
+recreate or run such a task through run_shell_command, start_shell_command, or
+another shell path. Shell tools remain available for genuinely ad-hoc commands
+outside the discovered or withheld task surfaces.`
+	if managedBlockText != want {
+		t.Fatalf("managedBlockText changed bytes:\ngot:  %q\nwant: %q", managedBlockText, want)
+	}
+	const wantBetaPointer = `This workspace beta-tests just-mcp-work (JMW) itself.`
+	const wantBeta = wantBetaPointer + ` Report any JMW bug, friction,
+missing capability, or improvement that would help you work better. Include the
+relevant tool call, command, or error. Keep the report separate from your findings
+about the project. Tell the user and stop there - do not open issues and do not
+send the report anywhere.`
+	if betaTestManagedBlockText != wantBeta {
+		t.Fatalf(
+			"betaTestManagedBlockText changed bytes:\ngot:  %q\nwant: %q",
+			betaTestManagedBlockText,
+			wantBeta,
+		)
+	}
+	wantBlock := beginMarker + "\n" + want + "\n" + endMarker + "\n"
+	if got := canonicalBlock(false, false); got != wantBlock {
+		t.Fatalf("full canonical block changed bytes:\ngot:  %q\nwant: %q", got, wantBlock)
+	}
+	wantBetaBlock := beginMarker + "\n" + want + "\n\n" + wantBeta + "\n" + endMarker + "\n"
+	if got := canonicalBlock(true, false); got != wantBetaBlock {
+		t.Fatalf("full beta canonical block changed bytes:\ngot:  %q\nwant: %q", got, wantBetaBlock)
+	}
+}
+
+func TestPointerManagedBlockIsTheFullBlockPrefix(t *testing.T) {
+	const want = `This workspace uses just-mcp-work (JMW) for its runnable tasks; the JMW MCP
+server itself carries the full usage rules.`
+	if pointerBlockText != want {
+		t.Fatalf("pointerBlockText = %q, want %q", pointerBlockText, want)
+	}
+	if !strings.HasPrefix(managedBlockText, pointerBlockText+" ") {
+		t.Fatalf("managedBlockText does not extend pointerBlockText: %q", managedBlockText)
+	}
+	const wantBeta = `This workspace beta-tests just-mcp-work (JMW) itself.`
+	if betaTestPointerBlockText != wantBeta {
+		t.Fatalf("betaTestPointerBlockText = %q, want %q", betaTestPointerBlockText, wantBeta)
+	}
+	if !strings.HasPrefix(betaTestManagedBlockText, betaTestPointerBlockText+" ") {
+		t.Fatalf(
+			"betaTestManagedBlockText does not extend betaTestPointerBlockText: %q",
+			betaTestManagedBlockText,
+		)
+	}
+	wantBlock := beginMarker + "\n" + pointerBlockText + "\n\n" +
+		betaTestPointerBlockText + "\n" + endMarker + "\n"
+	if got := canonicalBlock(true, true); got != wantBlock {
+		t.Fatalf("pointer canonical block = %q, want %q", got, wantBlock)
+	}
+}
+
 func TestBetaTestManagedBlockCarriesTheFeedbackContract(t *testing.T) {
 	flat := strings.Join(strings.Fields(betaTestManagedBlockText), " ")
 	for _, expected := range []string{
@@ -2231,7 +2331,7 @@ func TestApplyReplacesModifiedManagedBlock(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(data), "user edit") ||
-		strings.Count(string(data), canonicalBlock(false)) != 1 {
+		strings.Count(string(data), canonicalBlock(false, false)) != 1 {
 		t.Fatalf("managed block was not replaced:\n%s", data)
 	}
 }
@@ -2261,7 +2361,7 @@ func TestApplyUpdatesEarlierManagedPrompt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(data) != canonicalBlock(false) {
+	if string(data) != canonicalBlock(false, false) {
 		t.Fatalf("managed prompt was not upgraded:\n%s", data)
 	}
 }
@@ -2586,6 +2686,41 @@ func TestApplyKeepsCRLFLineEndings(t *testing.T) {
 	}
 }
 
+func TestApplyPointerPreservesForeignTextAndCRLFLineEndings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "AGENTS.md")
+	prefix := "# Operator notes\r\n\r\nbefore\r\n\r\n"
+	suffix := "\r\nafter\r\n"
+	beforeBlock := strings.ReplaceAll(canonicalBlock(false, false), "\n", "\r\n")
+	if err := os.WriteFile(path, []byte(prefix+beforeBlock+suffix), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Apply(Options{
+		InstructionsTarget:  InstructionsTargetWorkspace,
+		ShellPermission:     ShellPermissionAsk,
+		Dir:                 dir,
+		Agents:              []string{"codex"},
+		BetaTest:            true,
+		PointerInstructions: true,
+		AIFamilies:          testAIFamilies(),
+		RunnerModes:         testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointerBlock := strings.ReplaceAll(canonicalBlock(true, true), "\n", "\r\n")
+	want := prefix + pointerBlock + suffix
+	if string(data) != want {
+		t.Fatalf("pointer apply changed foreign text or line endings:\ngot:  %q\nwant: %q", data, want)
+	}
+	if strings.Count(string(data), "\n") != strings.Count(string(data), "\r\n") {
+		t.Fatalf("pointer instruction file mixes line endings: %q", data)
+	}
+}
+
 // TestApplyRepairsLegacyLFBlocksInCRLFDocuments checks the upgrade path from
 // init versions that always wrote their managed blocks with LF. The JSON
 // config merged in the same run keeps the ending of its existing content.
@@ -2604,7 +2739,7 @@ func TestApplyRepairsLegacyLFBlocksInCRLFDocuments(t *testing.T) {
 		"\n",
 	)
 	files := map[string]string{
-		agentsPath: "# Notes\r\n\n" + canonicalBlock(false),
+		agentsPath: "# Notes\r\n\n" + canonicalBlock(false, false),
 		codexPath:  "# notes\r\n\n" + legacyCodexBlock + "\n",
 		mcpPath:    "{\r\n  \"mcpServers\": {}\r\n}\r\n",
 	}
@@ -3969,7 +4104,7 @@ func TestApplyRejectsCollisionWithUnchangedManagedSurface(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentPath := filepath.Join(dir, "AGENTS.md")
-	before := []byte(canonicalBlock(false))
+	before := []byte(canonicalBlock(false, false))
 	if writeErr := os.WriteFile(agentPath, before, 0o600); writeErr != nil {
 		t.Fatal(writeErr)
 	}
@@ -4180,7 +4315,7 @@ func TestApplyKeepsAgentInstructionsWithinResolvedScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), canonicalBlock(false)) {
+	if !strings.Contains(string(data), canonicalBlock(false, false)) {
 		t.Fatalf("agent instructions do not contain the managed block:\n%s", data)
 	}
 }
@@ -4214,7 +4349,7 @@ func TestApplyDoesNotSearchAboveResolvedWorkspaceScope(t *testing.T) {
 		t.Fatalf("ancestor target changed: %q, %v", ancestorAfter, err)
 	}
 	workspaceData, err := os.ReadFile(filepath.Join(workspace, "AGENTS.md"))
-	if err != nil || !strings.Contains(string(workspaceData), canonicalBlock(false)) {
+	if err != nil || !strings.Contains(string(workspaceData), canonicalBlock(false, false)) {
 		t.Fatalf("workspace target = %q, %v", workspaceData, err)
 	}
 }
@@ -4261,7 +4396,7 @@ func TestApplyUpdatesSafeSymlinkedAgentInstruction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), canonicalBlock(false)) {
+	if !strings.Contains(string(data), canonicalBlock(false, false)) {
 		t.Fatalf("symlink target does not contain the managed block:\n%s", data)
 	}
 }
@@ -5433,7 +5568,7 @@ func TestApplyWorkspaceInstructionsKeepCanonicalBytes(t *testing.T) {
 	if !containsPath(result.Paths, path) {
 		t.Fatalf("updated paths = %#v, want %s", result.Paths, path)
 	}
-	want, err := managedContent(nil, agentTargets()[0].target.header, false)
+	want, err := managedContent(nil, agentTargets()[0].target.header, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5773,7 +5908,7 @@ func TestMachineInstructionPlanPinsResolvedParentAcrossSwap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	edit, err := planMachineAgentInstruction(canonicalHome, claude, false)
+	edit, err := planMachineAgentInstruction(canonicalHome, claude, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5840,7 +5975,7 @@ func TestApplyMachineDryRunShowsOnlyManagedBlock(t *testing.T) {
 	root := t.TempDir()
 	home := setTestHome(t)
 	path := filepath.Join(home, ".claude", "CLAUDE.md")
-	before := []byte("private before\n\n" + canonicalBlock(false) + "\nprivate after\n")
+	before := []byte("private before\n\n" + canonicalBlock(false, false) + "\nprivate after\n")
 	writeTestFile(t, path, before)
 	options := instructionTargetTestOptions(
 		t,
@@ -5940,7 +6075,7 @@ func TestApplyLeavingMachineAdvisesOnlyRecordedAgents(t *testing.T) {
 	}
 	claudePath := resolvedTestPath(t, filepath.Join(home, ".claude", "CLAUDE.md"))
 	codexPath := filepath.Join(home, ".codex", "AGENTS.md")
-	codexBefore := []byte(canonicalBlock(false))
+	codexBefore := []byte(canonicalBlock(false, false))
 	writeTestFile(t, codexPath, codexBefore)
 	codexPath = resolvedTestPath(t, codexPath)
 
@@ -6064,4 +6199,37 @@ func stringList(t *testing.T, value any) []string {
 		result = append(result, text)
 	}
 	return result
+}
+
+// TestPlanMachineAgentInstructionWritesThePointerBlock keeps the machine target
+// on the same instruction-block mode as a project or workspace one: the mode
+// reaches it through planAgentInstructions, and a machine file is the one
+// surface serve never verifies, so a wrong block there is never reported.
+func TestPlanMachineAgentInstructionWritesThePointerBlock(t *testing.T) {
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claude namedTarget
+	for _, named := range agentTargets() {
+		if named.name == "claude" {
+			claude = named
+			break
+		}
+	}
+	edit, planErr := planMachineAgentInstruction(home, claude, true, true)
+	if planErr != nil {
+		t.Fatal(planErr)
+	}
+	if err := applyEdits([]plannedEdit{*edit}); err != nil {
+		t.Fatal(err)
+	}
+	got := readTestFile(t, filepath.Join(home, ".claude", "CLAUDE.md"))
+	if !bytes.Contains(got, []byte(canonicalBlock(true, true))) {
+		t.Fatalf("machine instructions are not the canonical pointer block:\n%s", got)
+	}
+	if bytes.Contains(got, []byte(managedBlockText)) ||
+		bytes.Contains(got, []byte(betaTestManagedBlockText)) {
+		t.Fatalf("pointer machine instructions carry a full contract:\n%s", got)
+	}
 }

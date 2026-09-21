@@ -57,6 +57,9 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 	if bytes.Contains(manifestBytes, []byte("\"beta_test\"")) {
 		t.Fatalf("plain manifest contains beta_test key:\n%s", manifestBytes)
 	}
+	if bytes.Contains(manifestBytes, []byte("\"instructions_pointer\"")) {
+		t.Fatalf("full-block manifest contains instructions_pointer key:\n%s", manifestBytes)
+	}
 	if manifest.BetaTest {
 		t.Fatal("plain manifest beta test = true, want false")
 	}
@@ -72,6 +75,9 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 	}
 	if manifest.SchemaVersion != manifestSchemaVersion {
 		t.Fatalf("schema version = %d, want %d", manifest.SchemaVersion, manifestSchemaVersion)
+	}
+	if manifestSchemaVersion != 1 {
+		t.Fatalf("manifest schema version = %d, want unchanged version 1", manifestSchemaVersion)
 	}
 	if manifest.Release != version.Current().Display() {
 		t.Fatalf("release = %q, want %q", manifest.Release, version.Current().Display())
@@ -284,6 +290,82 @@ func TestApplyReselectedAgentCleansCarriedInstructionSurface(t *testing.T) {
 	projectCodex := filepath.Join(project, "AGENTS.md")
 	if got := readTestFile(t, projectCodex); strings.Count(string(got), beginMarker) != 1 {
 		t.Fatalf("reselected codex project instructions:\n%s", got)
+	}
+}
+
+func TestApplyRefusesChangedInstructionModesWithNarrowedAgentsBeforeWriting(
+	t *testing.T,
+) {
+	for _, testCase := range []struct {
+		name                string
+		changedMode         string
+		betaTest            bool
+		pointerInstructions bool
+	}{
+		{name: "beta only", betaTest: true, changedMode: "beta-test mode"},
+		{
+			name:                "instruction block only",
+			pointerInstructions: true,
+			changedMode:         "instruction-block mode",
+		},
+		{
+			name:                "both",
+			betaTest:            true,
+			pointerInstructions: true,
+			changedMode:         "beta-test and instruction-block modes",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			modes := testRunnerModes(t)
+			if _, err := Apply(Options{
+				InstructionsTarget: InstructionsTargetWorkspace,
+				ShellPermission:    ShellPermissionAsk,
+				Dir:                dir,
+				Agents:             []string{"codex", "cursor"},
+				AIFamilies:         testAIFamilies(),
+				RunnerModes:        modes,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			paths := []string{
+				filepath.Join(dir, "AGENTS.md"),
+				filepath.Join(dir, ".cursor/rules/just-mcp-work.mdc"),
+				resolvedTestPath(t, filepath.Join(dir, manifestFile)),
+				policy.Path(dir),
+			}
+			before := make(map[string][]byte, len(paths))
+			for _, path := range paths {
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				before[path] = data
+			}
+
+			_, err := Apply(Options{
+				InstructionsTarget:  InstructionsTargetWorkspace,
+				ShellPermission:     ShellPermissionAsk,
+				Dir:                 dir,
+				Agents:              []string{"codex"},
+				BetaTest:            testCase.betaTest,
+				PointerInstructions: testCase.pointerInstructions,
+				AIFamilies:          testAIFamilies(),
+				RunnerModes:         modes,
+			})
+			wantError := "cannot change " + testCase.changedMode +
+				" with --agents codex: managed agent-instruction files outside the selection: " +
+				".cursor/rules/just-mcp-work.mdc; re-run with --agents codex,cursor"
+			if err == nil || err.Error() != wantError {
+				t.Fatalf("Apply() error = %v, want %q", err, wantError)
+			}
+			for path, want := range before {
+				got, readErr := os.ReadFile(path)
+				if readErr != nil || !bytes.Equal(got, want) {
+					t.Fatalf("refused mode change rewrote %s: %v", path, readErr)
+				}
+			}
+		})
 	}
 }
 
@@ -1248,6 +1330,85 @@ func TestReadRecordedBetaTestReturnsManifestIOError(t *testing.T) {
 	}
 }
 
+func TestReadRecordedInstructionsPointerMatchesRecordedChoiceContract(t *testing.T) {
+	for _, testCase := range []struct {
+		manifest  any
+		name      string
+		malformed bool
+		want      bool
+		known     bool
+		ioError   bool
+	}{
+		{name: "no manifest", known: true},
+		{name: "malformed", malformed: true},
+		{
+			name: "unsupported schema",
+			manifest: managedManifest{
+				SchemaVersion:       manifestSchemaVersion + 1,
+				InstructionsPointer: true,
+			},
+		},
+		{
+			name: "recorded pointer",
+			manifest: managedManifest{
+				SchemaVersion:       manifestSchemaVersion,
+				InstructionsPointer: true,
+			},
+			want:  true,
+			known: true,
+		},
+		{
+			name:     "recorded full",
+			manifest: managedManifest{SchemaVersion: manifestSchemaVersion},
+			known:    true,
+		},
+		{name: "manifest I/O error", ioError: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, manifestFile)
+			switch {
+			case testCase.ioError:
+				if err := os.MkdirAll(path, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case testCase.malformed:
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case testCase.manifest != nil:
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeJSONFile(t, path, testCase.manifest)
+			}
+
+			got, known, err := ReadRecordedInstructionsPointer(root)
+			if testCase.ioError {
+				if err == nil {
+					t.Fatal("ReadRecordedInstructionsPointer() error = nil, want manifest I/O error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ReadRecordedInstructionsPointer() error = %v, want nil", err)
+			}
+			if got != testCase.want || known != testCase.known {
+				t.Fatalf(
+					"ReadRecordedInstructionsPointer() = (%t, %t), want (%t, %t)",
+					got,
+					known,
+					testCase.want,
+					testCase.known,
+				)
+			}
+		})
+	}
+}
+
 // TestReadRecordedAIFamiliesDoesNotRecognizeTheSingleFamilyManifest pins the
 // upgrade from a manifest written before the family list: init is told the
 // recorded families are not recognized, and serve refuses the manifest until
@@ -1513,6 +1674,78 @@ func TestVerifyManagedSurfacesAcceptsAndRejectsBetaBlock(t *testing.T) {
 	}
 }
 
+func TestVerifyManagedSurfacesAcceptsPointerBlockAndRejectsFlippedMode(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Apply(Options{
+		ShellPermission:     ShellPermissionAsk,
+		Dir:                 root,
+		Agents:              []string{"codex"},
+		BetaTest:            true,
+		PointerInstructions: true,
+		InstructionsTarget:  InstructionsTargetWorkspace,
+		AIFamilies:          testAIFamilies(),
+		RunnerModes:         testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, manifestBytes := readManagedManifest(t, root)
+	if !manifest.InstructionsPointer ||
+		!bytes.Contains(manifestBytes, []byte(`"instructions_pointer": true`)) {
+		t.Fatalf("pointer manifest did not record its mode:\n%s", manifestBytes)
+	}
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() rejected pointer workspace: %v", err)
+	}
+	path := filepath.Join(root, "AGENTS.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), canonicalBlock(true, true)) ||
+		strings.Contains(string(data), betaTestManagedBlockText) {
+		t.Fatalf("pointer workspace instruction block is not canonical:\n%s", data)
+	}
+
+	manifest.InstructionsPointer = false
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+	if _, err := VerifyManagedSurfaces(root); err == nil ||
+		!strings.Contains(err.Error(), "generated configuration changed since it was written") {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want flipped-mode refusal", err)
+	}
+}
+
+func TestVerifyManagedSurfacesRejectsRemovedBetaTestFromPointerManifest(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Apply(Options{
+		ShellPermission:     ShellPermissionAsk,
+		Dir:                 root,
+		Agents:              []string{"codex"},
+		BetaTest:            true,
+		PointerInstructions: true,
+		InstructionsTarget:  InstructionsTargetWorkspace,
+		AIFamilies:          testAIFamilies(),
+		RunnerModes:         testRunnerModes(t),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := readManagedManifest(t, root)
+	manifest.BetaTest = false
+	manifestPath := filepath.Join(root, manifestFile)
+	writeJSONFile(t, manifestPath, manifest)
+	manifestBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(manifestBytes, []byte(`"beta_test"`)) {
+		t.Fatalf("tampered pointer manifest still contains beta_test:\n%s", manifestBytes)
+	}
+
+	if _, err := VerifyManagedSurfaces(root); err == nil ||
+		!strings.Contains(err.Error(), "generated configuration changed since it was written") {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want removed-beta refusal", err)
+	}
+}
+
 func TestVerifyManagedSurfacesRejectsSwitchedCanonicalBlocks(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1553,7 +1786,7 @@ func TestVerifyManagedSurfacesRejectsSwitchedCanonicalBlocks(t *testing.T) {
 				)
 			}
 			path := filepath.Join(root, "AGENTS.md")
-			if err := os.WriteFile(path, []byte(canonicalBlock(!test.betaTest)), 0o600); err != nil {
+			if err := os.WriteFile(path, []byte(canonicalBlock(!test.betaTest, false)), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := VerifyManagedSurfaces(root); err == nil ||
@@ -1580,7 +1813,7 @@ func TestVerifyManagedSurfacesAcceptsFreshWorkspaceAndNoManifest(t *testing.T) {
 		root := t.TempDir()
 		if err := os.WriteFile(
 			filepath.Join(root, "AGENTS.md"),
-			[]byte("# Local\n\n"+canonicalBlock(false)),
+			[]byte("# Local\n\n"+canonicalBlock(false, false)),
 			0o600,
 		); err != nil {
 			t.Fatal(err)
@@ -1612,6 +1845,18 @@ func TestVerifyManagedSurfacesTreatsManifestWithoutBetaTestAsPlain(t *testing.T)
 	}
 	if managedSurfaces.BetaTest {
 		t.Fatal("VerifyManagedSurfaces() beta test = true without beta_test field, want false")
+	}
+}
+
+func TestVerifyManagedSurfacesTreatsAbsentInstructionsPointerAsFull(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, manifestBytes := readManagedManifest(t, root)
+	if manifest.InstructionsPointer ||
+		bytes.Contains(manifestBytes, []byte("\"instructions_pointer\"")) {
+		t.Fatalf("full workspace unexpectedly recorded pointer mode:\n%s", manifestBytes)
+	}
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() rejected absent pointer field as non-full: %v", err)
 	}
 }
 
@@ -1814,7 +2059,7 @@ func TestVerifyManagedSurfacesRejectsRecordedBetaModeWithPlainBlock(t *testing.T
 	if !manifest.BetaTest {
 		t.Fatal("manifest beta test = false, want true")
 	}
-	plainBlock := []byte(canonicalBlock(false))
+	plainBlock := []byte(canonicalBlock(false, false))
 	path := filepath.Join(root, "AGENTS.md")
 	if err := os.WriteFile(path, plainBlock, 0o600); err != nil {
 		t.Fatal(err)
@@ -1887,7 +2132,7 @@ func TestVerifyManagedSurfacesRejectsUntrustedManifestPaths(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			root := applyVerificationWorkspace(t)
 			outside := filepath.Join(t.TempDir(), "outside.md")
-			if err := os.WriteFile(outside, []byte(canonicalBlock(false)), 0o600); err != nil {
+			if err := os.WriteFile(outside, []byte(canonicalBlock(false, false)), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			manifest, _ := readManagedManifest(t, root)
@@ -2238,7 +2483,7 @@ func TestVerifyManagedSurfacesReportsMalformedManagedConfiguration(t *testing.T)
 				if err != nil {
 					t.Fatal(err)
 				}
-				data = append(data, []byte(canonicalBlock(false))...)
+				data = append(data, []byte(canonicalBlock(false, false))...)
 				// #nosec G703 -- path is a fixed config path under the test's temporary root.
 				if err := os.WriteFile(path, data, 0o600); err != nil {
 					t.Fatal(err)
@@ -2407,14 +2652,22 @@ func TestPlanManifestRecordsInstructionBlockDigest(t *testing.T) {
 
 	manifest, _ := readManagedManifest(t, root)
 	if manifest.AgentInstructions == nil ||
-		manifest.AgentInstructions.SHA256 != instructionBlockDigest(false) {
+		manifest.AgentInstructions.SHA256 != instructionBlockDigest(false, false) {
 		t.Fatalf(
 			"agent_instructions = %#v, want the plain block digest",
 			manifest.AgentInstructions,
 		)
 	}
-	if instructionBlockDigest(true) == instructionBlockDigest(false) {
+	if instructionBlockDigest(true, false) == instructionBlockDigest(false, false) {
 		t.Fatal("beta guidance is outside the hashed block, so the digest cannot see it")
+	}
+	// A machine target records no instruction surface, so this digest is also the
+	// only thing that would catch the block mode changing under it.
+	if instructionBlockDigest(false, true) == instructionBlockDigest(false, false) {
+		t.Fatal("the instruction-block mode is outside the hashed block")
+	}
+	if instructionBlockDigest(true, true) == instructionBlockDigest(false, true) {
+		t.Fatal("beta guidance is outside the hashed pointer block")
 	}
 	// The digest exists because a machine target records no instruction surface.
 	for _, surface := range manifest.Surfaces {

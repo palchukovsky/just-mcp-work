@@ -38,6 +38,9 @@ type managedManifest struct {
 	SchemaVersion int    `json:"schema_version"`
 	Release       string `json:"release"`
 	BetaTest      bool   `json:"beta_test,omitempty"`
+	// An omitted InstructionsPointer predates this field and means the full managed
+	// block, the only form earlier releases wrote.
+	InstructionsPointer bool `json:"instructions_pointer,omitempty"`
 	// AIFamilies lists the declared families, one per generated configuration,
 	// and names at least one. A manifest without a usable list, including one
 	// written before the list replaced the single ai_family, is not recognized:
@@ -84,6 +87,7 @@ func planManifest(
 	surfaces []manifestSurface,
 	instructionDestinations map[string]string,
 	betaTest bool,
+	pointerInstructions bool,
 	shellPermission ShellPermission,
 	families aiprofile.Selection,
 	selected map[string]struct{},
@@ -160,7 +164,10 @@ func planManifest(
 			if hasRetiredGuideEdit {
 				edits = append(edits, retiredGuideEdit)
 			}
-			if recorded.BetaTest != betaTest {
+			betaTestChanged := recorded.BetaTest != betaTest
+			pointerInstructionsChanged :=
+				recorded.InstructionsPointer != pointerInstructions
+			if betaTestChanged || pointerInstructionsChanged {
 				var missingPaths []string
 				missingAgents := make(map[string]struct{})
 				for _, surface := range recorded.Surfaces {
@@ -200,9 +207,17 @@ func planManifest(
 							requiredNames = append(requiredNames, named.name)
 						}
 					}
+					changedMode := "instruction-block mode"
+					if betaTestChanged && pointerInstructionsChanged {
+						changedMode = "beta-test and instruction-block modes"
+					} else if betaTestChanged {
+						changedMode = "beta-test mode"
+					}
 					return nil, nil, fmt.Errorf(
-						"cannot change beta-test mode with --agents %s: managed agent-instruction "+
-							"files outside the selection: %s; re-run with --agents %s",
+						"cannot change %s with --agents %s: managed "+
+							"agent-instruction files outside the selection: %s; "+
+							"re-run with --agents %s",
+						changedMode,
 						strings.Join(selectedNames, ","),
 						strings.Join(missingPaths, ", "),
 						strings.Join(requiredNames, ","),
@@ -282,15 +297,16 @@ func planManifest(
 	}
 	after, err := json.MarshalIndent(
 		managedManifest{
-			SchemaVersion:   manifestSchemaVersion,
-			Release:         version.Current().Display(),
-			BetaTest:        betaTest,
-			AIFamilies:      families,
-			ShellPermission: recordedShellPermission,
+			SchemaVersion:       manifestSchemaVersion,
+			Release:             version.Current().Display(),
+			BetaTest:            betaTest,
+			InstructionsPointer: pointerInstructions,
+			AIFamilies:          families,
+			ShellPermission:     recordedShellPermission,
 			AgentInstructions: &agentInstructions{
 				Target: string(instructionsTarget),
 				Agents: selectedInstructionAgentNames(selected),
-				SHA256: instructionBlockDigest(betaTest),
+				SHA256: instructionBlockDigest(betaTest, pointerInstructions),
 			},
 			Surfaces: surfaces,
 		},
@@ -668,8 +684,8 @@ func managedFragmentDigest(fragment []byte) string {
 // instructionBlockDigest hashes the instruction block this binary generates.
 // The block is the same for every agent and every target: the per-agent header
 // sits outside the markers and is not part of the managed fragment.
-func instructionBlockDigest(betaTest bool) string {
-	return managedFragmentDigest([]byte(canonicalBlock(betaTest)))
+func instructionBlockDigest(betaTest bool, pointerInstructions bool) string {
+	return managedFragmentDigest([]byte(canonicalBlock(betaTest, pointerInstructions)))
 }
 
 func appendManifestSurface(
@@ -803,6 +819,29 @@ func ReadRecordedBetaTest(root string) (bool, bool, error) {
 		return false, false, nil
 	}
 	return manifest.BetaTest, true, nil
+}
+
+// ReadRecordedInstructionsPointer reports the instruction-block mode recorded
+// in the workspace manifest. A missing manifest reports full with known true. A
+// present malformed or schema-incompatible manifest reports known false;
+// filesystem errors are returned.
+func ReadRecordedInstructionsPointer(root string) (bool, bool, error) {
+	manifestPath := filepath.Join(root, manifestFile)
+	data, exists, err := readOptionalFile(manifestPath)
+	if err != nil {
+		return false, false, err
+	}
+	if !exists {
+		return false, true, nil
+	}
+
+	var manifest managedManifest
+	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
+		manifest.SchemaVersion != manifestSchemaVersion {
+		//nolint:nilerr // Unknown mode is handled by planning an explicit or full choice.
+		return false, false, nil
+	}
+	return manifest.InstructionsPointer, true, nil
 }
 
 // ReadRecordedShellPermission reports the shell permission recorded in the
@@ -1020,6 +1059,7 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 		generated, err := generatedManifestSurface(
 			root,
 			manifest.BetaTest,
+			manifest.InstructionsPointer,
 			shellPermission,
 			families,
 			recorded,
@@ -1051,7 +1091,10 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 		!slices.ContainsFunc(manifest.Surfaces, func(surface manifestSurface) bool {
 			return surface.Kind == manifestKindAgentInstructions
 		}) &&
-		manifest.AgentInstructions.SHA256 != instructionBlockDigest(manifest.BetaTest) {
+		manifest.AgentInstructions.SHA256 != instructionBlockDigest(
+			manifest.BetaTest,
+			manifest.InstructionsPointer,
+		) {
 		return ManagedSurfaces{}, fmt.Errorf(
 			"generated agent instructions changed since they were written outside this "+
 				"workspace (recorded by just-mcp-work %s); %s",
@@ -1138,6 +1181,7 @@ func verifiedAgentGuidePath(surfaces []manifestSurface, resolvedPaths []string) 
 func generatedManifestSurface(
 	root string,
 	betaTest bool,
+	pointerInstructions bool,
 	shellPermission ShellPermission,
 	families aiprofile.Selection,
 	recorded manifestSurface,
@@ -1147,7 +1191,7 @@ func generatedManifestSurface(
 		return newManifestSurface(
 			recorded.Path,
 			recorded.Kind,
-			[]byte(canonicalBlock(betaTest)),
+			[]byte(canonicalBlock(betaTest, pointerInstructions)),
 		), nil
 	case manifestKindAgentGuide:
 		return newManifestSurface(

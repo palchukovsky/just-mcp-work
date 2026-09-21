@@ -47,6 +47,21 @@ never personal text around it. `.mcp.json`,
 `.codex/config.toml`, `.claude/settings.json`, `.just-mcp-work/`, and the
 runner policy remain at the workspace scope for every target.
 
+## How much the instruction block says
+
+By default each selected agent instruction file carries the full managed
+contract. Pass `--instructions-pointer` to write only its opening sentence,
+which points at the MCP server's instructions. Choosing the shorter block
+asserts that every selected client actually delivers those instructions to the
+model; `init` cannot detect whether a client does.
+
+The choice is recorded in the managed manifest, so a later `init` without the
+flag keeps it. Pass `--instructions-pointer=true` or
+`--instructions-pointer=false` to change it; in a fresh workspace, omitting the
+flag selects the full block. On downgrade, an older `init` ignores the unknown
+field and rewrites the full block, while an older `serve` reports that the
+generated configuration changed since it was written.
+
 ## What `init` manages
 
 Each invocation is authoritative inside the workspace scope resolved from
@@ -143,7 +158,10 @@ instruction files whose bytes do not depend on the shell permission.
 
 Use `init-beta-test` for a workspace beta-testing JMW. It does everything
 `init` does and records beta-test mode, so the selected agents and every client
-connecting to the JMW server receive beta feedback guidance.
+connecting to the JMW server receive beta feedback guidance. With
+`--instructions-pointer`, the instruction files carry the opening sentence of
+that guidance as a pointer to the server's instructions rather than its full
+text.
 
 In such a workspace, use `init-beta-test` again to stay in beta mode; plain
 `init` asks before it removes beta feedback guidance and leaves beta testing.

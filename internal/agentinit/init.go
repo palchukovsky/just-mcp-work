@@ -195,11 +195,17 @@ Run data
   by default (maximum 200) and next_cursor.
 - version_status checks the installed version against the latest stable release.`
 
+// pointerBlockText is the pointer form of the managed block: the opening
+// sentence of managedBlockText and nothing else. It is what an agent file needs
+// when the client also delivers the server's instructions, which carry the rest.
+const pointerBlockText = `This workspace uses just-mcp-work (JMW) for its runnable tasks; the JMW MCP
+server itself carries the full usage rules.`
+
 // managedBlockText is the instruction block written into the agent files. It
 // carries the same contract as promptText in a form an agent can read before
-// the server is attached, so the two must not drift apart.
-const managedBlockText = `This workspace uses just-mcp-work (JMW) for its runnable tasks; the JMW MCP
-server itself carries the full usage rules. Core rule: JMW is there to save
+// the server is attached, so the two must not drift apart. It extends
+// pointerBlockText rather than repeating it, so both forms have one source.
+const managedBlockText = pointerBlockText + ` Core rule: JMW is there to save
 tokens. Run a task through it (list_tasks -> run_task/start_task) whenever a
 receipt or short tail is enough for a build, test, lint, format, or check/verify
 gate, and trust its receipt instead of re-reading the log of a successful run.
@@ -213,7 +219,9 @@ recreate or run such a task through run_shell_command, start_shell_command, or
 another shell path. Shell tools remain available for genuinely ad-hoc commands
 outside the discovered or withheld task surfaces.`
 
-const betaTestManagedBlockText = `This workspace beta-tests just-mcp-work (JMW) itself. Report any JMW bug, friction,
+const betaTestPointerBlockText = `This workspace beta-tests just-mcp-work (JMW) itself.`
+
+const betaTestManagedBlockText = betaTestPointerBlockText + ` Report any JMW bug, friction,
 missing capability, or improvement that would help you work better. Include the
 relevant tool call, command, or error. Keep the report separate from your findings
 about the project. Tell the user and stop there - do not open issues and do not
@@ -389,11 +397,15 @@ func claudeToolRules(tools ...string) []string {
 //
 //nolint:govet // Field order follows the documented option grouping.
 type Options struct {
-	Dir            string
-	Agents         []string
-	BetaTest       bool
-	DryRun         bool
-	WriteMCPConfig bool
+	Dir      string
+	Agents   []string
+	BetaTest bool
+	// PointerInstructions writes the managed instruction block as a pointer to the
+	// server's instructions instead of the full contract. The zero value writes the
+	// full contract, which is the only form earlier releases wrote.
+	PointerInstructions bool
+	DryRun              bool
+	WriteMCPConfig      bool
 	// InstructionsTarget selects the directory family that receives agent
 	// instruction files. An empty value is invalid.
 	InstructionsTarget InstructionsTarget
@@ -524,6 +536,7 @@ func Apply(options Options) (Result, error) {
 		surfaces,
 		instructionDestinations,
 		options.BetaTest,
+		options.PointerInstructions,
 		options.ShellPermission,
 		options.AIFamilies,
 		selected,
@@ -695,6 +708,7 @@ func planAgentInstructions(
 				instructionsDirectory,
 				named,
 				options.BetaTest,
+				options.PointerInstructions,
 			)
 			if planErr != nil {
 				return nil, nil, nil, planErr
@@ -714,7 +728,12 @@ func planAgentInstructions(
 		if readErr != nil {
 			return nil, nil, nil, readErr
 		}
-		after, contentErr := managedContent(before, instructionTarget.header, options.BetaTest)
+		after, contentErr := managedContent(
+			before,
+			instructionTarget.header,
+			options.BetaTest,
+			options.PointerInstructions,
+		)
 		if contentErr != nil {
 			return nil, nil, nil, fmt.Errorf("%s: %w", path, contentErr)
 		}
@@ -769,6 +788,7 @@ func planMachineAgentInstruction(
 	home string,
 	named namedTarget,
 	betaTest bool,
+	pointerInstructions bool,
 ) (*plannedEdit, error) {
 	lexicalPath := filepath.Clean(
 		filepath.Join(home, filepath.FromSlash(named.machinePath)),
@@ -847,7 +867,7 @@ func planMachineAgentInstruction(
 			)
 		}
 	}
-	after, err := managedContent(before, "", betaTest)
+	after, err := managedContent(before, "", betaTest, pointerInstructions)
 	if err != nil {
 		return nil, fmt.Errorf("machine agent instruction %s: %w", resolvedPath, err)
 	}
@@ -1699,15 +1719,28 @@ func agentTarget(agent string) (target, bool) {
 	return target{}, false
 }
 
-func canonicalBlock(betaTest bool) string {
-	block := beginMarker + "\n" + managedBlockText
+func canonicalBlock(betaTest bool, pointerInstructions bool) string {
+	text := managedBlockText
+	if pointerInstructions {
+		text = pointerBlockText
+	}
+	block := beginMarker + "\n" + text
 	if betaTest {
-		block += "\n\n" + betaTestManagedBlockText
+		betaText := betaTestManagedBlockText
+		if pointerInstructions {
+			betaText = betaTestPointerBlockText
+		}
+		block += "\n\n" + betaText
 	}
 	return block + "\n" + endMarker + "\n"
 }
 
-func managedContent(before []byte, header string, betaTest bool) ([]byte, error) {
+func managedContent(
+	before []byte,
+	header string,
+	betaTest bool,
+	pointerInstructions bool,
+) ([]byte, error) {
 	text := string(before)
 	// The instruction file keeps the line ending it is written with, so the
 	// managed block does not turn a CRLF document into a mixed one.
@@ -1716,7 +1749,7 @@ func managedContent(before []byte, header string, betaTest bool) ([]byte, error)
 	if err != nil {
 		return nil, err
 	}
-	block := withLineBreak(canonicalBlock(betaTest), lineBreak)
+	block := withLineBreak(canonicalBlock(betaTest, pointerInstructions), lineBreak)
 	if found {
 		prefix := normalizeTrailingLineBreak(text[:start], lineBreak)
 		return []byte(prefix + block + text[end:]), nil
