@@ -41,8 +41,9 @@ resolved paths. The leaf itself must be a regular file, not a symlink. A
 missing leaf is created with the managed block; an existing regular file has
 only the block between its markers replaced and is refused when the markers
 are absent or malformed. Machine files are outside the workspace: `serve`
-neither verifies nor repairs them. In `--dry-run`, their diff contains only
-the managed block, never personal text around it. `.mcp.json`,
+neither verifies nor repairs them, and notices only a release that would write
+a different block. In `--dry-run`, their diff contains only the managed block,
+never personal text around it. `.mcp.json`,
 `.codex/config.toml`, `.claude/settings.json`, `.just-mcp-work/`, and the
 runner policy remain at the workspace scope for every target.
 
@@ -158,6 +159,6 @@ further step. When a release does change one, `serve` refuses to start and
 names that file; the refusal, not the update, is what asks for `init`. A
 workspace initialized before the managed manifest existed has no record to
 check against, so run `init` there once to gain one. A machine instruction
-file is not a recorded surface either, so nothing detects a release that
-changes the block in it; run `init` after an update when the block lives
-there.
+file is not a recorded surface, so `serve` never reads it; the manifest
+records the digest of the block instead, and a release that would write a
+different block is refused the same way.

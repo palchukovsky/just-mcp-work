@@ -2393,6 +2393,96 @@ func TestVerifyManagedSurfacesAcceptsUpgradeWithUnchangedInstructions(t *testing
 	}
 }
 
+func TestPlanManifestRecordsInstructionBlockDigest(t *testing.T) {
+	root := t.TempDir()
+	setTestHome(t)
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude", "codex"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, _ := readManagedManifest(t, root)
+	if manifest.AgentInstructions == nil ||
+		manifest.AgentInstructions.SHA256 != instructionBlockDigest(false) {
+		t.Fatalf(
+			"agent_instructions = %#v, want the plain block digest",
+			manifest.AgentInstructions,
+		)
+	}
+	if instructionBlockDigest(true) == instructionBlockDigest(false) {
+		t.Fatal("beta guidance is outside the hashed block, so the digest cannot see it")
+	}
+	// The digest exists because a machine target records no instruction surface.
+	for _, surface := range manifest.Surfaces {
+		if surface.Kind == manifestKindAgentInstructions {
+			t.Fatalf("machine target recorded an instruction surface: %#v", surface)
+		}
+	}
+}
+
+func TestVerifyManagedSurfacesChecksMachineInstructionBlock(t *testing.T) {
+	root := t.TempDir()
+	setTestHome(t)
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude", "codex"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() on an unchanged machine workspace: %v", err)
+	}
+
+	manifest, _ := readManagedManifest(t, root)
+	manifest.AgentInstructions.SHA256 = strings.Repeat("0", 64)
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+	_, err := VerifyManagedSurfaces(root)
+	if err == nil ||
+		!strings.Contains(err.Error(), "generated agent instructions changed") ||
+		!strings.Contains(err.Error(), wantManagedManifestRecovery(root)) {
+		t.Fatalf("VerifyManagedSurfaces() error = %v, want an instruction-block refusal", err)
+	}
+}
+
+func TestVerifyManagedSurfacesSkipsAbsentInstructionBlockDigest(t *testing.T) {
+	root := t.TempDir()
+	setTestHome(t)
+	if _, err := Apply(instructionTargetTestOptions(
+		t,
+		root,
+		InstructionsTargetMachine,
+		[]string{"claude", "codex"},
+	)); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, _ := readManagedManifest(t, root)
+	manifest.AgentInstructions.SHA256 = ""
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() rejected a manifest written before the digest: %v", err)
+	}
+}
+
+func TestVerifyManagedSurfacesIgnoresDigestWhenSurfaceCoversTheBlock(t *testing.T) {
+	root := applyVerificationWorkspace(t)
+	manifest, _ := readManagedManifest(t, root)
+	manifest.AgentInstructions.SHA256 = strings.Repeat("0", 64)
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+	// The recorded instruction surfaces are hashed from the same block, so the
+	// surface loop is the one that reports a change; a second refusal here would
+	// say the same thing twice.
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("VerifyManagedSurfaces() refused a block a surface already covers: %v", err)
+	}
+}
+
 func TestVerifyManagedSurfacesDoesNotSearchParent(t *testing.T) {
 	parent := applyVerificationWorkspace(t)
 	manifest, _ := readManagedManifest(t, parent)

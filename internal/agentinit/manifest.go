@@ -52,9 +52,15 @@ type managedManifest struct {
 	Surfaces          []manifestSurface  `json:"surfaces"`
 }
 
+//nolint:govet // Field order follows the stable on-disk schema.
 type agentInstructions struct {
 	Target string   `json:"target"`
 	Agents []string `json:"agents"`
+	// SHA256 is the digest of the instruction block this release generates. A
+	// machine target writes that block outside the workspace and therefore
+	// outside Surfaces, so this is the only record that catches a release
+	// changing it. An omitted digest predates this field and is not checked.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 type manifestSurface struct {
@@ -284,6 +290,7 @@ func planManifest(
 			AgentInstructions: &agentInstructions{
 				Target: string(instructionsTarget),
 				Agents: selectedInstructionAgentNames(selected),
+				SHA256: instructionBlockDigest(betaTest),
 			},
 			Surfaces: surfaces,
 		},
@@ -641,14 +648,28 @@ func managedClaudeEntries(entries []string) []string {
 }
 
 func newManifestSurface(relativePath string, kind string, fragment []byte) manifestSurface {
-	normalized := bytes.ReplaceAll(fragment, []byte("\r\n"), []byte("\n"))
-	normalized = bytes.TrimSuffix(normalized, []byte("\n"))
-	digest := sha256.Sum256(normalized)
 	return manifestSurface{
 		Path:   filepath.ToSlash(relativePath),
 		Kind:   kind,
-		SHA256: hex.EncodeToString(digest[:]),
+		SHA256: managedFragmentDigest(fragment),
 	}
+}
+
+// managedFragmentDigest hashes a managed fragment the way every recorded
+// surface is hashed, so a fragment recorded outside Surfaces stays comparable
+// with one recorded inside it.
+func managedFragmentDigest(fragment []byte) string {
+	normalized := bytes.ReplaceAll(fragment, []byte("\r\n"), []byte("\n"))
+	normalized = bytes.TrimSuffix(normalized, []byte("\n"))
+	digest := sha256.Sum256(normalized)
+	return hex.EncodeToString(digest[:])
+}
+
+// instructionBlockDigest hashes the instruction block this binary generates.
+// The block is the same for every agent and every target: the per-agent header
+// sits outside the markers and is not part of the managed fragment.
+func instructionBlockDigest(betaTest bool) string {
+	return managedFragmentDigest([]byte(canonicalBlock(betaTest)))
 }
 
 func appendManifestSurface(
@@ -1020,6 +1041,23 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 				managedManifestRecovery(root),
 			)
 		}
+	}
+
+	// A machine target writes the instruction block outside the workspace, so
+	// the loop above never sees it and the recorded digest is the only thing
+	// that catches a release changing the block. Check it only when no surface
+	// covers the block already, so one change never refuses twice.
+	if manifest.AgentInstructions != nil && manifest.AgentInstructions.SHA256 != "" &&
+		!slices.ContainsFunc(manifest.Surfaces, func(surface manifestSurface) bool {
+			return surface.Kind == manifestKindAgentInstructions
+		}) &&
+		manifest.AgentInstructions.SHA256 != instructionBlockDigest(manifest.BetaTest) {
+		return ManagedSurfaces{}, fmt.Errorf(
+			"generated agent instructions changed since they were written outside this "+
+				"workspace (recorded by just-mcp-work %s); %s",
+			manifest.Release,
+			managedManifestRecovery(root),
+		)
 	}
 
 	for index, recorded := range manifest.Surfaces {

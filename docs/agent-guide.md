@@ -750,6 +750,11 @@ guidance. Use
   executable would generate different managed content from the record. The
   release shown in the error is context only. Run `just-mcp-work init --dir
   "<root>"`.
+- `generated agent instructions changed since they were written outside this
+  workspace` - the instruction block went to a machine file, which is not a
+  recorded surface, so the manifest records the block's digest instead. This
+  executable would write a different block. Run `just-mcp-work init --dir
+  "<root>"`.
 
 Tool errors arrive as an MCP error result whose payload carries
 `error.message`.
