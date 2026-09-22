@@ -202,10 +202,6 @@ func (r *Run) await() {
 	)
 	select {
 	case waitErr = <-waitDone:
-		if waitErr != nil {
-			status = runstore.StatusNonzero
-			message = "Task exited with a non-zero status"
-		}
 	case <-timeout:
 		status = runstore.StatusTimeout
 		message = fmt.Sprintf(
@@ -222,12 +218,26 @@ func (r *Run) await() {
 		terminationErr = terminate(r.cmd, r.config.Grace, r.killTree)
 		waitErr = <-waitDone
 	}
-	if errors.Is(waitErr, exec.ErrWaitDelay) && r.cmd.ProcessState != nil && r.cmd.ProcessState.Success() {
-		waitErr = nil
-	}
 	exitCode := 0
+	exited := false
 	if r.cmd.ProcessState != nil {
 		exitCode = r.cmd.ProcessState.ExitCode()
+		exited = r.cmd.ProcessState.Success()
+	}
+	// Wait folds two unrelated failures into one error. The process exiting
+	// non-zero arrives as *exec.ExitError; a failure to drain its output while
+	// the process itself succeeded arrives as anything else, ErrWaitDelay among
+	// them. Only the first is the task's own status. Calling the second nonzero
+	// contradicts the zero exit code standing beside it in the same receipt, so
+	// it stays out of the status and is reported as what it is.
+	var exitErr *exec.ExitError
+	if waitErr != nil && exited && !errors.As(waitErr, &exitErr) {
+		errText = joinErrorText(errText, waitErr)
+		if status == runstore.StatusOK {
+			message = "Task exited with a zero status; capturing its output failed: " +
+				waitErr.Error()
+		}
+		waitErr = nil
 	}
 	if status == runstore.StatusOK && waitErr != nil {
 		status = runstore.StatusNonzero
