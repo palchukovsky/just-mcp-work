@@ -1159,9 +1159,10 @@ func TestScopedRunRejectsSymlinkedTempRoot(t *testing.T) {
 	if err := os.Symlink(temporaryTarget, temporaryLink); err != nil {
 		t.Skipf("create temporary-directory symlink: %v", err)
 	}
-	t.Setenv("TMPDIR", temporaryLink)
+	setTestTempDir(t, temporaryLink)
 	server := newShellTestServer(t, root)
 	marker := filepath.Join(allowed, "started")
+	wantLink := strconv.Quote(temporaryLink)
 
 	result, receipt, err := server.runShellCommand(
 		context.Background(),
@@ -1169,7 +1170,7 @@ func TestScopedRunRejectsSymlinkedTempRoot(t *testing.T) {
 		runShellCommandInput{Command: "touch allowed/started", WriteScope: []string{"allowed"}},
 	)
 	if err != nil || result != nil || receipt.Status != runstore.StatusSpawnError ||
-		!strings.Contains(receipt.Message, temporaryLink) ||
+		!strings.Contains(receipt.Message, wantLink) ||
 		!strings.Contains(receipt.Message, "is a symbolic link; declare its target instead") {
 		t.Fatalf("scoped run with symlinked TMPDIR = %#v, %#v, %v; want named spawn_error", result, receipt, err)
 	}
@@ -1186,7 +1187,7 @@ func TestScopedRunRejectsTempRootContainingDeclaredPath(t *testing.T) {
 	if err := os.MkdirAll(allowed, 0o750); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("TMPDIR", temporaryRoot)
+	setTestTempDir(t, temporaryRoot)
 	server := newShellTestServer(t, root)
 	marker := filepath.Join(allowed, "started")
 	resolvedTemporaryRoot, err := filepath.EvalSymlinks(temporaryRoot)
@@ -1197,6 +1198,8 @@ func TestScopedRunRejectsTempRootContainingDeclaredPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	wantTemporaryRoot := strconv.Quote(resolvedTemporaryRoot)
+	wantDeclaredRoot := strconv.Quote(resolvedDeclaredRoot)
 
 	result, receipt, err := server.runShellCommand(
 		context.Background(),
@@ -1204,8 +1207,8 @@ func TestScopedRunRejectsTempRootContainingDeclaredPath(t *testing.T) {
 		runShellCommandInput{Command: "touch allowed/started", WriteScope: []string{"allowed"}},
 	)
 	if err != nil || result != nil || receipt.Status != runstore.StatusSpawnError ||
-		!strings.Contains(receipt.Message, resolvedTemporaryRoot) ||
-		!strings.Contains(receipt.Message, resolvedDeclaredRoot) ||
+		!strings.Contains(receipt.Message, wantTemporaryRoot) ||
+		!strings.Contains(receipt.Message, wantDeclaredRoot) ||
 		!strings.Contains(receipt.Message, "contains or equals") {
 		t.Fatalf("scoped run below TMPDIR = %#v, %#v, %v; want named containment spawn_error", result, receipt, err)
 	}
@@ -2141,6 +2144,16 @@ func TestNewRejectsSubMillisecondTaskTimeout(t *testing.T) {
 	if _, err = New(workspaceRegistry, runners, store, Config{Timeout: 500 * time.Microsecond}); err == nil {
 		t.Fatal("sub-millisecond task timeout must be rejected")
 	}
+}
+
+// setTestTempDir points os.TempDir at a fixture on every platform. Windows
+// reads TMP and TEMP and never TMPDIR, so a POSIX-only override leaves the real
+// user temp in place and the fixture silently decides nothing.
+func setTestTempDir(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("TMPDIR", dir)
+	t.Setenv("TMP", dir)
+	t.Setenv("TEMP", dir)
 }
 
 func newShellTestServer(t *testing.T, root string) *Server {

@@ -9,9 +9,17 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
+
+// quotedPath renders a path the way a refusal carries it. The messages format
+// paths with %q, which escapes the Windows separator, so a raw path never
+// appears in one.
+func quotedPath(path string) string {
+	return strconv.Quote(path)
+}
 
 func TestResolveRejectsInvalidInputs(t *testing.T) {
 	t.Parallel()
@@ -134,11 +142,16 @@ func TestResolveRejectsDeclaredFinalSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("create symlink fixture: %v", err)
 	}
+	resolvedWorktreeRoot, err := filepath.EvalSymlinks(worktreeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantLink := quotedPath(filepath.Join(resolvedWorktreeRoot, "link"))
 
-	_, err := Resolve(worktreeRoot, []string{"link"}, nil)
-	if err == nil || !strings.Contains(err.Error(), link) ||
+	_, err = Resolve(worktreeRoot, []string{"link"}, nil)
+	if err == nil || !strings.Contains(err.Error(), wantLink) ||
 		!strings.Contains(err.Error(), "is a symbolic link; declare its target instead") {
-		t.Fatalf("Resolve() error = %v, want declared final-symlink refusal naming %q", err, link)
+		t.Fatalf("Resolve() error = %v, want declared final-symlink refusal naming %s", err, wantLink)
 	}
 }
 
@@ -151,11 +164,12 @@ func TestResolveRejectsExtraFinalSymlink(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("create symlink fixture: %v", err)
 	}
+	wantLink := quotedPath(link)
 
 	_, err := Resolve(worktreeRoot, []string{"output"}, []string{link})
-	if err == nil || !strings.Contains(err.Error(), link) ||
+	if err == nil || !strings.Contains(err.Error(), wantLink) ||
 		!strings.Contains(err.Error(), "is a symbolic link; declare its target instead") {
-		t.Fatalf("Resolve() error = %v, want extra final-symlink refusal naming %q", err, link)
+		t.Fatalf("Resolve() error = %v, want extra final-symlink refusal naming %s", err, wantLink)
 	}
 }
 
@@ -260,7 +274,6 @@ func TestResolveRejectsExtraRootContainingDeclaredRoot(t *testing.T) {
 	if err := os.Mkdir(worktreeRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	declaredRoot := filepath.Join(worktreeRoot, "src")
 	resolvedTemporaryRoot, err := filepath.EvalSymlinks(temporaryRoot)
 	if err != nil {
 		t.Fatal(err)
@@ -270,15 +283,18 @@ func TestResolveRejectsExtraRootContainingDeclaredRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	wantExtra := quotedPath(resolvedTemporaryRoot)
+	wantDeclared := quotedPath(filepath.Join(resolvedWorktreeRoot, "src"))
+
 	_, err = Resolve(worktreeRoot, []string{"src"}, []string{temporaryRoot})
-	if err == nil || !strings.Contains(err.Error(), resolvedTemporaryRoot) ||
-		!strings.Contains(err.Error(), filepath.Join(resolvedWorktreeRoot, "src")) ||
+	if err == nil || !strings.Contains(err.Error(), wantExtra) ||
+		!strings.Contains(err.Error(), wantDeclared) ||
 		!strings.Contains(err.Error(), "contains or equals") {
 		t.Fatalf(
-			"Resolve() error = %v, want containing extra %q and declared %q",
+			"Resolve() error = %v, want containing extra %s and declared %s",
 			err,
-			resolvedTemporaryRoot,
-			declaredRoot,
+			wantExtra,
+			wantDeclared,
 		)
 	}
 }

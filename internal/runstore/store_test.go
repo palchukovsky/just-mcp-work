@@ -107,6 +107,13 @@ func TestBeginCopiesSliceMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The run is never finished here, so the log files stay open and Windows
+	// refuses to remove the temporary directory.
+	t.Cleanup(func() {
+		if closeErr := errors.Join(handle.stdout.Close(), handle.stderr.Close()); closeErr != nil {
+			t.Error(closeErr)
+		}
+	})
 	args[0] = "changed argument"
 	writeScope[0] = "/changed-scope"
 	if got := handle.Meta.Args; len(got) != 1 || got[0] != "argument" {
