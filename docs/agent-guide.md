@@ -666,17 +666,18 @@ delegated build that pours a full log into its own context defeats the purpose.
 
 ## Failure modes
 
-When a readable, schema-compatible managed manifest records beta mode, an
-`init` in the recovery commands below asks whether to leave beta testing. A
-missing manifest has no recorded mode to recover and is treated as plain, so it
-does not prompt. If the manifest is present but malformed or uses an unsupported
-schema, `init` cannot recover the mode and asks with that warning. Answering no
-stops before it writes; answering yes, or reaching end of input, lets plain
-`init` continue to preflight. If changing mode would leave managed instruction
-files outside the current `--agents` selection, preflight refuses and names the
-files and the widened selection. Otherwise, plain `init` removes beta feedback
-guidance. Use
-`just-mcp-work init-beta-test --dir "<root>"` to stay in the beta test.
+An `init` in the recovery commands below asks whether the workspace takes part
+in the JMW beta test unless `--beta-test` answers it. It offers the mode a
+readable, schema-compatible managed manifest records; a missing manifest
+records none. A malformed manifest, or one with an unsupported schema, stops
+`init` before its first question unless `--ai` answers the AI families; with
+`--ai`, the beta question says the recorded mode cannot be used and offers
+`no`, and a malformed manifest is still refused when `init` plans its writes.
+Input that ends before the question is answered stops `init` before it writes,
+so pass `--beta-test` to stay in the beta test or `--beta-test=false` to leave
+it. If changing mode would leave managed instruction files outside the current
+`--agents` selection, preflight refuses and names the files and the widened
+selection.
 
 - `invalid project path "..."` - the path is absolute, empty, or leaves the
   workspace root. The message states the expected form: `project_path` is

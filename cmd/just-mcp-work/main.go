@@ -5,7 +5,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -15,17 +14,18 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
-	"unicode"
 
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 	"github.com/palchukovsky/just-mcp-work/internal/mcpserver"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
+	"github.com/palchukovsky/just-mcp-work/internal/questionnaire"
+	"github.com/palchukovsky/just-mcp-work/internal/questionnaire/console"
+	"github.com/palchukovsky/just-mcp-work/internal/questionnaire/form"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	agentrunner "github.com/palchukovsky/just-mcp-work/internal/runner/agent"
 	cmakerunner "github.com/palchukovsky/just-mcp-work/internal/runner/cmake"
@@ -54,8 +54,6 @@ func run(args []string) error {
 		return serve(args[1:])
 	case "init":
 		return initCommand(args[1:])
-	case "init-beta-test":
-		return initBetaTestCommand(args[1:])
 	case "version", "--version", "-version":
 		fmt.Printf("just-mcp-work %s (%s)\n", version.Current().Display(), version.Commit)
 		return nil
@@ -446,11 +444,7 @@ func serverRunError(ctx context.Context, err error) error {
 }
 
 func initCommand(args []string) error {
-	return initCommandWithIO(false, args, os.Stdin, os.Stdout, os.Stderr)
-}
-
-func initBetaTestCommand(args []string) error {
-	return initCommandWithIO(true, args, os.Stdin, os.Stdout, os.Stderr)
+	return initCommandWithIO(args, os.Stdin, os.Stdout, os.Stderr)
 }
 
 func parseInitPermissions(
@@ -504,17 +498,12 @@ func validateInstructionsAgents(
 
 //nolint:gocyclo // Keep the required question order and the single Apply handoff explicit.
 func initCommandWithIO(
-	betaTest bool,
 	args []string,
 	input io.Reader,
 	resultOutput io.Writer,
 	diagnosticOutput io.Writer,
 ) error {
-	command := "init"
-	if betaTest {
-		command = "init-beta-test"
-	}
-	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	flags.SetOutput(diagnosticOutput)
 	dir := flags.String("dir", ".", "workspace directory")
 	agents := flags.String(
@@ -523,6 +512,12 @@ func initCommandWithIO(
 		"comma-separated agent targets: claude,codex,cursor,copilot,windsurf",
 	)
 	dryRun := flags.Bool("dry-run", false, "print planned diffs without writing files")
+	betaTest := flags.Bool(
+		"beta-test",
+		false,
+		"take part in the JMW beta test, which gives agents and clients JMW beta feedback "+
+			"guidance; omitted, it is asked on the console",
+	)
 	writeMCPConfig := flags.Bool(
 		"write-mcp-config",
 		true,
@@ -571,7 +566,8 @@ func initCommandWithIO(
 		// nosemgrep: discarded-error
 		_, _ = fmt.Fprintln(
 			flags.Output(),
-			"Usage: just-mcp-work "+command+" [--dir <dir>] [--agents <names>] [--dry-run] "+
+			"Usage: just-mcp-work init [--dir <dir>] [--agents <names>] [--dry-run] "+
+				"[--beta-test[=true|false]] "+
 				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
 				"[--instructions-target project|workspace|machine] "+
 				"[--ai "+initAIFlagValues()+"] "+
@@ -584,30 +580,29 @@ func initCommandWithIO(
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		return fmt.Errorf("parse %s flags: %w", command, err)
+		return fmt.Errorf("parse init flags: %w", err)
 	}
 	if flags.NArg() != 0 {
-		return fmt.Errorf("%s accepts no positional arguments", command)
+		return errors.New("init accepts no positional arguments")
 	}
 	permissions, parsedShellPermission, err := parseInitPermissions(
 		*claudePermissions,
 		*shellPermission,
 	)
 	if err != nil {
-		return fmt.Errorf("parse %s flags: %w", command, err)
+		return fmt.Errorf("parse init flags: %w", err)
 	}
 	var instructionsTarget agentinit.InstructionsTarget
 	if *instructionsTargetFlag != "" {
 		instructionsTarget, err = agentinit.ParseInstructionsTarget(*instructionsTargetFlag)
 		if err != nil {
-			return fmt.Errorf("parse %s flags: %w", command, err)
+			return fmt.Errorf("parse init flags: %w", err)
 		}
 	}
 	catalog, err := runnerCatalog()
 	if err != nil {
 		return fmt.Errorf("create runner catalog: %w", err)
 	}
-	console := initConsole{input: bufio.NewReader(input), output: diagnosticOutput}
 	scope, pointerInstructions, err := resolveInitInstructionsPointer(
 		flags,
 		*dir,
@@ -616,35 +611,100 @@ func initCommandWithIO(
 	if err != nil {
 		return err
 	}
-	if !betaTest && !*dryRun {
-		if confirmErr := console.confirmLeaveBetaTest(scope); confirmErr != nil {
-			return confirmErr
-		}
-	}
-	if instructionsTarget == "" {
-		instructionsTarget, err = console.selectInstructionsTarget(scope)
-		if err != nil {
-			return fmt.Errorf("select instructions target: %w", err)
-		}
-	}
 	selectedAgents := splitCSV(*agents)
-	if validateErr := validateInstructionsAgents(
-		instructionsTarget,
-		*agents,
-	); validateErr != nil {
-		return fmt.Errorf("validate %s flags: %w", command, validateErr)
+	if instructionsTarget != "" {
+		if validateErr := validateInstructionsAgents(
+			instructionsTarget,
+			*agents,
+		); validateErr != nil {
+			return fmt.Errorf("validate init flags: %w", validateErr)
+		}
 	}
-	families, err := console.selectAIFamilies(scope, *aiFamily)
+	var families aiprofile.Selection
+	if *aiFamily != "" {
+		families, err = parseInitAIFamilies(*aiFamily)
+		if err != nil {
+			return fmt.Errorf("select AI families: %w", err)
+		}
+	}
+	overrides, err := catalog.CanonicalSelections(runnerModes)
 	if err != nil {
-		return fmt.Errorf("select AI families: %w", err)
+		return fmt.Errorf("select runner modes: canonicalize runner mode overrides: %w", err)
 	}
-	currentModes, err := console.currentRunnerModes(scope, catalog)
+	overridden := make(map[string]struct{}, len(runnerModes))
+	for _, selection := range runnerModes {
+		overridden[selection.Name] = struct{}{}
+	}
+	questions, notices, err := initQuestionPlan{
+		scope:              scope,
+		agentsFlag:         *agents,
+		agents:             agentinit.SelectedAgents(selectedAgents),
+		catalog:            catalog,
+		overriddenRunners:  overridden,
+		betaTestAnswered:   flagWasSet(flags, "beta-test"),
+		targetAnswered:     instructionsTarget != "",
+		aiFamiliesAnswered: *aiFamily != "",
+		shellPermission:    parsedShellPermission,
+		claudePermissions:  permissions,
+		writeMCPConfig:     *writeMCPConfig,
+		dryRun:             *dryRun,
+	}.questions()
 	if err != nil {
-		return fmt.Errorf("read current runner modes: %w", err)
+		return err
 	}
-	canonicalModes, err := console.selectRunnerModes(catalog, runnerModes, currentModes)
+	for _, notice := range notices {
+		if writeErr := writeInitOutput(diagnosticOutput, "%s\n", notice); writeErr != nil {
+			return writeErr
+		}
+	}
+	renderer, advice := initRenderer(input, diagnosticOutput)
+	if advice != "" && len(questions) > 0 {
+		if writeErr := writeInitOutput(diagnosticOutput, "%s\n", advice); writeErr != nil {
+			return writeErr
+		}
+	}
+	answers, err := renderer.Ask(context.Background(), questions)
+	if err != nil {
+		return fmt.Errorf("ask init questions: %w", err)
+	}
+	// The answers were given for the scope resolved before asking, and Apply
+	// resolves it again; a scope that moved meanwhile would receive
+	// permissions nobody confirmed for it.
+	answeredScope, err := agentinit.ResolveScope(*dir)
+	if err != nil {
+		return fmt.Errorf("resolve init scope: %w", err)
+	}
+	if answeredScope != scope {
+		return fmt.Errorf(
+			"the workspace scope changed from %s to %s while init was asking; run init again",
+			scope,
+			answeredScope,
+		)
+	}
+	if values, asked := answers[betaTestQuestionID]; asked {
+		*betaTest = values[0] == questionnaire.Yes
+	}
+	if values, asked := answers[instructionsTargetQuestionID]; asked {
+		instructionsTarget = agentinit.InstructionsTarget(values[0])
+	}
+	if values, asked := answers[aiFamiliesQuestionID]; asked {
+		families, err = aiprofile.ParseSelection(values)
+		if err != nil {
+			return fmt.Errorf("select AI families %v: %w", values, err)
+		}
+	}
+	canonicalModes, err := answeredRunnerModes(catalog, overrides, answers)
 	if err != nil {
 		return fmt.Errorf("select runner modes: %w", err)
+	}
+	if values, asked := answers[shellPermissionQuestionID]; asked {
+		parsedShellPermission = agentinit.ShellPermission(values[0])
+	}
+	if values, asked := answers[claudePermissionsQuestionID]; asked {
+		permissions = agentinit.ClaudePermissionsNo
+		if values[0] == questionnaire.Yes {
+			permissions = agentinit.ClaudePermissionsYes
+		}
 	}
 	requestedDirectory, err := filepath.Abs(*dir)
 	if err != nil {
@@ -679,7 +739,7 @@ func initCommandWithIO(
 		agentinit.Options{
 			Dir:                 *dir,
 			Agents:              selectedAgents,
-			BetaTest:            betaTest,
+			BetaTest:            *betaTest,
 			PointerInstructions: pointerInstructions,
 			DryRun:              *dryRun,
 			WriteMCPConfig:      *writeMCPConfig,
@@ -688,13 +748,6 @@ func initCommandWithIO(
 			RunnerModes:         canonicalModes,
 			ClaudePermissions:   permissions,
 			ShellPermission:     parsedShellPermission,
-			AskShellPermission: func(
-				offer agentinit.ShellPermission,
-				current bool,
-			) (agentinit.ShellPermission, error) {
-				return console.askShellPermission(singleOffer(string(offer), current))
-			},
-			Confirm: console.confirmClaudePermissions,
 		},
 	)
 	if err != nil {
@@ -708,22 +761,33 @@ func initCommandWithIO(
 	return writeInitResult(resultOutput, result, *dryRun, *writeMCPConfig, families)
 }
 
+// initRenderer shows the questions as one keyboard-driven form when input and
+// the diagnostic output are a terminal that can draw it, and as plain console
+// questions everywhere else, the way init has always asked them. The advice
+// names a terminal that shows the form when this one cannot.
+func initRenderer(input io.Reader, output io.Writer) (questionnaire.Renderer, string) {
+	inputFile, inputIsFile := input.(*os.File)
+	outputFile, outputIsFile := output.(*os.File)
+	if !inputIsFile || !outputIsFile {
+		return console.New(input, output), ""
+	}
+	support := form.Detect(inputFile, outputFile)
+	if support.Form {
+		return form.New(inputFile, outputFile, "just-mcp-work init"), ""
+	}
+	return console.New(input, output), support.Advice
+}
+
 func resolveInitInstructionsPointer(
 	flags *flag.FlagSet,
 	dir string,
 	requested bool,
 ) (string, bool, error) {
-	explicit := false
-	flags.Visit(func(visited *flag.Flag) {
-		if visited.Name == "instructions-pointer" {
-			explicit = true
-		}
-	})
 	scope, err := agentinit.ResolveScope(dir)
 	if err != nil {
 		return "", false, fmt.Errorf("resolve init scope: %w", err)
 	}
-	if explicit {
+	if flagWasSet(flags, "instructions-pointer") {
 		return scope, requested, nil
 	}
 	recorded, known, err := agentinit.ReadRecordedInstructionsPointer(scope)
@@ -734,6 +798,19 @@ func resolveInitInstructionsPointer(
 		return scope, recorded, nil
 	}
 	return scope, requested, nil
+}
+
+// flagWasSet reports whether the command line named the flag, so a flag whose
+// omission means "ask" or "keep the recorded choice" can tell omission from an
+// explicit value equal to its zero value.
+func flagWasSet(flags *flag.FlagSet, name string) bool {
+	set := false
+	flags.Visit(func(visited *flag.Flag) {
+		if visited.Name == name {
+			set = true
+		}
+	})
+	return set
 }
 
 func writeInitResult(
@@ -781,15 +858,10 @@ func writeInitResult(
 	return writeInitOutput(output, "%s", snippet)
 }
 
-type initConsole struct {
-	input  *bufio.Reader
-	output io.Writer
-}
-
 // parseInitAIFamilies reads the --ai value, which names as many families as the
 // workspace declares, separated the same way the console answer is.
 func parseInitAIFamilies(value string) (aiprofile.Selection, error) {
-	families, err := aiprofile.ParseSelection(splitAnswerTokens(value))
+	families, err := aiprofile.ParseSelection(console.SplitAnswerTokens(value))
 	if err != nil {
 		return nil, fmt.Errorf("parse AI families %q: %w", value, err)
 	}
@@ -802,185 +874,11 @@ func defaultAIFamilies() aiprofile.Selection {
 	return aiprofile.Selection{aiprofile.FamilyCodex, aiprofile.FamilyClaude}
 }
 
-func (c *initConsole) selectInstructionsTarget(
-	scope string,
-) (agentinit.InstructionsTarget, error) {
-	current, found, err := agentinit.ReadRecordedInstructionsTarget(scope)
-	if err != nil {
-		return "", fmt.Errorf("read current instructions target: %w", err)
-	}
-	offer := enumeratedOffer{values: []string{string(agentinit.InstructionsTargetWorkspace)}}
-	if found {
-		offer = enumeratedOffer{values: []string{string(current)}, current: true}
-	}
-	question := enumeratedQuestion{
-		introduction: "\nWhere should the managed agent-instruction block be written?\n",
-		choices: []enumeratedChoice{
-			{
-				value:       string(agentinit.InstructionsTargetProject),
-				description: "the instruction files of the directory --dir names",
-			},
-			{
-				value:       string(agentinit.InstructionsTargetWorkspace),
-				description: "the instruction files of the workspace scope root (today's behaviour)",
-			},
-			{
-				value:       string(agentinit.InstructionsTargetMachine),
-				description: "the machine-wide instruction files for claude, codex, and windsurf, outside this tree",
-			},
-		},
-		defaultValues:         []string{string(agentinit.InstructionsTargetWorkspace)},
-		promptLabel:           "Instructions target",
-		readDescription:       "instructions target",
-		unansweredDescription: "instructions target",
-		flagName:              "--instructions-target project|workspace|machine",
-		parse: func(value string) (string, bool) {
-			target, parseErr := agentinit.ParseInstructionsTarget(value)
-			return string(target), parseErr == nil
-		},
-		unsupported: func(value string) error {
-			return fmt.Errorf("unsupported instructions target %q", value)
-		},
-		unsupportedPrompt: func(value string) string {
-			return fmt.Sprintf(
-				"Unsupported instructions target %q; choose one of project, workspace, machine.\n",
-				value,
-			)
-		},
-	}
-	values, err := c.askEnumeratedChoice(question, offer)
-	if err != nil {
-		return "", err
-	}
-	return agentinit.InstructionsTarget(values[0]), nil
-}
-
-func (c *initConsole) selectAIFamilies(
-	scope string,
-	explicit string,
-) (aiprofile.Selection, error) {
-	if explicit != "" {
-		return parseInitAIFamilies(explicit)
-	}
-	current, found, err := agentinit.ReadRecordedAIFamilies(scope)
-	if errors.Is(err, agentinit.ErrUnrecognizedAIFamilies) {
-		// A recorded selection this binary cannot read, such as one written by
-		// an older release, is chosen again as in a new workspace. The refusal
-		// carries the manifest it came from and what is wrong with it, so the
-		// operator sees why the question offers the defaults.
-		if writeErr := writeInitOutput(
-			c.output,
-			"\nThe AI families recorded by an earlier init cannot be used; "+
-				"choose them again: %v\n",
-			err,
-		); writeErr != nil {
-			return nil, writeErr
-		}
-		found, err = false, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read current AI families: %w", err)
-	}
-	offer := enumeratedOffer{values: familyNames(defaultAIFamilies())}
-	if found {
-		offer = enumeratedOffer{values: familyNames(current), current: true}
-	}
-	return c.askAIFamilies(offer)
-}
-
 func writeInitOutput(output io.Writer, format string, arguments ...any) error {
 	if _, err := fmt.Fprintf(output, format, arguments...); err != nil {
 		return fmt.Errorf("write init output: %w", err)
 	}
 	return nil
-}
-
-func (c *initConsole) confirmLeaveBetaTest(scope string) error {
-	currentBetaTest, modeKnown, readErr := agentinit.ReadRecordedBetaTest(scope)
-	if readErr != nil {
-		return fmt.Errorf("read current beta-test mode: %w", readErr)
-	}
-	if modeKnown && !currentBetaTest {
-		return nil
-	}
-
-	question := "This workspace is participating in the JMW beta test. Thank you for volunteering " +
-		"to help improve JMW.\nLeave beta testing and continue with plain init? [y/N]: "
-	if !modeKnown {
-		question = "This workspace has a managed manifest, but its beta-test mode could not be read.\n" +
-			"Plain init may remove beta feedback guidance. Continue with plain init? [y/N]: "
-	}
-	if err := writeInitOutput(c.output, "%s", question); err != nil {
-		return err
-	}
-	answer, err := c.input.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("read leave-beta-test confirmation: %w", err)
-	}
-	trimmed := strings.TrimSpace(answer)
-	if errors.Is(err, io.EOF) && trimmed == "" {
-		if writeErr := writeInitOutput(
-			c.output,
-			"\nNo answer was given; the workspace is leaving beta testing. "+
-				"Re-run the same command with init-beta-test in place of init to keep it.\n",
-		); writeErr != nil {
-			return writeErr
-		}
-		return nil
-	}
-	if strings.EqualFold(trimmed, "y") || strings.EqualFold(trimmed, "yes") {
-		return nil
-	}
-	return fmt.Errorf(
-		"init stopped; re-run the same command with init-beta-test in place of init " +
-			"to keep this workspace in beta testing",
-	)
-}
-
-func (c *initConsole) currentRunnerModes(
-	scope string,
-	catalog *runner.Catalog,
-) (map[string]runner.Mode, error) {
-	data, found, err := policy.Read(scope)
-	if err != nil {
-		return nil, fmt.Errorf("read runner policy %s: %w", policy.Path(scope), err)
-	}
-	if !found {
-		return map[string]runner.Mode{}, nil
-	}
-	currentPolicy, err := policy.Parse(data)
-	if err != nil {
-		if writeErr := c.announcePolicyFallback(scope, err); writeErr != nil {
-			return nil, writeErr
-		}
-		return map[string]runner.Mode{}, nil
-	}
-	current, changed, err := currentModesForCatalog(catalog, currentPolicy.Selections)
-	if err != nil {
-		if writeErr := c.announcePolicyFallback(scope, err); writeErr != nil {
-			return nil, writeErr
-		}
-		return map[string]runner.Mode{}, nil
-	}
-	if changed {
-		if writeErr := writeInitOutput(
-			c.output,
-			"Registered runner set changed; keeping current modes for matching runners, "+
-				"using declared defaults for new runners, and dropping unregistered runners.\n",
-		); writeErr != nil {
-			return nil, writeErr
-		}
-	}
-	return current, nil
-}
-
-func (c *initConsole) announcePolicyFallback(scope string, policyErr error) error {
-	return writeInitOutput(
-		c.output,
-		"Existing runner policy %s could not be read; using declared defaults: %v\n",
-		policy.Path(scope),
-		policyErr,
-	)
 }
 
 func currentModesForCatalog(
@@ -1015,294 +913,6 @@ func currentModesForCatalog(
 	return current, changed, nil
 }
 
-func (c *initConsole) selectRunnerModes(
-	catalog *runner.Catalog,
-	overrides []runner.Selection,
-	currentModes map[string]runner.Mode,
-) (runner.ValidatedSelections, error) {
-	validated, err := catalog.CanonicalSelections(overrides)
-	if err != nil {
-		return runner.ValidatedSelections{}, fmt.Errorf(
-			"canonicalize runner mode overrides: %w",
-			err,
-		)
-	}
-	selections, err := validated.Selections()
-	if err != nil {
-		return runner.ValidatedSelections{}, fmt.Errorf("read canonical runner modes: %w", err)
-	}
-	overridden := make(map[string]struct{}, len(overrides))
-	for _, selection := range overrides {
-		overridden[selection.Name] = struct{}{}
-	}
-	for index, request := range catalog.PermissionRequests() {
-		if _, found := overridden[request.Name]; found {
-			continue
-		}
-		offer := singleOffer(string(request.Default), false)
-		if currentMode, found := currentModes[request.Name]; found {
-			offer = singleOffer(string(currentMode), true)
-		}
-		mode, askErr := c.askRunnerMode(request, offer)
-		if askErr != nil {
-			return runner.ValidatedSelections{}, askErr
-		}
-		selections[index].Mode = mode
-	}
-	canonical, err := catalog.CanonicalSelections(selections)
-	if err != nil {
-		return runner.ValidatedSelections{}, fmt.Errorf("canonicalize selected runner modes: %w", err)
-	}
-	return canonical, nil
-}
-
-type enumeratedChoice struct {
-	value       string
-	description string
-	warning     string
-}
-
-type enumeratedQuestion struct {
-	introduction          string
-	defaultValues         []string
-	promptLabel           string
-	readDescription       string
-	unansweredDescription string
-	flagName              string
-	parse                 func(string) (string, bool)
-	unsupported           func(string) error
-	unsupportedPrompt     func(string) string
-	choices               []enumeratedChoice
-	// multiple accepts several choices in one answer. A single-choice question
-	// refuses an answer that names more than one.
-	multiple bool
-}
-
-// enumeratedOffer is the answer proposed for an unanswered question: the
-// recorded choices when there are any, otherwise the question's default.
-type enumeratedOffer struct {
-	values  []string
-	current bool
-}
-
-func singleOffer(value string, current bool) enumeratedOffer {
-	return enumeratedOffer{values: []string{value}, current: current}
-}
-
-func (c *initConsole) askRunnerMode(
-	request runner.PermissionRequest,
-	offer enumeratedOffer,
-) (runner.Mode, error) {
-	review := "reviewed"
-	if !request.Reviewed {
-		review = "unreviewed"
-	}
-	choices := make([]enumeratedChoice, 0, len(request.Choices))
-	for _, choice := range request.Choices {
-		choices = append(choices, enumeratedChoice{
-			value:       string(choice.Mode),
-			description: choice.Label + ": " + choice.Description,
-			warning:     choice.Warning,
-		})
-	}
-	question := enumeratedQuestion{
-		introduction: fmt.Sprintf(
-			"\n%s runner (%s): %s\n%s\n",
-			request.Name,
-			review,
-			request.Question,
-			request.Context,
-		),
-		choices:               choices,
-		defaultValues:         []string{string(request.Default)},
-		promptLabel:           "Mode",
-		readDescription:       request.Name + " runner mode",
-		unansweredDescription: fmt.Sprintf("runner %q mode", request.Name),
-		flagName:              fmt.Sprintf("--runner-mode %s=<mode>", request.Name),
-		parse: func(value string) (string, bool) {
-			mode, found := findRequestedMode(request, value)
-			return string(mode), found
-		},
-		unsupported: func(value string) error {
-			return fmt.Errorf("unsupported mode %q for runner %q", value, request.Name)
-		},
-		unsupportedPrompt: func(value string) string {
-			return fmt.Sprintf(
-				"Unsupported mode %q; choose one of %s.\n",
-				value,
-				requestModeNames(request),
-			)
-		},
-	}
-	values, err := c.askEnumeratedChoice(question, offer)
-	if err != nil {
-		return "", err
-	}
-	return runner.Mode(values[0]), nil
-}
-
-func (c *initConsole) askEnumeratedChoice(
-	question enumeratedQuestion,
-	offer enumeratedOffer,
-) ([]string, error) {
-	if err := writeInitOutput(c.output, "%s", question.introduction); err != nil {
-		return nil, err
-	}
-	for index, choice := range question.choices {
-		// Only a question answered with several choices numbers them, because
-		// only its answer needs a short way to name more than one.
-		number, warningIndent := "", "    "
-		if question.multiple {
-			number, warningIndent = fmt.Sprintf("%d) ", index+1), "     "
-		}
-		if err := writeInitOutput(
-			c.output,
-			"  %s%s%s - %s\n",
-			number,
-			choice.value,
-			enumeratedChoiceLabel(choice.value, question.defaultValues, offer),
-			choice.description,
-		); err != nil {
-			return nil, err
-		}
-		if choice.warning != "" {
-			if err := writeInitOutput(
-				c.output,
-				"%sWARNING: %s\n",
-				warningIndent,
-				choice.warning,
-			); err != nil {
-				return nil, err
-			}
-		}
-	}
-	return c.readEnumeratedChoice(question, offer)
-}
-
-func enumeratedChoiceLabel(
-	value string,
-	defaults []string,
-	offer enumeratedOffer,
-) string {
-	labels := make([]string, 0, 2)
-	if offer.current && slices.Contains(offer.values, value) {
-		labels = append(labels, "current")
-	}
-	if slices.Contains(defaults, value) {
-		labels = append(labels, "default")
-	}
-	if len(labels) == 0 {
-		return ""
-	}
-	return " (" + strings.Join(labels, ", ") + ")"
-}
-
-func (c *initConsole) readEnumeratedChoice(
-	question enumeratedQuestion,
-	offer enumeratedOffer,
-) ([]string, error) {
-	source := "default"
-	if offer.current {
-		source = "current"
-	}
-	for {
-		if err := writeInitOutput(
-			c.output,
-			"%s [%s, %s]: ",
-			question.promptLabel,
-			strings.Join(offer.values, ","),
-			source,
-		); err != nil {
-			return nil, err
-		}
-		answer, err := c.input.ReadString('\n')
-		trimmed := strings.TrimSpace(answer)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return nil, fmt.Errorf("read %s: %w", question.readDescription, err)
-		}
-		if trimmed == "" {
-			if errors.Is(err, io.EOF) {
-				if writeErr := writeInitOutput(c.output, "\n"); writeErr != nil {
-					return nil, writeErr
-				}
-				return nil, fmt.Errorf(
-					"%s was unanswered at end of input; use %s for non-interactive init",
-					question.unansweredDescription,
-					question.flagName,
-				)
-			}
-			return offer.values, nil
-		}
-		values, prompt, answerErr := resolveEnumeratedAnswer(question, trimmed)
-		if answerErr == nil {
-			return values, nil
-		}
-		if errors.Is(err, io.EOF) {
-			return nil, answerErr
-		}
-		if writeErr := writeInitOutput(c.output, "%s", prompt); writeErr != nil {
-			return nil, writeErr
-		}
-	}
-}
-
-// resolveEnumeratedAnswer turns one typed answer into the values it names. It
-// returns the console prompt for a rejected answer beside the error carrying
-// the same rejection, so a closed console fails with the reason it would have
-// printed. A single-choice question reads the whole answer as one name, so only
-// a question answered with several choices splits it or accepts a number.
-func resolveEnumeratedAnswer(
-	question enumeratedQuestion,
-	answer string,
-) ([]string, string, error) {
-	if !question.multiple {
-		value, found := question.parse(answer)
-		if !found {
-			return nil, question.unsupportedPrompt(answer), question.unsupported(answer)
-		}
-		return []string{value}, "", nil
-	}
-	tokens := splitAnswerTokens(answer)
-	if len(tokens) == 0 {
-		return nil, question.unsupportedPrompt(answer), question.unsupported(answer)
-	}
-	values := make([]string, 0, len(tokens))
-	for _, token := range tokens {
-		value, found := resolveEnumeratedToken(question, token)
-		if !found {
-			return nil, question.unsupportedPrompt(token), question.unsupported(token)
-		}
-		if slices.Contains(values, value) {
-			return nil, fmt.Sprintf("%q is named twice.\n", value), fmt.Errorf(
-				"%q is named twice",
-				value,
-			)
-		}
-		values = append(values, value)
-	}
-	return values, "", nil
-}
-
-// resolveEnumeratedToken accepts either the number printed beside a choice or
-// the choice's own name, so an operator never has to retype a name to answer.
-func resolveEnumeratedToken(question enumeratedQuestion, token string) (string, bool) {
-	if index, err := strconv.Atoi(token); err == nil {
-		if index < 1 || index > len(question.choices) {
-			return "", false
-		}
-		return question.choices[index-1].value, true
-	}
-	return question.parse(token)
-}
-
-// splitAnswerTokens cuts an answer on everything a choice name cannot contain,
-// so numbers and names may be separated by commas, spaces, or both.
-func splitAnswerTokens(answer string) []string {
-	return strings.FieldsFunc(answer, func(char rune) bool {
-		return !unicode.IsLetter(char) && !unicode.IsDigit(char) && char != '-' && char != '_'
-	})
-}
-
 func findRequestedMode(request runner.PermissionRequest, value string) (runner.Mode, bool) {
 	for _, choice := range request.Choices {
 		if value == string(choice.Mode) {
@@ -1320,62 +930,6 @@ func requestModeNames(request runner.PermissionRequest) string {
 	return strings.Join(names, ", ")
 }
 
-func (c *initConsole) askAIFamilies(offer enumeratedOffer) (aiprofile.Selection, error) {
-	choices := make([]enumeratedChoice, 0, len(aiprofile.Declarable()))
-	for _, family := range aiprofile.Declarable() {
-		config, found := agentinit.AIFamilyConfig(family)
-		if !found {
-			return nil, fmt.Errorf("no generated configuration declares AI family %q", family)
-		}
-		choices = append(choices, enumeratedChoice{
-			value:       string(family),
-			description: "declare it in " + config,
-		})
-	}
-	question := enumeratedQuestion{
-		introduction: "\nWhich AI families should the managed just-mcp-work server declare?\n" +
-			"Each family is declared in the configuration its own client reads, so a " +
-			"workspace used by several of them names several; answer with the numbers " +
-			"or the names, in any order.\n" +
-			"This is recorded provenance and changes presentation only; runner and shell " +
-			"permissions stay unchanged.\n",
-		choices:               choices,
-		defaultValues:         familyNames(defaultAIFamilies()),
-		promptLabel:           "AI families",
-		readDescription:       "AI families",
-		unansweredDescription: "AI families",
-		flagName:              "--ai " + initAIFlagValues(),
-		multiple:              true,
-		parse: func(value string) (string, bool) {
-			if !slices.Contains(aiprofile.Declarable(), aiprofile.Family(value)) {
-				return "", false
-			}
-			return value, true
-		},
-		unsupported: func(value string) error {
-			return fmt.Errorf("unsupported AI family %q", value)
-		},
-		unsupportedPrompt: func(value string) string {
-			return fmt.Sprintf(
-				"Unsupported AI family %q; choose any of %s.\n",
-				value,
-				strings.Join(familyNames(aiprofile.Declarable()), ", "),
-			)
-		},
-	}
-	values, err := c.askEnumeratedChoice(question, offer)
-	if err != nil {
-		return nil, err
-	}
-	// The console already refused every answer this can reject, so a failure
-	// here is a disagreement between the question and the family set itself.
-	families, err := aiprofile.ParseSelection(values)
-	if err != nil {
-		return nil, fmt.Errorf("select AI families %v: %w", values, err)
-	}
-	return families, nil
-}
-
 func familyNames(families []aiprofile.Family) []string {
 	names := make([]string, 0, len(families))
 	for _, family := range families {
@@ -1389,104 +943,6 @@ func familyNames(families []aiprofile.Family) []string {
 func initAIFlagValues() string {
 	names := familyNames(aiprofile.Declarable())
 	return strings.Join(names, "|") + "|" + strings.Join(names, ",")
-}
-
-func (c *initConsole) askShellPermission(
-	offer enumeratedOffer,
-) (agentinit.ShellPermission, error) {
-	question := enumeratedQuestion{
-		introduction: "\nHow should the Claude permission lists and Codex approval modes " +
-			"handle the just-mcp-work shell tools?\n",
-		choices: []enumeratedChoice{
-			{
-				value:       string(agentinit.ShellPermissionAllow),
-				description: "use the Claude allow list and Codex approve mode",
-			},
-			{
-				value:       string(agentinit.ShellPermissionAsk),
-				description: "use the Claude ask list and Codex prompt mode",
-			},
-		},
-		defaultValues:         []string{string(agentinit.ShellPermissionAsk)},
-		promptLabel:           "Shell permission",
-		readDescription:       "shell permission",
-		unansweredDescription: "shell permission",
-		flagName:              "--shell-permission allow|ask",
-		parse: func(value string) (string, bool) {
-			permission, err := agentinit.ParseShellPermission(value)
-			return string(permission), err == nil
-		},
-		unsupported: func(value string) error {
-			return fmt.Errorf("unsupported shell permission %q", value)
-		},
-		unsupportedPrompt: func(value string) string {
-			return fmt.Sprintf(
-				"Unsupported shell permission %q; choose one of allow, ask.\n",
-				value,
-			)
-		},
-	}
-	values, err := c.askEnumeratedChoice(question, offer)
-	if err != nil {
-		return "", err
-	}
-	return agentinit.ShellPermission(values[0]), nil
-}
-
-// confirmClaudePermissions asks the operator on the same buffered console used
-// for runner choices. Declining, an empty answer, or a closed console without an
-// answer removes this server's managed permission entries and does not add them
-// back; when nothing else was left in the settings file, the file itself is
-// removed. A read failure that is not a plain end of input aborts instead.
-func (c *initConsole) confirmClaudePermissions(
-	shellPermission agentinit.ShellPermission,
-	path string,
-	_ string,
-) (bool, error) {
-	managed, err := agentinit.ClaudeManagedTools(shellPermission)
-	if err != nil {
-		return false, fmt.Errorf("resolve managed Claude tools: %w", err)
-	}
-	managedLists := "  allow: " + strings.Join(managed.Allow, ", ") + "\n"
-	if len(managed.Ask) > 0 {
-		managedLists += "  ask:   " + strings.Join(managed.Ask, ", ") + "\n"
-	}
-	if writeErr := writeInitOutput(
-		c.output,
-		"\n%s: apply the managed just-mcp-work tool permissions?\n"+
-			"%s"+
-			"Existing %s* entries are removed first; declining or leaving this empty\n"+
-			"removes them, deleting the file if nothing else remains in it.\n"+
-			"Apply? [y/N]: ",
-		path,
-		managedLists,
-		agentinit.ClaudeToolPrefix,
-	); writeErr != nil {
-		return false, writeErr
-	}
-	answer, err := c.input.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return false, fmt.Errorf("read claude permissions confirmation for %s: %w", path, err)
-	}
-	trimmed := strings.TrimSpace(answer)
-	if trimmed == "" {
-		if writeErr := writeInitOutput(
-			c.output,
-			"\nNo answer; the managed entries are not applied, and any existing ones "+
-				"are removed, including the file itself if nothing else was left in it. "+
-				"Use --claude-permissions=yes to apply them, or --claude-permissions=no "+
-				"to skip this prompt and remove them.\n",
-		); writeErr != nil {
-			return false, writeErr
-		}
-		return false, nil
-	}
-	switch strings.ToLower(trimmed) {
-	case "y", "yes":
-		return true, nil
-	default:
-		return false, nil
-	}
 }
 
 func printUsage(output io.Writer) error {
@@ -1505,12 +961,6 @@ func printUsage(output io.Writer) error {
 	if _, err := fmt.Fprintln(
 		output,
 		"  init            Add managed task-server instructions for coding agents",
-	); err != nil {
-		return fmt.Errorf("write usage: %w", err)
-	}
-	if _, err := fmt.Fprintln(
-		output,
-		"  init-beta-test  Add managed instructions with JMW beta feedback guidance",
 	); err != nil {
 		return fmt.Errorf("write usage: %w", err)
 	}

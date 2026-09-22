@@ -470,8 +470,6 @@ type plannedEdit struct {
 // Apply makes the current invocation authoritative for every workspace-local
 // surface owned by JMW. All paths and contents are planned before the first
 // write, so a malformed later target cannot leave an earlier one updated.
-//
-//nolint:gocyclo // Keep the ordered transaction preflight and policy-last write visible together.
 func Apply(options Options) (Result, error) {
 	instructionsTarget, err := ParseInstructionsTarget(string(options.InstructionsTarget))
 	if err != nil {
@@ -490,10 +488,7 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if len(options.Agents) == 0 {
-		options.Agents = []string{"claude", "codex", "cursor"}
-	}
-	agents := unique(options.Agents)
+	agents := SelectedAgents(options.Agents)
 	selected := make(map[string]struct{}, len(agents))
 	for _, agent := range agents {
 		if _, ok := agentTarget(agent); !ok {
@@ -569,7 +564,7 @@ func resolveShellPermission(
 	agents []string,
 	options Options,
 ) (ShellPermission, error) {
-	if !plansShellPermission(agents, options.ClaudePermissions, options.WriteMCPConfig) {
+	if !PlansShellPermission(agents, options.ClaudePermissions, options.WriteMCPConfig) {
 		return options.ShellPermission, nil
 	}
 	shellPermission := options.ShellPermission
@@ -579,21 +574,11 @@ func resolveShellPermission(
 				"Options.AskShellPermission is required when Options.ShellPermission is unset",
 			)
 		}
-		offer := ShellPermissionAsk
-		current, found, readErr := ReadRecordedShellPermission(scope)
-		if readErr != nil {
-			return "", fmt.Errorf("read recorded shell permission: %w", readErr)
+		offer, current, offerErr := OfferShellPermission(scope, agents)
+		if offerErr != nil {
+			return "", offerErr
 		}
-		if !found && slices.Contains(agents, "claude") {
-			current, found, readErr = CurrentShellPermission(scope)
-			if readErr != nil {
-				return "", fmt.Errorf("read current shell permission: %w", readErr)
-			}
-		}
-		if found {
-			offer = current
-		}
-		selectedPermission, askErr := options.AskShellPermission(offer, found)
+		selectedPermission, askErr := options.AskShellPermission(offer, current)
 		if askErr != nil {
 			return "", fmt.Errorf("ask shell permission: %w", askErr)
 		}
@@ -606,8 +591,39 @@ func resolveShellPermission(
 	return parsedPermission, nil
 }
 
-// plansShellPermission reports whether Apply will plan a permission surface.
-func plansShellPermission(
+// OfferShellPermission returns the shell permission to propose when none is
+// given: the one the manifest recorded, otherwise, when claude is among the
+// agents, the one its settings express, otherwise ask. The flag reports
+// whether the offer is a current choice rather than the default.
+func OfferShellPermission(scope string, agents []string) (ShellPermission, bool, error) {
+	current, found, err := ReadRecordedShellPermission(scope)
+	if err != nil {
+		return "", false, fmt.Errorf("read recorded shell permission: %w", err)
+	}
+	if !found && slices.Contains(agents, "claude") {
+		current, found, err = CurrentShellPermission(scope)
+		if err != nil {
+			return "", false, fmt.Errorf("read current shell permission: %w", err)
+		}
+	}
+	if !found {
+		return ShellPermissionAsk, false, nil
+	}
+	return current, true, nil
+}
+
+// SelectedAgents returns the agents Apply writes for: the named ones trimmed,
+// lower-cased, deduplicated, and sorted, or claude, codex, and cursor when
+// none are named. A caller deciding what Apply will plan uses the same list.
+func SelectedAgents(agents []string) []string {
+	if len(agents) == 0 {
+		agents = []string{"claude", "codex", "cursor"}
+	}
+	return unique(agents)
+}
+
+// PlansShellPermission reports whether Apply will plan a permission surface.
+func PlansShellPermission(
 	agents []string,
 	permissions ClaudePermissions,
 	writeMCPConfig bool,
@@ -988,7 +1004,7 @@ func planCodexConfig(scope string, options Options) (*plannedEdit, *manifestSurf
 // planClaudeSettings plans the Claude permission lists of a selected claude
 // agent. Its caller decides whether the agent is selected at all.
 func planClaudeSettings(scope string, options Options) (*plannedEdit, *manifestSurface, error) {
-	path, err := findClaudeSettings(scope)
+	path, err := ClaudeSettingsPath(scope)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1342,7 +1358,10 @@ func findCodexConfig(scope string) (string, error) {
 	)
 }
 
-func findClaudeSettings(scope string) (string, error) {
+// ClaudeSettingsPath returns the workspace Claude settings file init manages,
+// resolved the way Apply resolves it, so a question about it names the file
+// Apply writes.
+func ClaudeSettingsPath(scope string) (string, error) {
 	return findScopedConfig(
 		scope,
 		scopedConfig{relative: claudeSettings, name: "Claude settings", lower: "claude settings"},
@@ -1355,7 +1374,7 @@ func findClaudeSettings(scope string) (string, error) {
 // settings, but when present it must agree with them; partial, split, or
 // contradictory placements are unrecorded.
 func CurrentShellPermission(scope string) (ShellPermission, bool, error) {
-	path, err := findClaudeSettings(scope)
+	path, err := ClaudeSettingsPath(scope)
 	if err != nil {
 		return "", false, err
 	}

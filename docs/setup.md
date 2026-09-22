@@ -6,16 +6,29 @@
 just-mcp-work init
 ```
 
-or, in a workspace beta-testing JMW:
-
-```console
-just-mcp-work init-beta-test
-```
-
 It writes the managed instruction block for the selected agents, the MCP
 configuration their clients read, the runner policy, and the generated agent
 guide. Every question below has a flag that answers it in a scripted run;
 `init --help` and `serve --help` list the agent targets and the server options.
+
+## How `init` asks
+
+When both standard input and standard error are a terminal with cursor control,
+`init` shows every question at once as one form: the arrow keys move and change
+answers, the space bar toggles, `?` lists every choice of the focused question,
+and nothing is written until the `Apply` row is confirmed; `q` or `Esc` closes
+the form without writing. Each answer starts as the recorded or default one, so
+pressing Enter through the form answers what an empty answer to each question
+would. After the form closes, the chosen answers stay in the terminal as plain
+lines.
+
+Anywhere else `init` asks the same questions one at a time as text, answered
+by typing: when input is piped or redirected, in a terminal that reports
+`TERM=dumb`, in the classic Windows console window, and in Git Bash's mintty.
+In the last three it first names a terminal that shows the form - Windows
+Terminal on Windows. On Windows the form runs in a terminal that hosts the
+console through a pseudo console, such as Windows Terminal or the VS Code
+terminal.
 
 ## Where the instruction block goes
 
@@ -156,17 +169,23 @@ instruction files whose bytes do not depend on the shell permission.
 
 ## Beta-test mode
 
-Use `init-beta-test` for a workspace beta-testing JMW. It does everything
-`init` does and records beta-test mode, so the selected agents and every client
+`init` asks whether the workspace takes part in the JMW beta test; pass
+`--beta-test` or `--beta-test=false` to answer it in a scripted run. Taking
+part records beta-test mode, so the selected agents and every client
 connecting to the JMW server receive beta feedback guidance. With
 `--instructions-pointer`, the instruction files carry the opening sentence of
 that guidance as a pointer to the server's instructions rather than its full
 text.
 
-In such a workspace, use `init-beta-test` again to stay in beta mode; plain
-`init` asks before it removes beta feedback guidance and leaves beta testing.
-Reaching end of input answers that question as yes, so plain `init` continues
-to its preflight and leaves the beta test when that preflight succeeds.
+A later `init` offers the recorded answer, so accepting it keeps the workspace
+in or out of the beta test, and answering the other way changes it. `init`
+reads every recorded answer before its first question, so a manifest that
+cannot be read - malformed, or of an unsupported schema - stops it there
+unless `--ai` answers the AI families; with `--ai`, the beta question says the
+recorded mode cannot be used and offers `no`, and a malformed manifest is
+still refused when `init` plans its writes. Input that ends before the question
+is answered stops `init` before it writes. The separate `init-beta-test`
+command of earlier releases is gone; `init --beta-test` replaces it.
 
 ## After an update
 

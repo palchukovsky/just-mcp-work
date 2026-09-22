@@ -111,6 +111,7 @@ def smoke(_: argparse.Namespace) -> None:
             [
                 str(binary), "init",
                 "--dir", str(root),
+                "--beta-test=false",
                 "--agents", "claude",
                 "--claude-permissions", "no",
                 "--runner-mode", "just=all",

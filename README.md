@@ -72,15 +72,16 @@ Run this once in the workspace:
 just-mcp-work init
 ```
 
-It asks where the managed instruction block goes and for which agents, what
-mode each runner gets, which AI families to declare, and whether the shell
-tools may run without a client confirmation. Then it writes those surfaces, the
-runner policy, and the generated agent guide. Every question has a flag for a
-scripted run; `init --help` lists them.
+It asks whether the workspace takes part in the JMW beta test, where the
+managed instruction block goes, what mode each runner gets, which AI families
+to declare, and whether the shell tools may run without a client confirmation.
+Then it writes those surfaces, the runner policy, and the generated agent
+guide. A terminal that can draw it shows the questions as one keyboard-driven
+form; anywhere else they come one at a time as text. Every question has a flag
+for a scripted run; `init --help` lists them.
 
 [Set up a workspace](docs/setup.md) covers the questions, the files `init`
-owns, and when a later release asks you to run it again. In a workspace
-beta-testing JMW, use `init-beta-test` instead.
+owns, and when a later release asks you to run it again.
 
 Your MCP client starts `serve` from the configuration `init` wrote:
 

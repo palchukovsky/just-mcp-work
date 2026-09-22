@@ -5,7 +5,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -26,6 +25,8 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/palchukovsky/just-mcp-work/internal/agentinit"
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
+	"github.com/palchukovsky/just-mcp-work/internal/questionnaire"
+	"github.com/palchukovsky/just-mcp-work/internal/questionnaire/console"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
@@ -43,7 +44,7 @@ func TestRunPrintsVersionWithFlagAlias(t *testing.T) {
 }
 
 func TestHelpFlagsReturnSuccess(t *testing.T) {
-	for _, command := range []string{"init", "init-beta-test", "serve"} {
+	for _, command := range []string{"init", "serve"} {
 		if runErr := run([]string{command, "--help"}); runErr != nil {
 			t.Errorf("%s --help: %v", command, runErr)
 		}
@@ -55,7 +56,6 @@ func TestPrintUsageAndRunHelpReturnSuccess(t *testing.T) {
 		"\nCommands:\n" +
 		"  serve           Start the local STDIO MCP server\n" +
 		"  init            Add managed task-server instructions for coding agents\n" +
-		"  init-beta-test  Add managed instructions with JMW beta feedback guidance\n" +
 		"  version         Print version and commit\n"
 
 	var output bytes.Buffer
@@ -88,6 +88,31 @@ func TestPrintUsageAndRunHelpReturnSuccess(t *testing.T) {
 
 type erroringWriter struct {
 	err error
+}
+
+// initWithBetaTest runs init with the beta-test question answered by its flag,
+// so a test that is not about that question answers it the way the command it
+// was written for did.
+func initWithBetaTest(
+	betaTest bool,
+	args []string,
+	input io.Reader,
+	resultOutput io.Writer,
+	diagnosticOutput io.Writer,
+) error {
+	return initCommandWithIO(
+		append([]string{fmt.Sprintf("--beta-test=%t", betaTest)}, args...),
+		input,
+		resultOutput,
+		diagnosticOutput,
+	)
+}
+
+func TestRunRejectsRemovedInitBetaTestCommand(t *testing.T) {
+	err := run([]string{"init-beta-test"})
+	if err == nil || err.Error() != `unknown command "init-beta-test"` {
+		t.Fatalf("run(init-beta-test) error = %v, want unknown command", err)
+	}
 }
 
 func defaultRunnerInput() *strings.Reader {
@@ -127,7 +152,7 @@ func initArgsWithClaudeShellQuestion(dir string) []string {
 
 func initializeWorkspaceMode(t *testing.T, dir string, betaTest bool) {
 	t.Helper()
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		betaTest,
 		initArgsWithoutQuestions(dir),
 		strings.NewReader(""),
@@ -476,7 +501,7 @@ func removeAgentGuideSurface(t *testing.T, root string) {
 
 func TestInitWritesMCPConfigByDefault(t *testing.T) {
 	dir := t.TempDir()
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
@@ -500,7 +525,7 @@ func TestInitOffersBothAIFamiliesByDefault(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		initArgsWithRunnerModesWithoutAI(dir),
 		strings.NewReader("\n"),
@@ -548,7 +573,7 @@ func TestInitExplicitAIFamiliesWriteManagedArguments(t *testing.T) {
 		"--ai", "codex,claude",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader(""),
@@ -590,7 +615,7 @@ func TestInitAcceptsAIFamilyNumbersOnTheConsole(t *testing.T) {
 		"--shell-permission", "ask",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("2\n"),
@@ -626,7 +651,7 @@ func TestInitRepeatsAIFamilyQuestionUntilTheAnswerIsUsable(t *testing.T) {
 		"--shell-permission", "ask",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("9\ncodex,codex\n2 1\n"),
@@ -662,7 +687,7 @@ func TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized(t *testin
 		"--write-mcp-config=true",
 		"--shell-permission", "ask",
 	)
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		append(slices.Clone(args), "--ai", "claude"),
 		strings.NewReader(""),
@@ -691,7 +716,7 @@ func TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized(t *testin
 	}
 
 	var diagnostics bytes.Buffer
-	if err = initCommandWithIO(
+	if err = initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("\n"),
@@ -732,13 +757,13 @@ func TestInitRunnerQuestionTakesAModeNameOnly(t *testing.T) {
 	}
 	firstMode := string(request.Choices[0].Mode)
 	secondMode := string(request.Choices[1].Mode)
+	question := runnerModeQuestion(request, request.Default, false)
 
 	var closedOutput bytes.Buffer
-	closedConsole := initConsole{
-		input:  bufio.NewReader(strings.NewReader("1")),
-		output: &closedOutput,
-	}
-	_, err = closedConsole.askRunnerMode(request, singleOffer(string(request.Default), false))
+	_, err = console.New(strings.NewReader("1"), &closedOutput).Ask(
+		context.Background(),
+		[]questionnaire.Question{question},
+	)
 	if err == nil || !strings.Contains(err.Error(), `unsupported mode "1"`) {
 		t.Fatalf("numbered runner answer error = %v, want an unsupported mode", err)
 	}
@@ -747,18 +772,15 @@ func TestInitRunnerQuestionTakesAModeNameOnly(t *testing.T) {
 	}
 
 	var output bytes.Buffer
-	console := initConsole{
-		input: bufio.NewReader(
-			strings.NewReader(firstMode + "," + secondMode + "\n" + secondMode + "\n"),
-		),
-		output: &output,
-	}
-	mode, err := console.askRunnerMode(request, singleOffer(string(request.Default), false))
+	answers, err := console.New(
+		strings.NewReader(firstMode+","+secondMode+"\n"+secondMode+"\n"),
+		&output,
+	).Ask(context.Background(), []questionnaire.Question{question})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode != request.Choices[1].Mode {
-		t.Fatalf("mode after a refused answer = %q, want %q", mode, request.Choices[1].Mode)
+	if mode := answers[question.ID][0]; mode != secondMode {
+		t.Fatalf("mode after a refused answer = %q, want %q", mode, secondMode)
 	}
 	wantPrompt := fmt.Sprintf("Unsupported mode %q", firstMode+","+secondMode)
 	if !strings.Contains(output.String(), wantPrompt) {
@@ -806,7 +828,7 @@ func TestInitOffersRecordedAIFamiliesAsCurrent(t *testing.T) {
 		"--shell-permission", "ask",
 		"--ai", "claude",
 	)
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		firstArgs,
 		strings.NewReader(""),
@@ -822,7 +844,7 @@ func TestInitOffersRecordedAIFamiliesAsCurrent(t *testing.T) {
 		"--shell-permission", "ask",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		secondArgs,
 		strings.NewReader("\n"),
@@ -865,7 +887,7 @@ func TestInitRejectsUnusableAIFamiliesBeforeWriting(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
-			err := initCommandWithIO(
+			err := initWithBetaTest(
 				false,
 				[]string{
 					"--dir", dir,
@@ -902,7 +924,7 @@ func TestInitExplicitAIFamiliesRefuseAnUnreadableManifest(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := append(initArgsWithRunnerModesWithoutAI(dir), "--ai", "claude")
-	err := initCommandWithIO(false, args, strings.NewReader(""), io.Discard, io.Discard)
+	err := initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "decode managed manifest") {
 		t.Fatalf("init over an unreadable manifest error = %v, want a decode refusal", err)
 	}
@@ -958,7 +980,7 @@ func TestInitSnippetPinsSelectedLinkedWorktreeWhenCWDIsDifferent(t *testing.T) {
 	t.Chdir(callerDir)
 
 	var output bytes.Buffer
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", selectedDir,
@@ -995,7 +1017,7 @@ func TestInitSnippetPinsSelectedLinkedWorktreeWhenCWDIsDifferent(t *testing.T) {
 func TestInitQuestionsUseDefaultsAndPersistCanonicalSelections(t *testing.T) {
 	dir := t.TempDir()
 	var output bytes.Buffer
-	err := initCommandWithIO(
+	err := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
@@ -1039,7 +1061,7 @@ func TestInitQuestionsUseDefaultsAndPersistCanonicalSelections(t *testing.T) {
 func TestInitRunnerOverrideSkipsQuestionAndCanDisable(t *testing.T) {
 	dir := t.TempDir()
 	var output bytes.Buffer
-	err := initCommandWithIO(
+	err := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", dir,
@@ -1074,7 +1096,7 @@ func TestInitRunnerQuestionRepromptsAndSharesInputWithClaudeConfirmation(t *test
 	// silently lowercased. The remaining lines answer the repeated Just
 	// question, the other runner questions, and the Claude confirmation.
 	input := strings.NewReader("\nsafe\nall\nsafe\nall\nall\nSAFE\nsafe\nall\n\ny\n")
-	err := initCommandWithIO(
+	err := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", dir,
@@ -1103,7 +1125,7 @@ func TestInitEOFRejectsUnansweredRunnerQuestion(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
-	err := initCommandWithIO(
+	err := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", dir,
@@ -1136,7 +1158,7 @@ func TestInitEOFRejectsUnansweredRunnerQuestion(t *testing.T) {
 
 func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 	dir := t.TempDir()
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
@@ -1152,7 +1174,7 @@ func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 	}
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
-	err = initCommandWithIO(
+	err = initWithBetaTest(
 		false,
 		[]string{
 			"--dir", dir,
@@ -1183,7 +1205,7 @@ func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 func TestInitDryRunReportsPolicyWithoutWritingIt(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "codex", "--dry-run"},
 		defaultRunnerInput(),
@@ -1224,7 +1246,7 @@ func TestInitOffersExistingRunnerModesAsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var diagnostics bytes.Buffer
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
@@ -1252,7 +1274,7 @@ func TestInitReplacesMalformedPolicyAndAnnouncesDefaultFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	var diagnostics bytes.Buffer
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
@@ -1281,7 +1303,7 @@ func TestInitReconcilesChangedRunnerSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	var diagnostics bytes.Buffer
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "codex"},
 		defaultRunnerInput(),
@@ -1334,7 +1356,7 @@ func TestInitRejectsPolicySymlinkWithoutExposingTarget(t *testing.T) {
 			}
 			var result bytes.Buffer
 			var diagnostics bytes.Buffer
-			err := initCommandWithIO(false, args, defaultRunnerInput(), &result, &diagnostics)
+			err := initWithBetaTest(false, args, defaultRunnerInput(), &result, &diagnostics)
 			if err == nil || !strings.Contains(err.Error(), path) ||
 				!strings.Contains(err.Error(), "symbolic link") {
 				t.Fatalf("init error = %v, want policy path and symbolic-link type", err)
@@ -1347,12 +1369,12 @@ func TestInitRejectsPolicySymlinkWithoutExposingTarget(t *testing.T) {
 	}
 }
 
-func TestInitBetaTestCommandUsesInitFlagsAndOwnName(t *testing.T) {
+func TestInitBetaTestFlagWritesBetaParagraphAndAppearsInHelp(t *testing.T) {
 	dir := t.TempDir()
 	if err := initCommandWithIO(
-		true,
 		[]string{
 			"--dir", dir,
+			"--beta-test",
 			"--agents", "codex",
 			"--write-mcp-config=false",
 			"--runner-mode", "go=safe",
@@ -1368,19 +1390,18 @@ func TestInitBetaTestCommandUsesInitFlagsAndOwnName(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(data), "This workspace beta-tests just-mcp-work (JMW) itself.") {
-		t.Fatal("init-beta-test did not write the beta paragraph")
+		t.Fatal("init --beta-test did not write the beta paragraph")
 	}
 
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
 	err = initCommandWithIO(
-		true,
-		[]string{"unexpected"},
+		[]string{"--beta-test", "unexpected"},
 		defaultRunnerInput(),
 		&result,
 		&diagnostics,
 	)
-	if err == nil || !strings.Contains(err.Error(), "init-beta-test accepts no positional arguments") {
+	if err == nil || !strings.Contains(err.Error(), "init accepts no positional arguments") {
 		t.Fatalf("positional error = %v", err)
 	}
 	if result.Len() != 0 || diagnostics.Len() != 0 {
@@ -1388,13 +1409,13 @@ func TestInitBetaTestCommandUsesInitFlagsAndOwnName(t *testing.T) {
 	}
 
 	err = initCommandWithIO(
-		true,
 		[]string{"--help"},
 		defaultRunnerInput(),
 		&result,
 		&diagnostics,
 	)
-	if err != nil || !strings.Contains(diagnostics.String(), "Usage: just-mcp-work init-beta-test") {
+	if err != nil || !strings.Contains(diagnostics.String(), "[--beta-test[=true|false]]") ||
+		!strings.Contains(diagnostics.String(), "-beta-test") {
 		t.Fatalf("help error = %v, output = %q", err, diagnostics.String())
 	}
 }
@@ -1403,7 +1424,7 @@ func TestInitInstructionsPointerFlagWritesOnlyThePointer(t *testing.T) {
 	for _, betaTest := range []bool{false, true} {
 		t.Run(fmt.Sprintf("beta=%t", betaTest), func(t *testing.T) {
 			dir := t.TempDir()
-			if err := initCommandWithIO(
+			if err := initWithBetaTest(
 				betaTest,
 				[]string{
 					"--dir", dir,
@@ -1435,26 +1456,21 @@ func TestInitInstructionsPointerFlagWritesOnlyThePointer(t *testing.T) {
 	}
 }
 
-func TestInitInstructionsPointerFlagAppearsInBothHelpForms(t *testing.T) {
-	for _, betaTest := range []bool{false, true} {
-		t.Run(fmt.Sprintf("beta=%t", betaTest), func(t *testing.T) {
-			var diagnostics bytes.Buffer
-			if err := initCommandWithIO(
-				betaTest,
-				[]string{"--help"},
-				strings.NewReader(""),
-				io.Discard,
-				&diagnostics,
-			); err != nil {
-				t.Fatal(err)
-			}
-			output := diagnostics.String()
-			if !strings.Contains(output, "[--instructions-pointer]") ||
-				!strings.Contains(output, "-instructions-pointer") ||
-				!strings.Contains(output, "as a pointer to the server's instructions") {
-				t.Fatalf("init help omits --instructions-pointer:\n%s", output)
-			}
-		})
+func TestInitInstructionsPointerFlagAppearsInHelp(t *testing.T) {
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		[]string{"--help"},
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	output := diagnostics.String()
+	if !strings.Contains(output, "[--instructions-pointer]") ||
+		!strings.Contains(output, "-instructions-pointer") ||
+		!strings.Contains(output, "as a pointer to the server's instructions") {
+		t.Fatalf("init help omits --instructions-pointer:\n%s", output)
 	}
 }
 
@@ -1498,7 +1514,7 @@ func TestInitInstructionsPointerUsesExplicitOrRecordedChoice(t *testing.T) {
 					"--shell-permission=ask",
 					fmt.Sprintf("--instructions-pointer=%t", testCase.recorded),
 				)
-				if err := initCommandWithIO(
+				if err := initWithBetaTest(
 					false,
 					initialArgs,
 					strings.NewReader(""),
@@ -1520,7 +1536,7 @@ func TestInitInstructionsPointerUsesExplicitOrRecordedChoice(t *testing.T) {
 			if testCase.explicit != "" {
 				args = append(args, testCase.explicit)
 			}
-			if err := initCommandWithIO(
+			if err := initWithBetaTest(
 				false,
 				args,
 				strings.NewReader(""),
@@ -1534,34 +1550,89 @@ func TestInitInstructionsPointerUsesExplicitOrRecordedChoice(t *testing.T) {
 	}
 }
 
-func TestInitLeavesRecordedBetaWorkspaceWhenConfirmed(t *testing.T) {
+func TestInitBetaTestQuestionOffersRecordedMode(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		input    string
+		prompt   string
+		recorded bool
+		want     bool
+	}{
+		{
+			name:     "beta kept by default",
+			recorded: true,
+			input:    "\n",
+			prompt:   "Beta test [yes, current]:",
+			want:     true,
+		},
+		{
+			name:     "beta left on no",
+			recorded: true,
+			input:    "no\n",
+			prompt:   "Beta test [yes, current]:",
+			want:     false,
+		},
+		{
+			name:     "plain kept by default",
+			recorded: false,
+			input:    "\n",
+			prompt:   "Beta test [no, current]:",
+			want:     false,
+		},
+		{
+			name:     "plain joins on y",
+			recorded: false,
+			input:    "y\n",
+			prompt:   "Beta test [no, current]:",
+			want:     true,
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			initializeWorkspaceMode(t, dir, testCase.recorded)
+			var diagnostics bytes.Buffer
+			if err := initCommandWithIO(
+				initArgsWithoutQuestions(dir),
+				strings.NewReader(testCase.input),
+				io.Discard,
+				&diagnostics,
+			); err != nil {
+				t.Fatal(err)
+			}
+			for _, want := range []string{
+				"Should this workspace take part in the JMW beta test?",
+				testCase.prompt,
+			} {
+				if !strings.Contains(diagnostics.String(), want) {
+					t.Fatalf("beta-test question does not contain %q: %q", want, diagnostics.String())
+				}
+			}
+			assertWorkspaceBetaTest(t, dir, testCase.want)
+		})
+	}
+}
+
+func TestInitBetaTestQuestionOffersPlainInNewWorkspace(t *testing.T) {
 	dir := t.TempDir()
-	initializeWorkspaceMode(t, dir, true)
 	var diagnostics bytes.Buffer
 	if err := initCommandWithIO(
-		false,
 		initArgsWithoutQuestions(dir),
-		strings.NewReader("yes\n"),
+		strings.NewReader("\n"),
 		io.Discard,
 		&diagnostics,
 	); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"Thank you for volunteering to help improve JMW.",
-		"Leave beta testing and continue with plain init?",
-	} {
-		if !strings.Contains(diagnostics.String(), want) {
-			t.Fatalf("leave-beta-test question does not contain %q: %q", want, diagnostics.String())
-		}
+	if !strings.Contains(diagnostics.String(), "Beta test [no, default]:") {
+		t.Fatalf("new workspace beta-test offer = %q, want the plain default", diagnostics.String())
 	}
 	assertWorkspaceBetaTest(t, dir, false)
 }
 
-func TestInitAsksWhenRecordedBetaModeCannotBeRead(t *testing.T) {
+func TestInitAsksAgainWhenRecordedBetaModeCannotBeRead(t *testing.T) {
 	// A manifest of a schema this binary does not support still decodes, so init
-	// asks and continues. A malformed one does not, and the question is followed
-	// by the refusal to plan from a document that cannot be read.
+	// asks again and continues. A malformed one does not, and the question is
+	// followed by the refusal to plan from a document that cannot be read.
 	for _, name := range []string{"malformed", "unsupported schema"} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -1590,15 +1661,14 @@ func TestInitAsksWhenRecordedBetaModeCannotBeRead(t *testing.T) {
 
 			var diagnostics bytes.Buffer
 			initErr := initCommandWithIO(
-				false,
 				initArgsWithoutQuestions(dir),
-				strings.NewReader("yes\n"),
+				strings.NewReader("\n"),
 				io.Discard,
 				&diagnostics,
 			)
 			for _, want := range []string{
-				"beta-test mode could not be read",
-				"Plain init may remove beta feedback guidance.",
+				"The beta-test mode recorded by an earlier init cannot be used; choose it again",
+				"Beta test [no, default]:",
 			} {
 				if !strings.Contains(diagnostics.String(), want) {
 					t.Fatalf("unknown-mode question does not contain %q: %q", want, diagnostics.String())
@@ -1619,7 +1689,7 @@ func TestInitAsksWhenRecordedBetaModeCannotBeRead(t *testing.T) {
 	}
 }
 
-func TestInitKeepsRecordedBetaWorkspaceWhenDeclined(t *testing.T) {
+func TestInitStopsWhenBetaTestIsUnansweredAtEndOfInput(t *testing.T) {
 	dir := t.TempDir()
 	initializeWorkspaceMode(t, dir, true)
 	paths := []string{
@@ -1637,15 +1707,14 @@ func TestInitKeepsRecordedBetaWorkspaceWhenDeclined(t *testing.T) {
 	}
 
 	err := initCommandWithIO(
-		false,
 		initArgsWithoutQuestions(dir),
-		strings.NewReader("no\n"),
+		strings.NewReader(""),
 		io.Discard,
 		io.Discard,
 	)
-	const wantGuidance = "re-run the same command with init-beta-test in place of init"
-	if err == nil || !strings.Contains(err.Error(), wantGuidance) {
-		t.Fatalf("declined leave-beta-test error = %v, want %q", err, wantGuidance)
+	const want = "beta test was unanswered at end of input; use --beta-test=true|false"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Fatalf("unanswered beta-test error = %v, want %q", err, want)
 	}
 	for path, want := range before {
 		got, readErr := os.ReadFile(path)
@@ -1653,42 +1722,17 @@ func TestInitKeepsRecordedBetaWorkspaceWhenDeclined(t *testing.T) {
 			t.Fatal(readErr)
 		}
 		if !bytes.Equal(got, want) {
-			t.Fatalf("declined leave-beta-test confirmation changed %s", path)
+			t.Fatalf("unanswered beta-test question changed %s", path)
 		}
 	}
 }
 
-func TestInitLeavesRecordedBetaWorkspaceAtEndOfInput(t *testing.T) {
-	dir := t.TempDir()
-	initializeWorkspaceMode(t, dir, true)
-	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
-		false,
-		initArgsWithoutQuestions(dir),
-		strings.NewReader(""),
-		io.Discard,
-		&diagnostics,
-	); err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{
-		"No answer was given",
-		"the workspace is leaving beta testing",
-		"same command with init-beta-test in place of init",
-	} {
-		if !strings.Contains(diagnostics.String(), want) {
-			t.Fatalf("end-of-input notice does not contain %q: %q", want, diagnostics.String())
-		}
-	}
-	assertWorkspaceBetaTest(t, dir, false)
-}
-
-func TestInitDryRunDoesNotAskToLeaveBeta(t *testing.T) {
+func TestInitDryRunWithBetaTestFlagReadsNoInput(t *testing.T) {
 	dir := t.TempDir()
 	initializeWorkspaceMode(t, dir, true)
 	args := append(initArgsWithoutQuestions(dir), "--dry-run")
 	var result, diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		erroringReader{err: errors.New("dry-run read input")},
@@ -1697,8 +1741,8 @@ func TestInitDryRunDoesNotAskToLeaveBeta(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(diagnostics.String(), "Leave beta testing") {
-		t.Fatalf("dry-run asked to leave beta testing: %q", diagnostics.String())
+	if strings.Contains(diagnostics.String(), "take part in the JMW beta test") {
+		t.Fatalf("dry-run asked the answered beta-test question: %q", diagnostics.String())
 	}
 	if !strings.Contains(result.String(), "This workspace beta-tests just-mcp-work") {
 		t.Fatalf("dry-run diff does not show removed beta guidance: %q", result.String())
@@ -1706,42 +1750,147 @@ func TestInitDryRunDoesNotAskToLeaveBeta(t *testing.T) {
 	assertWorkspaceBetaTest(t, dir, true)
 }
 
-func TestInitPlainWorkspaceDoesNotAskToLeaveBeta(t *testing.T) {
-	dir := t.TempDir()
-	initializeWorkspaceMode(t, dir, false)
-	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
-		false,
-		initArgsWithoutQuestions(dir),
-		strings.NewReader("no\n"),
-		io.Discard,
-		&diagnostics,
-	); err != nil {
-		t.Fatal(err)
+func TestInitBetaTestFlagSkipsTheQuestion(t *testing.T) {
+	for _, betaTest := range []bool{false, true} {
+		t.Run(fmt.Sprintf("beta=%t", betaTest), func(t *testing.T) {
+			dir := t.TempDir()
+			initializeWorkspaceMode(t, dir, !betaTest)
+			var diagnostics bytes.Buffer
+			if err := initWithBetaTest(
+				betaTest,
+				initArgsWithoutQuestions(dir),
+				strings.NewReader(""),
+				io.Discard,
+				&diagnostics,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(diagnostics.String(), "take part in the JMW beta test") {
+				t.Fatalf("init asked the beta-test question its flag answered: %q", diagnostics.String())
+			}
+			assertWorkspaceBetaTest(t, dir, betaTest)
+		})
 	}
-	if strings.Contains(diagnostics.String(), "Leave beta testing") {
-		t.Fatalf("plain init asked to leave beta testing: %q", diagnostics.String())
-	}
-	assertWorkspaceBetaTest(t, dir, false)
 }
 
-func TestInitBetaTestWorkspaceDoesNotAskToLeaveBeta(t *testing.T) {
+func TestInitReportsPolicyFallbackWhenFlagsAnswerEveryRunner(t *testing.T) {
 	dir := t.TempDir()
-	initializeWorkspaceMode(t, dir, true)
+	if err := os.WriteFile(policy.Path(dir), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
-		true,
+	if err := initWithBetaTest(
+		false,
 		initArgsWithoutQuestions(dir),
-		strings.NewReader("no\n"),
+		strings.NewReader(""),
 		io.Discard,
 		&diagnostics,
 	); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(diagnostics.String(), "Leave beta testing") {
-		t.Fatalf("init-beta-test asked to leave beta testing: %q", diagnostics.String())
+	if !strings.Contains(diagnostics.String(), "could not be read; using declared defaults") {
+		t.Fatalf("policy fallback notice missing:\n%s", diagnostics.String())
 	}
-	assertWorkspaceBetaTest(t, dir, true)
+}
+
+func claudeInitArgs(dir string) []string {
+	return []string{
+		"--dir", dir,
+		"--instructions-target", "workspace",
+		"--agents", "claude",
+		"--ai", "claude",
+		"--runner-mode", "just=all",
+		"--runner-mode", "agent=safe",
+		"--runner-mode", "cmake=all",
+		"--runner-mode", "docker=all",
+		"--runner-mode", "go=safe",
+		"--runner-mode", "make=all",
+	}
+}
+
+func TestInitDryRunPlansClaudePermissionsWithoutAsking(t *testing.T) {
+	dir := t.TempDir()
+	args := append(claudeInitArgs(dir), "--dry-run", "--shell-permission", "ask")
+	var result bytes.Buffer
+	if err := initWithBetaTest(
+		false,
+		args,
+		erroringReader{err: errors.New("dry-run read input")},
+		&result,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result.String(), agentinit.ClaudeToolPrefix+"run_task") {
+		t.Fatalf("dry run did not plan the managed Claude permissions:\n%s", result.String())
+	}
+}
+
+func TestInitClaudeQuestionListsTheAnsweredShellPermission(t *testing.T) {
+	dir := t.TempDir()
+	var diagnostics bytes.Buffer
+	if err := initWithBetaTest(
+		false,
+		claudeInitArgs(dir),
+		strings.NewReader("allow\n\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	var allowLine string
+	for line := range strings.SplitSeq(diagnostics.String(), "\n") {
+		if strings.HasPrefix(line, "  ask:   ") {
+			t.Fatalf("the allow answer still listed shell tools under ask:\n%s", diagnostics.String())
+		}
+		if strings.HasPrefix(line, "  allow: ") {
+			allowLine = line
+		}
+	}
+	if !strings.Contains(allowLine, agentinit.ClaudeToolPrefix+"run_shell_command") {
+		t.Fatalf("the Claude question does not allow the shell tools:\n%s", diagnostics.String())
+	}
+}
+
+// scopeMovingReader creates an .mcp.json in the project on its first read,
+// the way a concurrent writer could while init is asking.
+type scopeMovingReader struct {
+	answers *strings.Reader
+	path    string
+	moved   bool
+}
+
+func (r *scopeMovingReader) Read(buffer []byte) (int, error) {
+	if !r.moved {
+		r.moved = true
+		if err := os.WriteFile(r.path, []byte("{}\n"), 0o600); err != nil {
+			return 0, fmt.Errorf("move the workspace scope: %w", err)
+		}
+	}
+	//nolint:wrapcheck // An io.Reader hands back io.EOF itself.
+	return r.answers.Read(buffer)
+}
+
+func TestInitRefusesWhenTheScopeMovesWhileAsking(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := filepath.Join(root, "project")
+	if err := os.Mkdir(project, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	input := &scopeMovingReader{
+		answers: strings.NewReader("\n"),
+		path:    filepath.Join(project, ".mcp.json"),
+	}
+	err := initCommandWithIO(initArgsWithoutQuestions(project), input, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "workspace scope changed") {
+		t.Fatalf("init after a scope move error = %v, want a scope refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(project, "AGENTS.md")); !os.IsNotExist(statErr) {
+		t.Fatalf("init wrote instructions after the scope moved: %v", statErr)
+	}
 }
 
 func TestInitRepairsEditedManagedBlockInPlainWorkspace(t *testing.T) {
@@ -1749,7 +1898,7 @@ func TestInitRepairsEditedManagedBlockInPlainWorkspace(t *testing.T) {
 	initializeWorkspaceMode(t, dir, false)
 	editManagedInstructions(t, dir)
 
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		initArgsWithoutQuestions(dir),
 		strings.NewReader(""),
@@ -1768,33 +1917,32 @@ func TestInitRepairsEditedManagedBlockInRecordedBetaWorkspace(t *testing.T) {
 	var diagnostics bytes.Buffer
 
 	if err := initCommandWithIO(
-		false,
 		initArgsWithoutQuestions(dir),
-		strings.NewReader("yes\n"),
+		strings.NewReader("\n"),
 		io.Discard,
 		&diagnostics,
 	); err != nil {
 		t.Fatalf("init edited beta workspace: %v", err)
 	}
-	if !strings.Contains(diagnostics.String(), "Leave beta testing and continue with plain init?") {
+	if !strings.Contains(diagnostics.String(), "Beta test [yes, current]:") {
 		t.Fatalf("edited beta workspace question missing: %q", diagnostics.String())
 	}
-	assertWorkspaceBetaTest(t, dir, false)
+	assertWorkspaceBetaTest(t, dir, true)
 }
 
 func TestRunSelectsTheRequestedManagedBlock(t *testing.T) {
 	tests := []struct {
-		command      string
+		betaTestFlag string
 		name         string
 		wantBetaText bool
 	}{
 		{
-			command:      "init-beta-test",
+			betaTestFlag: "--beta-test=true",
 			name:         "beta",
 			wantBetaText: true,
 		},
 		{
-			command:      "init",
+			betaTestFlag: "--beta-test=false",
 			name:         "plain",
 			wantBetaText: false,
 		},
@@ -1802,10 +1950,11 @@ func TestRunSelectsTheRequestedManagedBlock(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
-			// run reads os.Stdin, so every declared runner must be answered by
-			// flag or the console question is left unanswered at end of input.
+			// run reads os.Stdin, so every question must be answered by a flag
+			// or it is left unanswered at end of input.
 			if err := run([]string{
-				test.command,
+				"init",
+				test.betaTestFlag,
 				"--dir",
 				dir,
 				"--instructions-target",
@@ -1857,7 +2006,7 @@ func TestInitHelpAndFlagErrorsUseDiagnosticOutput(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			var result bytes.Buffer
 			var diagnostics bytes.Buffer
-			err := initCommandWithIO(
+			err := initWithBetaTest(
 				false,
 				testCase.args,
 				defaultRunnerInput(),
@@ -1890,7 +2039,7 @@ func TestInitRejectsRunnerOverridesBeforeWritingFiles(t *testing.T) {
 		t.Run(strings.Join(extra, "_"), func(t *testing.T) {
 			dir := t.TempDir()
 			args := append([]string{"--dir", dir, "--agents", "codex"}, extra...)
-			err := initCommandWithIO(false, args, defaultRunnerInput(), io.Discard, io.Discard)
+			err := initWithBetaTest(false, args, defaultRunnerInput(), io.Discard, io.Discard)
 			if err == nil {
 				t.Fatalf("init accepted invalid runner override %v", extra)
 			}
@@ -2355,7 +2504,7 @@ func writeStaleStartupFailure(t *testing.T, root string) {
 
 func TestServeVerifiesManagedSurfacesBeforeRunnerRegistry(t *testing.T) {
 	root := t.TempDir()
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		[]string{"--dir", root, "--agents", "codex"},
 		defaultRunnerInput(),
@@ -2645,7 +2794,7 @@ func TestRunnerRegistryWarnsOnceWhenPolicyIsAbsent(t *testing.T) {
 
 func TestInitWritesClaudePermissionsWithFlag(t *testing.T) {
 	dir := t.TempDir()
-	initErr := initCommandWithIO(
+	initErr := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", dir,
@@ -2678,7 +2827,7 @@ func TestInitWritesClaudePermissionsWithFlag(t *testing.T) {
 
 func TestInitKeepsClaudePermissionsWhenDeclinedByFlag(t *testing.T) {
 	dir := t.TempDir()
-	initErr := initCommandWithIO(
+	initErr := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", dir,
@@ -2703,7 +2852,7 @@ func TestInitClaudeConfirmationReportsAccurateOutcomeOnFreshWorkspace(t *testing
 	var output bytes.Buffer
 	// Closed stdin gives an empty answer at the Claude confirmation prompt on a
 	// workspace that never had a settings file, so nothing is actually removed.
-	initErr := initCommandWithIO(
+	initErr := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--agents", "claude"},
 		defaultRunnerInput(),
@@ -2735,7 +2884,7 @@ func TestInitClaudeConfirmationAbortsOnNonEOFReadFailure(t *testing.T) {
 	readErr := errors.New("console broken")
 	// Every runner is answered by flag so the only console read left is the
 	// Claude confirmation, isolating the failure to that read.
-	initErr := initCommandWithIO(
+	initErr := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", dir,
@@ -2794,7 +2943,7 @@ func TestInitShellPermissionFlagSkipsPrompt(t *testing.T) {
 			dir := t.TempDir()
 			var diagnostics bytes.Buffer
 			args := append(testCase.args(dir), "--shell-permission", "ask")
-			err := initCommandWithIO(
+			err := initWithBetaTest(
 				false,
 				args,
 				erroringReader{err: errors.New("input must not be read")},
@@ -2818,23 +2967,26 @@ func TestInitRunnerChoiceLineMatchesPermissionRequest(t *testing.T) {
 	}
 	request := catalog.PermissionRequests()[1]
 	choice := request.Choices[0]
-	offer := singleOffer(string(choice.Mode), true)
+	question := runnerModeQuestion(request, choice.Mode, true)
 	var output bytes.Buffer
-	console := initConsole{
-		input:  bufio.NewReader(strings.NewReader("\n")),
-		output: &output,
-	}
-	mode, err := console.askRunnerMode(request, offer)
+	answers, err := console.New(strings.NewReader("\n"), &output).Ask(
+		context.Background(),
+		[]questionnaire.Question{question},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mode != choice.Mode {
+	if mode := answers[question.ID][0]; mode != string(choice.Mode) {
 		t.Fatalf("selected runner mode = %q, want %q", mode, choice.Mode)
+	}
+	marks := " (current)"
+	if choice.Mode == request.Default {
+		marks = " (current, default)"
 	}
 	wantLine := fmt.Sprintf(
 		"  %s%s - %s: %s\n",
 		choice.Mode,
-		enumeratedChoiceLabel(string(choice.Mode), []string{string(request.Default)}, offer),
+		marks,
 		choice.Label,
 		choice.Description,
 	)
@@ -2851,7 +3003,7 @@ func TestInitNormalizesAgentsBeforeAskingShellPermission(t *testing.T) {
 		"--claude-permissions", "yes",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("\n"),
@@ -2883,7 +3035,7 @@ func TestInitEmptyAgentSelectionOffersCurrentShellPermission(t *testing.T) {
 		"--claude-permissions", "yes",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("\n"),
@@ -2907,7 +3059,7 @@ func TestInitClaudePermissionNoWithoutMCPConfigDoesNotAskShellPermission(t *test
 		"--claude-permissions", "no",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		erroringReader{err: errors.New("input must not be read")},
@@ -2931,7 +3083,7 @@ func TestInitClaudeConfirmationShowsResolvedShellPermission(t *testing.T) {
 		"allow",
 	)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("yes\n"),
@@ -2976,7 +3128,7 @@ func TestInitInteractiveShellPermissionTakesDefaultAndReprompts(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
 			var diagnostics bytes.Buffer
-			if err := initCommandWithIO(
+			if err := initWithBetaTest(
 				false,
 				initArgsWithClaudeShellQuestion(dir),
 				strings.NewReader(testCase.input),
@@ -3003,7 +3155,7 @@ func TestInitInteractiveShellPermissionTakesDefaultAndReprompts(t *testing.T) {
 
 func TestInitInteractiveShellPermissionErrorsAtEndOfInput(t *testing.T) {
 	dir := t.TempDir()
-	err := initCommandWithIO(
+	err := initWithBetaTest(
 		false,
 		initArgsWithClaudeShellQuestion(dir),
 		strings.NewReader(""),
@@ -3031,7 +3183,7 @@ func TestInitInteractiveShellPermissionOffersCurrentChoice(t *testing.T) {
 		t.Fatal(err)
 	}
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		initArgsWithClaudeShellQuestion(dir),
 		strings.NewReader("\n"),
@@ -3058,7 +3210,7 @@ func TestInitCodexOnlyShellPermissionRoundTripKeepsRecordedAllow(t *testing.T) {
 		"--write-mcp-config=true",
 		"--shell-permission", "allow",
 	)
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		firstArgs,
 		erroringReader{err: errors.New("input must not be read")},
@@ -3078,7 +3230,7 @@ func TestInitCodexOnlyShellPermissionRoundTripKeepsRecordedAllow(t *testing.T) {
 
 	secondArgs := append(initArgsWithRunnerModes(dir), "--write-mcp-config=true")
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		secondArgs,
 		strings.NewReader("\n"),
@@ -3121,7 +3273,7 @@ func TestInitCodexOnlyIgnoresOutOfScopeMalformedClaudeSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	args := append(initArgsWithRunnerModes(dir), "--write-mcp-config=true")
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("\n"),
@@ -3145,7 +3297,7 @@ func TestInitInteractiveShellPermissionDoesNotOfferSplitChoiceAsCurrent(t *testi
 		t.Fatal(err)
 	}
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		initArgsWithClaudeShellQuestion(dir),
 		strings.NewReader("\n"),
@@ -3170,7 +3322,7 @@ func TestInitCodexOnlyWithoutMCPConfigDoesNotAskShellPermission(t *testing.T) {
 		t.Fatal(err)
 	}
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		initArgsWithRunnerModes(dir),
 		strings.NewReader(""),
@@ -3204,7 +3356,7 @@ func TestInitInstructionsTargetFlagWorksWithClosedConsole(t *testing.T) {
 	args[3] = string(agentinit.InstructionsTargetProject)
 	args = append(args, "--ai", "codex")
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader(""),
@@ -3252,7 +3404,7 @@ func TestInitMachineTargetRejectsUnsupportedAgentsBeforeLaterQuestions(t *testin
 		t.Run(testCase.name, func(t *testing.T) {
 			root := t.TempDir()
 			var diagnostics bytes.Buffer
-			err := initCommandWithIO(
+			err := initWithBetaTest(
 				false,
 				testCase.args(root),
 				strings.NewReader(testCase.input),
@@ -3309,7 +3461,7 @@ func TestInitMachineTargetDiagnosticAndPlanShareCanonicalHome(t *testing.T) {
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
 
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader(""),
@@ -3341,7 +3493,7 @@ func TestInitMachineTargetDiagnosticAndPlanShareCanonicalHome(t *testing.T) {
 func TestInitInstructionsTargetQuestionRequiresAnAnswerAtEOF(t *testing.T) {
 	dir := t.TempDir()
 	var diagnostics bytes.Buffer
-	err := initCommandWithIO(
+	err := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--ai", "codex"},
 		strings.NewReader(""),
@@ -3366,7 +3518,7 @@ func TestInitInstructionsTargetQuestionRequiresAnAnswerAtEOF(t *testing.T) {
 func TestInitRejectsUnsupportedInstructionsTargetBeforeQuestion(t *testing.T) {
 	dir := t.TempDir()
 	var diagnostics bytes.Buffer
-	err := initCommandWithIO(
+	err := initWithBetaTest(
 		false,
 		[]string{"--dir", dir, "--instructions-target", "elsewhere"},
 		erroringReader{err: errors.New("console was read")},
@@ -3396,12 +3548,12 @@ func TestInitOffersRecordedInstructionsTargetAsCurrent(t *testing.T) {
 	args := initArgsWithRunnerModesWithoutAI(project)
 	args[3] = string(agentinit.InstructionsTargetProject)
 	args = append(args, "--ai", "codex")
-	if err := initCommandWithIO(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+	if err := initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	args = append(args[:2], args[4:]...)
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader("\n"),
@@ -3427,7 +3579,7 @@ func TestInitWorkspaceTargetNamesDirectoryOutsideDirInDryRun(t *testing.T) {
 	}
 	args := append(initArgsWithRunnerModesWithoutAI(project), "--ai", "codex", "--dry-run")
 	var diagnostics bytes.Buffer
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader(""),
@@ -3451,7 +3603,7 @@ func TestInitDryRunPrintsStaleMachineNoteWithoutWritingHome(t *testing.T) {
 	args := initArgsWithRunnerModesWithoutAI(root)
 	args[3] = string(agentinit.InstructionsTargetMachine)
 	args = append(args, "--ai", "codex")
-	if err := initCommandWithIO(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+	if err := initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 	path, err := filepath.EvalSymlinks(filepath.Join(home, ".codex", "AGENTS.md"))
@@ -3465,7 +3617,7 @@ func TestInitDryRunPrintsStaleMachineNoteWithoutWritingHome(t *testing.T) {
 	args[3] = string(agentinit.InstructionsTargetWorkspace)
 	args = append(args, "--dry-run")
 	var diagnostics bytes.Buffer
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		args,
 		strings.NewReader(""),

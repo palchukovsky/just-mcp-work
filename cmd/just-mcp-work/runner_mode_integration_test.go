@@ -30,7 +30,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := initCommandWithIO(
+	if err := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", root,
@@ -155,7 +155,7 @@ func initWorkspaceBelowScope(t *testing.T) (scope string, project string) {
 			t.Fatal(writeErr)
 		}
 	}
-	if initErr := initCommandWithIO(
+	if initErr := initWithBetaTest(
 		false,
 		[]string{
 			"--dir", project,

@@ -540,6 +540,10 @@ func planChangedInstructionDestinations(
 // replaced the single family, or a list that is not a valid selection.
 var ErrUnrecognizedAIFamilies = errors.New("recorded AI families are not recognized")
 
+// ErrUnrecognizedBetaTest reports a managed manifest whose beta-test mode this
+// binary cannot read: a malformed manifest or one with an unsupported schema.
+var ErrUnrecognizedBetaTest = errors.New("recorded beta-test mode is not recognized")
+
 // decodeManagedManifest decodes the one document every reader of the manifest
 // works from. A document this binary cannot decode is a hard error everywhere:
 // neither init nor serve may act on recorded state it cannot see.
@@ -799,9 +803,11 @@ func marshalClaudeManagedFragment(permissions map[string][]string) ([]byte, erro
 	return fragment, nil
 }
 
-// ReadRecordedBetaTest reports the beta-test mode recorded in the workspace manifest.
-// A missing manifest reports plain with known true. A present malformed or
-// schema-incompatible manifest reports known false; filesystem errors are returned.
+// ReadRecordedBetaTest reports the beta-test mode recorded in the workspace
+// manifest and whether one is recorded. A missing manifest records none. A
+// present malformed or schema-incompatible manifest fails with an error
+// wrapping ErrUnrecognizedBetaTest, so init can ask for the mode again as in a
+// new workspace; a filesystem error fails without it.
 func ReadRecordedBetaTest(root string) (bool, bool, error) {
 	manifestPath := filepath.Join(root, manifestFile)
 	data, exists, err := readOptionalFile(manifestPath)
@@ -809,14 +815,25 @@ func ReadRecordedBetaTest(root string) (bool, bool, error) {
 		return false, false, err
 	}
 	if !exists {
-		return false, true, nil
+		return false, false, nil
 	}
 
 	var manifest managedManifest
-	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
-		manifest.SchemaVersion != manifestSchemaVersion {
-		//nolint:nilerr // Unknown mode is asked about; planManifest refuses an undecodable one.
-		return false, false, nil
+	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil {
+		return false, false, fmt.Errorf(
+			"%w in managed manifest %s: %w",
+			ErrUnrecognizedBetaTest,
+			manifestPath,
+			decodeErr,
+		)
+	}
+	if manifest.SchemaVersion != manifestSchemaVersion {
+		return false, false, fmt.Errorf(
+			"%w in managed manifest %s: unsupported schema version %d",
+			ErrUnrecognizedBetaTest,
+			manifestPath,
+			manifest.SchemaVersion,
+		)
 	}
 	return manifest.BetaTest, true, nil
 }

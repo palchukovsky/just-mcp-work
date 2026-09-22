@@ -1230,17 +1230,17 @@ func TestApplyUsesResolvedManagedManifestPath(t *testing.T) {
 	}
 }
 
-func TestReadRecordedBetaTestTreatsNoManifestAsPlain(t *testing.T) {
-	got, known, err := ReadRecordedBetaTest(t.TempDir())
+func TestReadRecordedBetaTestRecordsNothingWithoutManifest(t *testing.T) {
+	got, recorded, err := ReadRecordedBetaTest(t.TempDir())
 	if err != nil {
 		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
 	}
-	if got || !known {
-		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, true)", got, known)
+	if got || recorded {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, false)", got, recorded)
 	}
 }
 
-func TestReadRecordedBetaTestReportsMalformedManifestAsUnknown(t *testing.T) {
+func TestReadRecordedBetaTestRejectsMalformedManifestAsUnrecognized(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, manifestFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -1250,16 +1250,16 @@ func TestReadRecordedBetaTestReportsMalformedManifestAsUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, known, err := ReadRecordedBetaTest(root)
-	if err != nil {
-		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
+	got, recorded, err := ReadRecordedBetaTest(root)
+	if !errors.Is(err, ErrUnrecognizedBetaTest) {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want ErrUnrecognizedBetaTest", err)
 	}
-	if got || known {
-		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, false)", got, known)
+	if got || recorded {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, false)", got, recorded)
 	}
 }
 
-func TestReadRecordedBetaTestReportsUnsupportedSchemaAsUnknown(t *testing.T) {
+func TestReadRecordedBetaTestRejectsUnsupportedSchemaAsUnrecognized(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, manifestFile)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -1274,12 +1274,12 @@ func TestReadRecordedBetaTestReportsUnsupportedSchemaAsUnknown(t *testing.T) {
 		},
 	)
 
-	got, known, err := ReadRecordedBetaTest(root)
-	if err != nil {
-		t.Fatalf("ReadRecordedBetaTest() error = %v, want nil", err)
+	got, recorded, err := ReadRecordedBetaTest(root)
+	if !errors.Is(err, ErrUnrecognizedBetaTest) {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want ErrUnrecognizedBetaTest", err)
 	}
-	if got || known {
-		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, false)", got, known)
+	if got || recorded {
+		t.Fatalf("ReadRecordedBetaTest() = (%t, %t), want (false, false)", got, recorded)
 	}
 }
 
@@ -1325,8 +1325,12 @@ func TestReadRecordedBetaTestReturnsManifestIOError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := ReadRecordedBetaTest(root); err == nil {
+	_, _, err := ReadRecordedBetaTest(root)
+	if err == nil {
 		t.Fatal("ReadRecordedBetaTest() error = nil, want manifest I/O error")
+	}
+	if errors.Is(err, ErrUnrecognizedBetaTest) {
+		t.Fatalf("ReadRecordedBetaTest() error = %v, want an I/O error, not unrecognized", err)
 	}
 }
 
