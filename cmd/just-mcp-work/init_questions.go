@@ -25,6 +25,12 @@ const (
 	claudePermissionsQuestionID  = "claude-permissions"
 	runnerQuestionIDPrefix       = "runner:"
 	runnersSection               = "Runners"
+	permissionsSection           = "Permissions"
+
+	runnerIntro = "A runner offers the tasks of one tool to your AI agents; its mode " +
+		"decides which of those commands they can run."
+	unreviewedRunnerNote = "JMW has not reviewed this runner's commands yet, so it is " +
+		"either fully on or off."
 )
 
 // initQuestionPlan holds what init knows before it asks anything: the scope,
@@ -192,6 +198,10 @@ func instructionsTargetQuestion(scope string, agentsFlag string) (questionnaire.
 		ID:      instructionsTargetQuestionID,
 		Subject: "Instructions target",
 		Title:   "Where should the managed agent-instruction block be written?",
+		Context: []string{
+			"The block is the JMW guidance for your AI agents, kept between markers in " +
+				"each selected agent's instruction file, such as CLAUDE.md or AGENTS.md.",
+		},
 		Choices: []questionnaire.Choice{
 			{
 				Value:       string(agentinit.InstructionsTargetProject),
@@ -199,12 +209,12 @@ func instructionsTargetQuestion(scope string, agentsFlag string) (questionnaire.
 			},
 			{
 				Value:       string(agentinit.InstructionsTargetWorkspace),
-				Description: "the instruction files of the workspace scope root (today's behaviour)",
+				Description: "the instruction files at the workspace root",
 			},
 			{
 				Value: string(agentinit.InstructionsTargetMachine),
-				Description: "the machine-wide instruction files for claude, codex, and windsurf, " +
-					"outside this tree",
+				Description: "the machine-wide instruction files of Claude Code, Codex, and " +
+					"Windsurf, outside this tree",
 			},
 		},
 		Defaults: []string{string(agentinit.InstructionsTargetWorkspace)},
@@ -254,7 +264,7 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 	}
 	choices := make([]questionnaire.Choice, 0, len(aiprofile.Declarable()))
 	for _, family := range aiprofile.Declarable() {
-		config, declared := agentinit.AIFamilyConfig(family)
+		config, agent, declared := agentinit.AIFamilyConfig(family)
 		if !declared {
 			return questionnaire.Question{}, fmt.Errorf(
 				"no generated configuration declares AI family %q",
@@ -263,7 +273,8 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 		}
 		choices = append(choices, questionnaire.Choice{
 			Value:       string(family),
-			Description: "declare it in " + config,
+			Label:       agent,
+			Description: "declared in " + config,
 		})
 	}
 	offer := familyNames(defaultAIFamilies())
@@ -275,10 +286,13 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 		Subject: "AI families",
 		Title:   "Which AI families should the managed just-mcp-work server declare?",
 		Context: []string{
-			"Each family is declared in the configuration its own client reads, so a " +
-				"workspace used by several of them names several.",
-			"This is recorded provenance and changes presentation only; runner and shell " +
-				"permissions stay unchanged.",
+			"Each family is declared in the configuration its own agent reads, so a " +
+				"workspace used by both agents declares both.",
+			"A family only changes how the server introduces itself to the agent; it " +
+				"grants no access.",
+			"JMW writes no MCP server configuration for Cursor, GitHub Copilot, or " +
+				"Windsurf, so no family applies to them; --agents chooses their " +
+				"instruction files.",
 		},
 		Notices:  notices,
 		Choices:  choices,
@@ -390,9 +404,9 @@ func runnerModeQuestion(
 	offer runner.Mode,
 	current bool,
 ) questionnaire.Question {
-	review := "reviewed"
+	context := []string{request.Summary, runnerIntro}
 	if !request.Reviewed {
-		review = "unreviewed"
+		context = append(context, unreviewedRunnerNote)
 	}
 	choices := make([]questionnaire.Choice, 0, len(request.Choices))
 	for _, choice := range request.Choices {
@@ -406,9 +420,9 @@ func runnerModeQuestion(
 	return questionnaire.Question{
 		ID:       runnerQuestionIDPrefix + request.Name,
 		Section:  runnersSection,
-		Subject:  request.Name,
-		Title:    fmt.Sprintf("%s runner (%s): %s", request.Name, review, request.Question),
-		Context:  []string{request.Context},
+		Subject:  request.Title,
+		Title:    fmt.Sprintf("Which mode should the %s runner use?", request.Title),
+		Context:  context,
 		Choices:  choices,
 		Defaults: []string{string(request.Default)},
 		Offer:    []string{string(offer)},
@@ -440,23 +454,31 @@ func shellPermissionQuestion(
 ) questionnaire.Question {
 	return questionnaire.Question{
 		ID:      shellPermissionQuestionID,
-		Subject: "Shell permission",
-		Title: "How should the Claude permission lists and Codex approval modes " +
-			"handle the just-mcp-work shell tools?",
+		Section: permissionsSection,
+		Subject: "Shell commands",
+		Title:   "May your AI agents run shell commands through JMW without asking you?",
+		Context: []string{
+			"run_shell_command and start_shell_command run any command line with your " +
+				"user's permissions, and define_shell_block prepares one for them.",
+			"The answer sets how Claude Code's permission lists and Codex's approval " +
+				"modes treat these tools, wherever JMW manages them.",
+		},
 		Choices: []questionnaire.Choice{
 			{
 				Value:       string(agentinit.ShellPermissionAllow),
-				Description: "use the Claude allow list and Codex approve mode",
+				Label:       "Run without asking",
+				Description: "the Claude Code allow list and the Codex approve mode",
 			},
 			{
 				Value:       string(agentinit.ShellPermissionAsk),
-				Description: "use the Claude ask list and Codex prompt mode",
+				Label:       "Ask every time",
+				Description: "the Claude Code ask list and the Codex prompt mode",
 			},
 		},
 		Defaults: []string{string(agentinit.ShellPermissionAsk)},
 		Offer:    []string{string(offer)},
 		Current:  current,
-		Label:    "Shell permission",
+		Label:    "Shell commands",
 		Flag:     "--shell-permission allow|ask",
 		Parse: func(value string) (string, bool) {
 			permission, err := agentinit.ParseShellPermission(value)
@@ -476,10 +498,10 @@ func shellPermissionQuestion(
 	}
 }
 
-// claudePermissionsQuestion asks whether to apply the managed permissions to
-// the Claude settings at path. The lists it shows follow the shell permission,
-// which is always settled first: by its flag, or by the shell question, which
-// comes before this one.
+// claudePermissionsQuestion asks whether to write the JMW tool permissions
+// into the Claude Code settings at path. Which tools it says would still ask
+// follows the shell permission, which is always settled first: by its flag, or
+// by the shell question, which comes before this one.
 func claudePermissionsQuestion(
 	path string,
 	shellFlag agentinit.ShellPermission,
@@ -493,39 +515,62 @@ func claudePermissionsQuestion(
 		if err != nil {
 			return questionnaire.Question{}, fmt.Errorf("resolve managed Claude tools: %w", err)
 		}
-		lines := []string{"  allow: " + strings.Join(managed.Allow, ", ")}
+		lines := []string{"With yes, these run without asking: " + claudeToolNames(managed.Allow)}
 		if len(managed.Ask) > 0 {
-			lines = append(lines, "  ask:   "+strings.Join(managed.Ask, ", "))
+			lines = append(lines, "With yes, these still ask every time: "+claudeToolNames(managed.Ask))
 		}
 		lists[permission] = lines
-	}
-	removal := []string{
-		"Existing " + agentinit.ClaudeToolPrefix +
-			"* entries are removed first; declining or leaving this empty",
-		"removes them, deleting the file if nothing else remains in it.",
 	}
 	return questionnaire.Question{
 		ID:      claudePermissionsQuestionID,
 		Kind:    questionnaire.Confirm,
-		Subject: "Claude permissions",
-		Title:   path + ": apply the managed just-mcp-work tool permissions?",
+		Section: permissionsSection,
+		Subject: "Claude Code permissions",
+		Title:   "Should JMW allow its tools in the Claude Code settings?",
 		ContextFor: func(answers questionnaire.Answers) []string {
 			permission := shellFlag
 			if values, asked := answers[shellPermissionQuestionID]; asked {
 				permission = agentinit.ShellPermission(values[0])
 			}
-			return slices.Concat(lists[permission], removal)
+			return slices.Concat([]string{
+				"Claude Code asks you before it uses a tool its settings do not allow. " +
+					"JMW can allow its own tools in " + path + ".",
+			}, lists[permission])
+		},
+		Choices: []questionnaire.Choice{
+			{
+				Value:       questionnaire.Yes,
+				Label:       "Allow JMW tools",
+				Description: "write the JMW entries into the settings, replacing earlier ones",
+			},
+			{
+				Value: questionnaire.No,
+				Label: "Ask every time",
+				Description: "remove the JMW entries from this file, and the file too if " +
+					"nothing else is left in it; Claude Code then asks before each JMW " +
+					"tool, unless another of its settings files allows it",
+			},
 		},
 		Defaults: []string{questionnaire.No},
 		Offer:    []string{questionnaire.No},
-		Label:    "Apply?",
+		Label:    "Allow them?",
 		Flag:     "--claude-permissions yes|no",
-		UnansweredNote: "No answer; the managed entries are not applied, and any existing ones " +
-			"are removed, including the file itself if nothing else was left in it. " +
-			"Use --claude-permissions=yes to apply them, or --claude-permissions=no " +
-			"to skip this prompt and remove them.",
+		UnansweredNote: "No answer, so the JMW entries are not written, and any existing ones " +
+			"are removed, with the file itself if nothing else is left in it. " +
+			"Use --claude-permissions=yes to write them, or --claude-permissions=no " +
+			"to skip this question and remove them.",
 		ReadDescription: "claude permissions confirmation for " + path,
 	}, nil
+}
+
+// claudeToolNames lists Claude permission rules by the JMW tool names they
+// allow, without the prefix every rule shares.
+func claudeToolNames(rules []string) string {
+	names := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		names = append(names, strings.TrimPrefix(rule, agentinit.ClaudeToolPrefix))
+	}
+	return strings.Join(names, ", ")
 }
 
 // answeredRunnerModes completes the canonical --runner-mode selection with

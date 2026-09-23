@@ -65,7 +65,10 @@ func New(binary string) *Runner {
 func Registration(binary string) runner.Registration {
 	return runner.NewRegistration(
 		runnerName,
-		runner.UnreviewedPermissions(),
+		runner.UnreviewedPermissions(
+			"CMake",
+			"Runs CMake presets and the targets of configured CMake build trees.",
+		),
 		func(runner.Mode) (runner.Runner, error) { return New(binary), nil },
 	)
 }

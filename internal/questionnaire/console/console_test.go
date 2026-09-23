@@ -250,6 +250,29 @@ func TestConfirmTakesTheOfferWhenLeftEmpty(t *testing.T) {
 	}
 }
 
+func TestConfirmListsTheAnswersItDescribes(t *testing.T) {
+	question := applyQuestion()
+	question.Choices = []questionnaire.Choice{
+		{Value: questionnaire.Yes, Label: "Apply", Description: "write it"},
+		{Value: questionnaire.No, Label: "Skip", Description: "leave it", Warning: "nothing changes"},
+	}
+	answers, output, err := ask("y\n", question)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(answers["apply"], []string{questionnaire.Yes}) {
+		t.Fatalf("answers = %v, want yes", answers)
+	}
+	const want = "\nApply the change?\n" +
+		"  yes - Apply: write it\n" +
+		"  no (default) - Skip: leave it\n" +
+		"    WARNING: nothing changes\n" +
+		"Apply? [y/N]: "
+	if output != want {
+		t.Fatalf("output = %q, want %q", output, want)
+	}
+}
+
 func TestSplitAnswerTokensCutsOnSeparators(t *testing.T) {
 	got := console.SplitAnswerTokens(" codex, claude;2 ")
 	if !slices.Equal(got, []string{"codex", "claude", "2"}) {

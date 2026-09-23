@@ -62,8 +62,8 @@ func validatedTestRunnerModes(
 		return nil, errors.New("test factory must not be called")
 	}
 	catalog, err := runner.NewCatalog(
-		runner.NewRegistration("just", runner.UnreviewedPermissions(), unusedFactory),
-		runner.NewRegistration("go", runner.UnreviewedPermissions(), unusedFactory),
+		runner.NewRegistration("just", runner.UnreviewedPermissions("Test", "Runs test tasks."), unusedFactory),
+		runner.NewRegistration("go", runner.UnreviewedPermissions("Test", "Runs test tasks."), unusedFactory),
 	)
 	if err != nil {
 		t.Fatal(err)

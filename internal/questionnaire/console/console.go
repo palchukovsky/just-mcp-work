@@ -94,6 +94,9 @@ func (r *Renderer) ask(
 		}
 	}
 	if question.Kind == questionnaire.Confirm {
+		if err := r.writeChoices(question); err != nil {
+			return nil, err
+		}
 		return r.confirm(question)
 	}
 	return r.choose(question)
@@ -105,6 +108,15 @@ func (r *Renderer) choose(question questionnaire.Question) ([]string, error) {
 			return nil, err
 		}
 	}
+	if err := r.writeChoices(question); err != nil {
+		return nil, err
+	}
+	return r.readChoice(question)
+}
+
+// writeChoices lists the answers a question describes, each with its marks,
+// its text, and its warning.
+func (r *Renderer) writeChoices(question questionnaire.Question) error {
 	for index, choice := range question.Choices {
 		// Only a question answered with several choices numbers them, because
 		// only its answer needs a short way to name more than one.
@@ -119,15 +131,15 @@ func (r *Renderer) choose(question questionnaire.Question) ([]string, error) {
 			choiceMarks(question, choice.Value),
 			choice.Text(),
 		); err != nil {
-			return nil, err
+			return err
 		}
 		if choice.Warning != "" {
 			if err := r.write("%sWARNING: %s\n", warningIndent, choice.Warning); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	return r.readChoice(question)
+	return nil
 }
 
 func choiceMarks(question questionnaire.Question, value string) string {

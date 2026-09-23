@@ -43,7 +43,7 @@ func New(binary string) *Runner {
 func Registration(binary string) runner.Registration {
 	return runner.NewRegistration(
 		runnerName,
-		runner.UnreviewedPermissions(),
+		runner.UnreviewedPermissions("GNU Make", "Runs the targets of the Makefiles in this workspace."),
 		func(runner.Mode) (runner.Runner, error) { return New(binary), nil },
 	)
 }

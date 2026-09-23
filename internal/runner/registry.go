@@ -20,13 +20,13 @@ const (
 	ModeDisabled Mode = "disabled"
 )
 
-// PermissionDeclaration records the reviewed modes and default of one runner.
-// Its zero value is intentionally invalid so a registration cannot silently
-// omit its permission review.
+// PermissionDeclaration records how init presents one runner and the reviewed
+// modes and default it offers. Its zero value is intentionally invalid so a
+// registration cannot silently omit its permission review.
 type PermissionDeclaration struct {
 	defaultMode Mode
-	question    string
-	context     string
+	title       string
+	summary     string
 	choices     []PermissionChoice
 	reviewed    bool
 	declared    bool
@@ -42,27 +42,30 @@ type PermissionChoice struct {
 }
 
 // PermissionRequest is a copied, read-only view of one runner's init prompt.
+// Name is the stable name flags and policies use; Title is the name people
+// know the tool by, and Summary says in one sentence what the runner runs.
 // Mutating Choices cannot affect the catalog or later requests.
 type PermissionRequest struct {
 	Name     string
-	Question string
-	Context  string
+	Title    string
+	Summary  string
 	Default  Mode
 	Choices  []PermissionChoice
 	Reviewed bool
 }
 
-// ReviewedPermissions declares a reviewed runner prompt and its mode choices.
+// ReviewedPermissions declares a reviewed runner: the name people know its tool
+// by, one sentence on what it runs, and its mode choices.
 func ReviewedPermissions(
-	question string,
-	context string,
+	title string,
+	summary string,
 	defaultMode Mode,
 	choices ...PermissionChoice,
 ) PermissionDeclaration {
 	return PermissionDeclaration{
 		defaultMode: defaultMode,
-		question:    question,
-		context:     context,
+		title:       title,
+		summary:     summary,
 		choices:     slices.Clone(choices),
 		reviewed:    true,
 		declared:    true,
@@ -71,13 +74,13 @@ func ReviewedPermissions(
 
 // UnreviewedPermissions explicitly preserves an unrestricted runner until its
 // commands receive a narrower review. Such a runner supports only all and
-// disabled, and remains enabled by default for compatibility.
-func UnreviewedPermissions() PermissionDeclaration {
+// disabled, and remains enabled by default for compatibility. Title and
+// summary present it as ReviewedPermissions does.
+func UnreviewedPermissions(title string, summary string) PermissionDeclaration {
 	return PermissionDeclaration{
 		defaultMode: ModeAll,
-		question:    "Choose command access for this runner.",
-		context: "This runner has not been reviewed into a narrower safe command set; " +
-			"its current command surface is unrestricted.",
+		title:       title,
+		summary:     summary,
 		choices: []PermissionChoice{
 			{
 				Mode:        ModeAll,
@@ -219,11 +222,11 @@ func validatePermissionDeclaration(name string, permissions PermissionDeclaratio
 	if !permissions.declared {
 		return fmt.Errorf("runner %q has no permission declaration", name)
 	}
-	if permissions.question == "" {
-		return fmt.Errorf("runner %q declares no permission question", name)
+	if permissions.title == "" {
+		return fmt.Errorf("runner %q declares no title", name)
 	}
-	if permissions.context == "" {
-		return fmt.Errorf("runner %q declares no permission context", name)
+	if permissions.summary == "" {
+		return fmt.Errorf("runner %q declares no summary", name)
 	}
 	if len(permissions.choices) == 0 {
 		return fmt.Errorf("runner %q declares no permission choices", name)
@@ -356,8 +359,8 @@ func (c *Catalog) PermissionRequests() []PermissionRequest {
 		permissions := registration.permissions
 		requests = append(requests, PermissionRequest{
 			Name:     registration.name,
-			Question: permissions.question,
-			Context:  permissions.context,
+			Title:    permissions.title,
+			Summary:  permissions.summary,
 			Reviewed: permissions.reviewed,
 			Default:  permissions.defaultMode,
 			Choices:  slices.Clone(permissions.choices),

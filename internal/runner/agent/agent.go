@@ -100,8 +100,8 @@ func taskSpecs(codexBinary, claudeBinary string) []taskSpec {
 
 func registration(specs []taskSpec) runner.Registration {
 	permissions := runner.ReviewedPermissions(
-		"Choose coding-agent access.",
-		"This runner launches another coding agent, which then acts with your own permissions in this checkout. JMW does not sandbox it.",
+		"AI agent",
+		"Launches Codex or Claude Code with a prompt, so one AI agent can hand work to another.",
 		runner.ModeSafe,
 		runner.PermissionChoice{
 			Mode:        runner.ModeSafe,

@@ -2683,7 +2683,7 @@ func TestListProjectsAnnotatesLinkedWorktreeOnly(t *testing.T) {
 }
 
 func testRegistration(candidate runner.Runner) runner.Registration {
-	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions())
+	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions("Test", "Runs test tasks."))
 }
 
 // TestClaudePermissionsCoverEveryRegisteredTool guards the managed Claude

@@ -125,7 +125,10 @@ func New(binary string) *Runner {
 func Registration(binary string) runner.Registration {
 	return runner.NewRegistration(
 		runnerName,
-		runner.UnreviewedPermissions(),
+		runner.UnreviewedPermissions(
+			"Docker",
+			"Builds images from Dockerfiles and starts or stops Docker Compose services.",
+		),
 		func(runner.Mode) (runner.Runner, error) { return New(binary), nil },
 	)
 }

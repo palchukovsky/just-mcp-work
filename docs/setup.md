@@ -15,12 +15,13 @@ guide. Every question below has a flag that answers it in a scripted run;
 
 When both standard input and standard error are a terminal with cursor control,
 `init` shows every question at once as one form: the arrow keys move and change
-answers, the space bar toggles, `?` lists every choice of the focused question,
-and nothing is written until the `Apply` row is confirmed; `q` or `Esc` closes
-the form without writing. Each answer starts as the recorded or default one, so
-pressing Enter through the form answers what an empty answer to each question
-would. After the form closes, the chosen answers stay in the terminal as plain
-lines.
+answers, the space bar toggles, and nothing is written until the `Apply` row is
+confirmed; `q` or `Esc` closes the form without writing. Under the form, the
+focused question explains what it decides and lists its answers, the chosen
+one with what it does and what it risks; `?` explains every answer. Each answer
+starts as the recorded or default one, so pressing Enter through the form
+answers what an empty answer to each question would. After the form closes,
+the chosen answers stay in the terminal as plain lines.
 
 Anywhere else `init` asks the same questions one at a time as text, answered
 by typing: when input is piped or redirected, in a terminal that reports
@@ -132,7 +133,10 @@ unreviewed and offer their existing `all` behavior by default or `disabled` for
 compatibility while their command surfaces are reviewed separately. Pass the
 repeatable `init --runner-mode <name>=<mode>` option to answer selected runner
 questions non-interactively. `init` writes the complete canonical selection to
-`.just-mcp-work.json` in the workspace scope root, next to `.mcp.json`.
+`.just-mcp-work.json` in the workspace scope root, next to `.mcp.json`. The
+questions name each runner after its tool - Golang, just, GNU Make, CMake,
+Docker, and AI agent for `go`, `just`, `make`, `cmake`, `docker`, and `agent` -
+and say what it runs; `--runner-mode` and the policy file use the short names.
 
 [SECURITY.md](../SECURITY.md) describes what each mode exposes and what it does
 not restrict. To change the selection, run `init`, not `serve --runner-mode`.
@@ -140,13 +144,16 @@ not restrict. To change the selection, run `init`, not `serve --runner-mode`.
 ## AI families
 
 `init` also asks which AI families the managed server should declare. The
-question lists its choices with numbers, and the answer names as many as the
-workspace needs, by number or by name, separated by commas or spaces. Both
-`codex` and `claude` are offered in a workspace that has none recorded. Each
-family is declared in the configuration its own client reads - `claude` in
-`.mcp.json`, `codex` in `.codex/config.toml` - so a configuration whose family
-was not selected declares none. Later runs offer the families stored by the
-previous `init`; when the recorded ones are not recognized, as after an upgrade
+question lists its choices with numbers, each with the agent it is for, and the
+answer names as many as the workspace needs, by number or by name, separated
+by commas or spaces. Both `codex` and `claude` are offered in a workspace that
+has none recorded. Each family is declared in the configuration its own agent
+reads - `claude` in `.mcp.json` for Claude Code, `codex` in
+`.codex/config.toml` for Codex - so a configuration whose family was not
+selected declares none. Cursor, GitHub Copilot, and Windsurf have no family:
+`init` writes only their instruction files, not an MCP configuration. Later
+runs offer the families stored by the previous `init`; when the recorded ones
+are not recognized, as after an upgrade
 from a release that stored a single family, `init` says so and asks again.
 Until that `init` rewrites the manifest, `serve` refuses to start on it. Pass
 `--ai codex|claude|codex,claude` to answer the question non-interactively. The

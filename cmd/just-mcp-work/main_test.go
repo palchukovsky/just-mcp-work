@@ -536,8 +536,9 @@ func TestInitOffersBothAIFamiliesByDefault(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Which AI families should the managed just-mcp-work server declare?",
-		"  1) codex (default) - declare it in .codex/config.toml",
-		"  2) claude (default) - declare it in .mcp.json",
+		"  1) codex (default) - Codex: declared in .codex/config.toml",
+		"  2) claude (default) - Claude Code: declared in .mcp.json",
+		"JMW writes no MCP server configuration for Cursor, GitHub Copilot, or Windsurf",
 		"AI families [codex,claude, default]:",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
@@ -1043,9 +1044,19 @@ func TestInitQuestionsUseDefaultsAndPersistCanonicalSelections(t *testing.T) {
 		t.Fatalf("workspace policy = %+v, want selections %#v", loaded, wantSelections)
 	}
 	text := output.String()
-	for _, name := range []string{"just", "agent", "cmake", "docker", "go", "make"} {
-		if !strings.Contains(text, name+" runner") {
+	for _, name := range []string{"just", "AI agent", "CMake", "Docker", "Golang", "GNU Make"} {
+		if !strings.Contains(text, "Which mode should the "+name+" runner use?") {
 			t.Errorf("init output did not ask for %s runner:\n%s", name, text)
+		}
+	}
+	for _, help := range []string{
+		"Runs the recipes of the justfiles in this workspace.\n" + runnerIntro + "\n" +
+			unreviewedRunnerNote + "\n",
+		"Runs the go command on the Go modules of this workspace: build, test, vet, " +
+			"and module downloads.\n" + runnerIntro + "\n  safe",
+	} {
+		if !strings.Contains(text, help) {
+			t.Fatalf("runner help %q was not shown:\n%s", help, text)
 		}
 	}
 	for _, warning := range []string{
@@ -1075,7 +1086,7 @@ func TestInitRunnerOverrideSkipsQuestionAndCanDisable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(output.String(), "go runner") {
+	if strings.Contains(output.String(), "Golang runner") {
 		t.Fatalf("overridden Go runner was still questioned:\n%s", output.String())
 	}
 	loaded, err := policy.Load(dir)
@@ -1190,10 +1201,10 @@ func TestInitDryRunWritesOnlyDiffsToResultOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(result.String(), "--- ") ||
-		strings.Contains(result.String(), "go runner") || strings.Contains(result.String(), "Mode [") {
+		strings.Contains(result.String(), "Golang runner") || strings.Contains(result.String(), "Mode [") {
 		t.Fatalf("dry-run result is not diff-only:\n%s", result.String())
 	}
-	if !strings.Contains(diagnostics.String(), "go runner") {
+	if !strings.Contains(diagnostics.String(), "Golang runner") {
 		t.Fatalf("dry-run prompts are not on diagnostics:\n%s", diagnostics.String())
 	}
 	after, err := os.ReadFile(agentPath)
@@ -1840,15 +1851,26 @@ func TestInitClaudeQuestionListsTheAnsweredShellPermission(t *testing.T) {
 	}
 	var allowLine string
 	for line := range strings.SplitSeq(diagnostics.String(), "\n") {
-		if strings.HasPrefix(line, "  ask:   ") {
+		if strings.HasPrefix(line, "With yes, these still ask every time: ") {
 			t.Fatalf("the allow answer still listed shell tools under ask:\n%s", diagnostics.String())
 		}
-		if strings.HasPrefix(line, "  allow: ") {
+		if strings.HasPrefix(line, "With yes, these run without asking: ") {
 			allowLine = line
 		}
 	}
-	if !strings.Contains(allowLine, agentinit.ClaudeToolPrefix+"run_shell_command") {
-		t.Fatalf("the Claude question does not allow the shell tools:\n%s", diagnostics.String())
+	if !strings.Contains(allowLine, "run_shell_command") ||
+		strings.Contains(allowLine, agentinit.ClaudeToolPrefix) {
+		t.Fatalf("the Claude question does not allow the shell tools by name:\n%s", diagnostics.String())
+	}
+	for _, want := range []string{
+		"Claude Code asks you before it uses a tool its settings do not allow.",
+		"  yes - Allow JMW tools: ",
+		"  no (default) - Ask every time: ",
+		"Allow them? [y/N]: ",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("the Claude question lacks %q:\n%s", want, diagnostics.String())
+		}
 	}
 }
 
@@ -2862,7 +2884,7 @@ func TestInitClaudeConfirmationReportsAccurateOutcomeOnFreshWorkspace(t *testing
 	if initErr != nil {
 		t.Fatal(initErr)
 	}
-	if !strings.Contains(output.String(), "not applied") ||
+	if !strings.Contains(output.String(), "not written") ||
 		!strings.Contains(output.String(), "--claude-permissions=no") {
 		t.Fatalf("no-answer message does not report the real outcome:\n%s", output.String())
 	}
@@ -2953,7 +2975,7 @@ func TestInitShellPermissionFlagSkipsPrompt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(diagnostics.String(), "How should the Claude permission lists") {
+			if strings.Contains(diagnostics.String(), "May your AI agents run shell commands through JMW") {
 				t.Fatalf("--shell-permission path prompted:\n%s", diagnostics.String())
 			}
 		})
@@ -3012,7 +3034,7 @@ func TestInitNormalizesAgentsBeforeAskingShellPermission(t *testing.T) {
 	); err != nil {
 		t.Fatalf("mixed-case Claude init error = %v, want nil", err)
 	}
-	if !strings.Contains(diagnostics.String(), "Shell permission") {
+	if !strings.Contains(diagnostics.String(), "Shell commands [") {
 		t.Fatalf("mixed-case Claude init did not ask for shell permission:\n%s", diagnostics.String())
 	}
 }
@@ -3044,7 +3066,7 @@ func TestInitEmptyAgentSelectionOffersCurrentShellPermission(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"allow (current)", "Shell permission [allow, current]:"} {
+	for _, want := range []string{"allow (current)", "Shell commands [allow, current]:"} {
 		if !strings.Contains(diagnostics.String(), want) {
 			t.Fatalf("empty agent selection prompt lacks %q:\n%s", want, diagnostics.String())
 		}
@@ -3068,7 +3090,7 @@ func TestInitClaudePermissionNoWithoutMCPConfigDoesNotAskShellPermission(t *test
 	); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(diagnostics.String(), "How should the Claude permission lists") {
+	if strings.Contains(diagnostics.String(), "May your AI agents run shell commands through JMW") {
 		t.Fatalf("Claude permission cleanup asked for shell permission:\n%s", diagnostics.String())
 	}
 }
@@ -3092,16 +3114,14 @@ func TestInitClaudeConfirmationShowsResolvedShellPermission(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	shellRule := agentinit.ClaudeToolPrefix + "run_shell_command"
-	allowStart := strings.Index(diagnostics.String(), "  allow: ")
-	if allowStart < 0 || !strings.Contains(diagnostics.String()[allowStart:], shellRule) {
+	allowStart := strings.Index(diagnostics.String(), "With yes, these run without asking: ")
+	if allowStart < 0 || !strings.Contains(diagnostics.String()[allowStart:], "run_shell_command") {
 		t.Fatalf(
-			"Claude confirmation does not show the shell rule under allow:\n%s",
+			"Claude confirmation does not show the shell tool among the allowed ones:\n%s",
 			diagnostics.String(),
 		)
 	}
-	if strings.Contains(diagnostics.String(), "\n  ask:   \n") ||
-		strings.Contains(diagnostics.String(), "\n  ask:") {
+	if strings.Contains(diagnostics.String(), "With yes, these still ask every time:") {
 		t.Fatalf("Claude confirmation shows an empty ask list:\n%s", diagnostics.String())
 	}
 }
@@ -3195,7 +3215,7 @@ func TestInitInteractiveShellPermissionOffersCurrentChoice(t *testing.T) {
 	for _, want := range []string{
 		"allow (current)",
 		"ask (default)",
-		"Shell permission [allow, current]:",
+		"Shell commands [allow, current]:",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
 			t.Fatalf("current shell permission prompt lacks %q:\n%s", want, diagnostics.String())
@@ -3240,9 +3260,9 @@ func TestInitCodexOnlyShellPermissionRoundTripKeepsRecordedAllow(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		"How should the Claude permission lists and Codex approval modes handle",
-		"use the Claude allow list and Codex approve mode",
-		"use the Claude ask list and Codex prompt mode",
+		"May your AI agents run shell commands through JMW without asking you?",
+		"Run without asking: the Claude Code allow list and the Codex approve mode",
+		"Ask every time: the Claude Code ask list and the Codex prompt mode",
 		"allow (current)",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
@@ -3307,7 +3327,7 @@ func TestInitInteractiveShellPermissionDoesNotOfferSplitChoiceAsCurrent(t *testi
 		t.Fatal(err)
 	}
 	if strings.Contains(diagnostics.String(), "current") ||
-		!strings.Contains(diagnostics.String(), "Shell permission [ask, default]:") {
+		!strings.Contains(diagnostics.String(), "Shell commands [ask, default]:") {
 		t.Fatalf("split shell permissions were offered as current:\n%s", diagnostics.String())
 	}
 }
@@ -3331,7 +3351,7 @@ func TestInitCodexOnlyWithoutMCPConfigDoesNotAskShellPermission(t *testing.T) {
 	); err != nil {
 		t.Fatalf("Codex-only config-free init error = %v, want nil", err)
 	}
-	if strings.Contains(diagnostics.String(), "How should the Claude permission lists") {
+	if strings.Contains(diagnostics.String(), "May your AI agents run shell commands through JMW") {
 		t.Fatalf("Codex-only init asked for a shell permission:\n%s", diagnostics.String())
 	}
 	manifest, err := os.ReadFile(filepath.Join(dir, ".just-mcp-work", "managed.json"))
@@ -3430,7 +3450,7 @@ func TestInitMachineTargetRejectsUnsupportedAgentsBeforeLaterQuestions(t *testin
 			if testCase.wantChoices &&
 				!strings.Contains(
 					diagnostics.String(),
-					"machine-wide instruction files for claude, codex, and windsurf",
+					"machine-wide instruction files of Claude Code, Codex, and Windsurf",
 				) {
 				t.Fatalf("machine choice omitted supported agents:\n%s", diagnostics.String())
 			}

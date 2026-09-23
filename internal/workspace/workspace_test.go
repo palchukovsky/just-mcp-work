@@ -2070,7 +2070,7 @@ func canonicalTestPath(t *testing.T, path string) string {
 }
 
 func testRegistration(candidate runner.Runner) runner.Registration {
-	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions())
+	return runner.StaticRegistration(candidate, runner.UnreviewedPermissions("Test", "Runs test tasks."))
 }
 
 func (fakeJustRunner) Detect(projectDir string) (bool, error) {

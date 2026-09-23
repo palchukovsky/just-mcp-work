@@ -30,7 +30,7 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			name: "empty name",
 			registrations: []runner.Registration{runner.NewRegistration(
 				"",
-				runner.UnreviewedPermissions(),
+				runner.UnreviewedPermissions("Test", "Runs test tasks."),
 				validFactory,
 			)},
 			want: "name must not be empty",
@@ -39,7 +39,7 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			name: "name breaks persisted mode",
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake=alias",
-				runner.UnreviewedPermissions(),
+				runner.UnreviewedPermissions("Test", "Runs test tasks."),
 				validFactory,
 			)},
 			want: "must not contain '=' or ':'",
@@ -48,7 +48,7 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			name: "name breaks task namespace",
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake:alias",
-				runner.UnreviewedPermissions(),
+				runner.UnreviewedPermissions("Test", "Runs test tasks."),
 				validFactory,
 			)},
 			want: "must not contain '=' or ':'",
@@ -94,8 +94,8 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake",
 				runner.ReviewedPermissions(
-					"Choose access.",
-					"Reviewed context.",
+					"Fake",
+					"Runs fake tasks.",
 					runner.ModeAll,
 					testPermissionChoice(runner.ModeAll),
 				),
@@ -104,26 +104,26 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			want: "must declare disabled mode",
 		},
 		{
-			name: "missing question",
+			name: "missing title",
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake",
 				runner.ReviewedPermissions(
 					"",
-					"Reviewed context.",
+					"Runs fake tasks.",
 					runner.ModeAll,
 					testPermissionChoice(runner.ModeAll),
 					testPermissionChoice(runner.ModeDisabled),
 				),
 				validFactory,
 			)},
-			want: "no permission question",
+			want: "declares no title",
 		},
 		{
-			name: "missing context",
+			name: "missing summary",
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake",
 				runner.ReviewedPermissions(
-					"Choose access.",
+					"Fake",
 					"",
 					runner.ModeAll,
 					testPermissionChoice(runner.ModeAll),
@@ -131,13 +131,13 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 				),
 				validFactory,
 			)},
-			want: "no permission context",
+			want: "declares no summary",
 		},
 		{
 			name: "missing choices",
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake",
-				runner.ReviewedPermissions("Choose access.", "Reviewed context.", runner.ModeAll),
+				runner.ReviewedPermissions("Fake", "Runs fake tasks.", runner.ModeAll),
 				validFactory,
 			)},
 			want: "no permission choices",
@@ -147,8 +147,8 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake",
 				runner.ReviewedPermissions(
-					"Choose access.",
-					"Reviewed context.",
+					"Fake",
+					"Runs fake tasks.",
 					runner.ModeAll,
 					runner.PermissionChoice{
 						Mode:        runner.ModeAll,
@@ -165,8 +165,8 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			registrations: []runner.Registration{runner.NewRegistration(
 				"fake",
 				runner.ReviewedPermissions(
-					"Choose access.",
-					"Reviewed context.",
+					"Fake",
+					"Runs fake tasks.",
 					runner.ModeAll,
 					runner.PermissionChoice{Mode: runner.ModeAll, Label: "All"},
 					testPermissionChoice(runner.ModeDisabled),
@@ -180,12 +180,12 @@ func TestCatalogRejectsInvalidRegistrations(t *testing.T) {
 			registrations: []runner.Registration{
 				runner.NewRegistration(
 					"fake",
-					runner.UnreviewedPermissions(),
+					runner.UnreviewedPermissions("Test", "Runs test tasks."),
 					validFactory,
 				),
 				runner.NewRegistration(
 					"fake",
-					runner.UnreviewedPermissions(),
+					runner.UnreviewedPermissions("Test", "Runs test tasks."),
 					validFactory,
 				),
 			},
@@ -208,8 +208,8 @@ func TestCatalogPermissionRequestsAreCopied(t *testing.T) {
 		testPermissionChoice(runner.ModeDisabled),
 	}
 	declaration := runner.ReviewedPermissions(
-		"Choose fake access.",
-		"The fake runner was reviewed.",
+		"Fake",
+		"Runs fake tasks.",
 		runner.ModeSafe,
 		choices...,
 	)
@@ -223,7 +223,8 @@ func TestCatalogPermissionRequestsAreCopied(t *testing.T) {
 		t.Fatal(err)
 	}
 	requests := catalog.PermissionRequests()
-	if len(requests) != 1 || requests[0].Name != "fake" || !requests[0].Reviewed ||
+	if len(requests) != 1 || requests[0].Name != "fake" || requests[0].Title != "Fake" ||
+		requests[0].Summary != "Runs fake tasks." || !requests[0].Reviewed ||
 		requests[0].Default != runner.ModeSafe || requests[0].Choices[0].Label != "safe label" {
 		t.Fatalf("permission requests = %#v", requests)
 	}
@@ -237,7 +238,7 @@ func TestCatalogPermissionRequestsAreCopied(t *testing.T) {
 
 func TestCatalogRejectsTypedNilStaticRunnerBeforeCallingName(t *testing.T) {
 	var candidate *nilPanickingRunner
-	registration := runner.StaticRegistration(candidate, runner.UnreviewedPermissions())
+	registration := runner.StaticRegistration(candidate, runner.UnreviewedPermissions("Test", "Runs test tasks."))
 	if _, err := runner.NewCatalog(registration); err == nil {
 		t.Fatal("NewCatalog accepted a typed-nil static runner")
 	}
@@ -247,7 +248,7 @@ func TestCatalogDoesNotConstructDisabledRunner(t *testing.T) {
 	calls := 0
 	catalog, err := runner.NewCatalog(runner.NewRegistration(
 		"fake",
-		runner.UnreviewedPermissions(),
+		runner.UnreviewedPermissions("Test", "Runs test tasks."),
 		func(runner.Mode) (runner.Runner, error) {
 			calls++
 			return fakeRunner{name: "fake"}, nil
@@ -302,7 +303,7 @@ func TestSelectedRunnerFactoryFailuresFailClosed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			catalog, err := runner.NewCatalog(runner.NewRegistration(
 				"fake",
-				runner.UnreviewedPermissions(),
+				runner.UnreviewedPermissions("Test", "Runs test tasks."),
 				test.factory,
 			))
 			if err != nil {
@@ -331,7 +332,7 @@ func TestSafeRunnerRequiresTaskInputValidator(t *testing.T) {
 
 func TestCatalogSelectionsFailClosed(t *testing.T) {
 	catalog, err := runner.NewCatalog(
-		runner.StaticRegistration(fakeRunner{name: "fake"}, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(fakeRunner{name: "fake"}, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -362,8 +363,8 @@ func TestCatalogSelectionsFailClosed(t *testing.T) {
 
 func TestCatalogDisabledSelectionsAreCompleteAndOrdered(t *testing.T) {
 	catalog, err := runner.NewCatalog(
-		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions()),
-		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
+		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -387,8 +388,8 @@ func TestCatalogDisabledSelectionsAreCompleteAndOrdered(t *testing.T) {
 
 func TestCatalogCanonicalSelectionsAreCompleteAndOrdered(t *testing.T) {
 	catalog, err := runner.NewCatalog(
-		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions()),
-		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
+		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -422,8 +423,8 @@ func TestCatalogCanonicalSelectionsAreCompleteAndOrdered(t *testing.T) {
 
 func TestCatalogCompleteSelectionsRejectsOnlyIncompleteSets(t *testing.T) {
 	catalog, err := runner.NewCatalog(
-		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions()),
-		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(fakeRunner{name: "first"}, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
+		runner.StaticRegistration(fakeRunner{name: "second"}, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -472,7 +473,7 @@ func TestValidatedSelectionsZeroValueIsInvalid(t *testing.T) {
 func TestUnreviewedRegistrationDefaultsToAllAndCanBeDisabled(t *testing.T) {
 	candidate := fakeRunner{name: "fake"}
 	catalog, err := runner.NewCatalog(
-		runner.StaticRegistration(candidate, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(candidate, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -509,8 +510,8 @@ func testReviewedPermissions(
 		choices = append(choices, testPermissionChoice(mode))
 	}
 	return runner.ReviewedPermissions(
-		"Choose fake access.",
-		"The fake runner was reviewed.",
+		"Fake",
+		"Runs fake tasks.",
 		defaultMode,
 		choices...,
 	)

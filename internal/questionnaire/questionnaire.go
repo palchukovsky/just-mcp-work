@@ -57,7 +57,8 @@ type Question struct {
 	Subject string
 	// Title is the question itself.
 	Title string
-	// Context explains the question.
+	// Context explains the question, the line that matters most first: a front
+	// end short of room may show only that one.
 	Context []string
 	// ContextFor adds explanation that depends on the answers given so far;
 	// nil means the question has none.
@@ -65,7 +66,8 @@ type Question struct {
 	// Notices are what the operator should know before answering, such as a
 	// recorded answer that could not be reused.
 	Notices []string
-	// Choices are the answers a Choose question accepts.
+	// Choices are the answers a Choose question accepts. A Confirm question
+	// may describe its Yes and No here; its answers stay those two either way.
 	Choices []Choice
 	// Defaults are the answers the question proposes on its own.
 	Defaults []string

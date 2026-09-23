@@ -2459,15 +2459,16 @@ func tomlStringArray(values []string) (string, error) {
 }
 
 // AIFamilyConfig names the generated configuration whose client declares
-// family, the same pairing planMCPConfig and planCodexConfig write.
-func AIFamilyConfig(family aiprofile.Family) (string, bool) {
+// family, the same pairing planMCPConfig and planCodexConfig write, and the
+// agent that reads it, by the name people know it by.
+func AIFamilyConfig(family aiprofile.Family) (config string, agent string, found bool) {
 	switch family {
 	case aiprofile.FamilyClaude:
-		return mcpConfig, true
+		return mcpConfig, "Claude Code", true
 	case aiprofile.FamilyCodex:
-		return codexConfig, true
+		return codexConfig, "Codex", true
 	}
-	return "", false
+	return "", "", false
 }
 
 func managedServerArgs(root string, profile aiprofile.Profile) []string {

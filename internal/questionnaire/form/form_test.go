@@ -246,20 +246,177 @@ func TestFormShowsEveryChoiceOnRequest(t *testing.T) {
 	current := newModel("init", testQuestions())
 	current, _ = press(t, current, key(tea.KeyDown), key(tea.KeyDown), key(tea.KeyDown))
 	screen := ansi.Strip(current.render())
-	if strings.Contains(screen, "all - All commands") {
-		t.Fatalf("details show other choices before they were asked for:\n%s", screen)
+	for _, want := range []string{
+		"● safe (default) - Reduced access",
+		"     fixed tasks",
+		"○ all - All commands",
+		"○ disabled - Disabled",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Fatalf("details lack %q:\n%s", want, screen)
+		}
+	}
+	for _, unasked := range []string{"any argv", "WARNING: risky", "hidden"} {
+		if strings.Contains(screen, unasked) {
+			t.Fatalf("details explain %q before it was asked for:\n%s", unasked, screen)
+		}
 	}
 	current, _ = press(t, current, text("?"))
 	screen = ansi.Strip(current.render())
 	for _, want := range []string{
-		"safe (default) - Reduced access: fixed tasks",
-		"all - All commands: any argv",
-		"WARNING: risky",
-		"disabled - Disabled: hidden",
+		"     fixed tasks",
+		"     any argv",
+		"     WARNING: risky",
+		"     hidden",
 	} {
 		if !strings.Contains(screen, want) {
 			t.Fatalf("details lack %q after ?:\n%s", want, screen)
 		}
+	}
+}
+
+func TestFormNamesChoicesByTheirLabels(t *testing.T) {
+	questions := testQuestions()
+	questions[1].Choices[0].Label = "Codex"
+	questions[1].Choices[1].Label = "Claude Code"
+	current := newModel("init", questions)
+	current, _ = press(t, current, key(tea.KeyDown))
+	screen := ansi.Strip(current.render())
+	for _, want := range []string{
+		"[x] Codex",
+		"[x] Claude Code",
+		"[x] codex (default) - Codex",
+		"     declare codex",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Fatalf("screen lacks %q:\n%s", want, screen)
+		}
+	}
+}
+
+func TestFormDrawsAMixedSectionAsAHeadingOverRows(t *testing.T) {
+	questions := []questionnaire.Question{
+		{
+			ID:      "shell",
+			Section: "Permissions",
+			Subject: "Shell commands",
+			Title:   "Run shell commands without asking?",
+			Choices: []questionnaire.Choice{
+				{Value: "allow", Label: "Run without asking", Description: "the allow list"},
+				{Value: "ask", Label: "Ask every time", Description: "the ask list"},
+			},
+			Defaults: []string{"ask"},
+			Offer:    []string{"ask"},
+		},
+		{
+			ID:      "claude",
+			Kind:    questionnaire.Confirm,
+			Section: "Permissions",
+			Subject: "Claude Code",
+			Title:   "Allow the tools?",
+			Choices: []questionnaire.Choice{
+				{Value: questionnaire.Yes, Label: "Allow the tools", Description: "write the entries"},
+				{Value: questionnaire.No, Label: "Ask every time", Description: "remove the entries"},
+			},
+			Defaults: []string{questionnaire.No},
+			Offer:    []string{questionnaire.No},
+		},
+	}
+	current := newModel("init", questions)
+	lines := strings.Split(ansi.Strip(current.render()), "\n")
+	heading := slices.IndexFunc(lines, func(line string) bool {
+		return strings.TrimSpace(line) == "Permissions"
+	})
+	if heading < 0 || heading+2 >= len(lines) {
+		t.Fatalf("the section has no heading of its own:\n%s", strings.Join(lines, "\n"))
+	}
+	for offset, want := range [][]string{
+		{"Shell commands", "‹ ask ›  Ask every time"},
+		{"Claude Code", "‹ no ›  Ask every time"},
+	} {
+		row := lines[heading+1+offset]
+		if !strings.Contains(row, want[0]) || !strings.Contains(row, want[1]) {
+			t.Fatalf("row %d under the heading = %q, want %q", offset, row, want)
+		}
+	}
+	current, _ = press(t, current, key(tea.KeyDown), key(tea.KeyLeft))
+	if got := current.answers()["claude"]; !slices.Equal(got, []string{questionnaire.Yes}) {
+		t.Fatalf("claude answer = %v, want yes", got)
+	}
+	screen := ansi.Strip(current.render())
+	for _, want := range []string{"● yes - Allow the tools", "     write the entries", "○ no (default) - Ask every time"} {
+		if !strings.Contains(screen, want) {
+			t.Fatalf("details lack %q:\n%s", want, screen)
+		}
+	}
+}
+
+func TestFormDrawsALoneSectionQuestionAsAHeadingOverItsRow(t *testing.T) {
+	questions := testQuestions()
+	questions = append(questions[:3], questions[4:]...) // runner:go stays alone
+	lines := strings.Split(ansi.Strip(newModel("init", questions).render()), "\n")
+	heading := slices.IndexFunc(lines, func(line string) bool {
+		return strings.TrimSpace(line) == "Runners"
+	})
+	if heading < 0 || !strings.Contains(lines[heading+1], "go") ||
+		!strings.Contains(lines[heading+1], "‹ safe ›  Reduced access") {
+		t.Fatalf("a lone section question is not a heading over its row:\n%s", strings.Join(lines, "\n"))
+	}
+	for index := 1; index < len(lines); index++ {
+		if lines[index] == "" && lines[index-1] == "" {
+			t.Fatalf("the form has two blank lines in a row at %d:\n%s", index, strings.Join(lines, "\n"))
+		}
+	}
+}
+
+func TestFormExplainsTheFocusedChoiceEvenWhenItIsOff(t *testing.T) {
+	current := newModel("init", testQuestions())
+	current, _ = press(t, current, key(tea.KeyDown), key(tea.KeySpace))
+	screen := ansi.Strip(current.render())
+	if !strings.Contains(screen, "[ ] codex (default) - declare codex") {
+		t.Fatalf("the unchecked choice is not explained:\n%s", screen)
+	}
+}
+
+func TestFormKeepsHalfTheScreenForTheBodyWithTheBlockHeading(t *testing.T) {
+	questions := make([]questionnaire.Question, 0, 6)
+	for _, name := range []string{"r1", "r2", "r3", "r4", "r5", "r6"} {
+		questions = append(questions, questionnaire.Question{
+			ID:      "runner:" + name,
+			Section: "Runners",
+			Subject: name,
+			Title:   "Which mode should " + name + " use?",
+			Context: []string{"What " + name + " runs.", "What a runner is."},
+			Choices: []questionnaire.Choice{
+				{Value: "all", Label: "Current access", Description: "every command", Warning: "not a sandbox"},
+				{Value: "disabled", Label: "Disabled", Description: "hidden"},
+			},
+			Defaults: []string{"all"},
+			Offer:    []string{"all"},
+			Flag:     "--runner-mode " + name + "=<mode>",
+		})
+	}
+	current := newModel("init", questions)
+	current.width, current.height = 80, 14
+	current.cursor = 2
+	lines := strings.Split(ansi.Strip(current.render()), "\n")
+	if len(lines) > 14 {
+		t.Fatalf("screen has %d lines on a 14-line terminal", len(lines))
+	}
+	screen := strings.Join(lines, "\n")
+	for _, want := range []string{"Runners", "► r3", "What r3 runs.", "● all (default) - Current access", "WARNING: not a sandbox"} {
+		if !strings.Contains(screen, want) {
+			t.Fatalf("screen lacks %q:\n%s", want, screen)
+		}
+	}
+	for _, dropped := range []string{"What a runner is.", "○ disabled", "flag: --runner-mode"} {
+		if strings.Contains(screen, dropped) {
+			t.Fatalf("compact details still show %q:\n%s", dropped, screen)
+		}
+	}
+	current.showAll = true
+	if screen = ansi.Strip(current.render()); !strings.Contains(screen, "What a runner is.") {
+		t.Fatalf("? did not bring every detail back:\n%s", screen)
 	}
 }
 

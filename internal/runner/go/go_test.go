@@ -28,7 +28,9 @@ func TestRegistrationDeclaresExactReviewedInitPrompt(t *testing.T) {
 	}
 	request := requests[0]
 	if request.Name != "go" || !request.Reviewed || request.Default != runner.ModeSafe ||
-		request.Question != "Choose Go command access." {
+		request.Title != "Golang" ||
+		request.Summary != "Runs the go command on the Go modules of this workspace: build, test, vet, "+
+			"and module downloads." {
 		t.Fatalf("Go permission request = %#v", request)
 	}
 	want := []runner.PermissionChoice{

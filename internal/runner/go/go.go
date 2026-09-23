@@ -112,8 +112,9 @@ func Registration(binary string) runner.Registration {
 
 func registration(binary string, specs []taskSpec) runner.Registration {
 	permissions := runner.ReviewedPermissions(
-		"Choose Go command access.",
-		"The Go runner has a reviewed, table-driven command surface.",
+		"Golang",
+		"Runs the go command on the Go modules of this workspace: build, test, vet, "+
+			"and module downloads.",
 		runner.ModeSafe,
 		runner.PermissionChoice{
 			Mode:  runner.ModeSafe,

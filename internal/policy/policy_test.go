@@ -604,7 +604,7 @@ func validatedSelections(
 	for _, name := range names {
 		registrations = append(registrations, runner.NewRegistration(
 			name,
-			runner.UnreviewedPermissions(),
+			runner.UnreviewedPermissions("Test", "Runs test tasks."),
 			func(runner.Mode) (runner.Runner, error) {
 				return nil, runner.ErrToolUnavailable
 			},

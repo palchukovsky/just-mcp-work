@@ -306,7 +306,7 @@ func TestTaskInputValidationPrecedesRunnerVersionAndProcessStart(t *testing.T) {
 	}
 	candidate := &rejectingVersionRunner{}
 	registry, err := runner.NewRegistry(
-		runner.StaticRegistration(candidate, runner.UnreviewedPermissions()),
+		runner.StaticRegistration(candidate, runner.UnreviewedPermissions("Test", "Runs test tasks.")),
 	)
 	if err != nil {
 		t.Fatal(err)
