@@ -454,6 +454,175 @@ func TestFormKeepsTheFocusedRowWhenDetailsFillTheScreen(t *testing.T) {
 	}
 }
 
+func discoveryQuestions() []questionnaire.Question {
+	return []questionnaire.Question{
+		{
+			ID:      "mode",
+			Section: "Discovery",
+			Subject: "Skipped",
+			Title:   "What should discovery skip?",
+			Badge:   "2 recommended found",
+			Choices: []questionnaire.Choice{
+				{Value: "none", Label: "Nothing else", Description: "skip nothing"},
+				{Value: "custom", Label: "Your list", Description: "skip what you list"},
+			},
+			Defaults: []string{"none"},
+			Offer:    []string{"none"},
+		},
+		{
+			ID:      "dirs",
+			Kind:    questionnaire.List,
+			Section: "Discovery",
+			Subject: "Your list",
+			Title:   "Which directories?",
+			Offer:   []string{"a", "b", "c", "d"},
+			When: func(answers questionnaire.Answers) bool {
+				return slices.Equal(answers["mode"], []string{"custom"})
+			},
+			Validate: func(values []string) error {
+				if len(values) == 0 {
+					return errors.New("list at least one directory")
+				}
+				return nil
+			},
+		},
+	}
+}
+
+func ctrl(code rune) tea.KeyPressMsg {
+	return tea.KeyPressMsg{Code: code, Mod: tea.ModCtrl}
+}
+
+func TestFormShowsAQuestionOnlyWhileItApplies(t *testing.T) {
+	current := newModel("init", discoveryQuestions())
+	if len(current.items) != 2 {
+		t.Fatalf("rows = %d, want the mode row and the apply row", len(current.items))
+	}
+	screen := ansi.Strip(current.render())
+	if !strings.Contains(screen, "‹ none ›  Nothing else  2 recommended found") {
+		t.Fatalf("the mode row does not show its badge:\n%s", screen)
+	}
+	if strings.Contains(screen, "‹ a, b") {
+		t.Fatalf("a question that does not apply is shown:\n%s", screen)
+	}
+	current, _ = press(t, current, key(tea.KeyRight))
+	if len(current.items) != 3 {
+		t.Fatalf("rows = %d, want the list row to appear", len(current.items))
+	}
+	if screen = ansi.Strip(current.render()); !strings.Contains(
+		screen,
+		"Your list     ‹ a, b, c, +1 more ›",
+	) {
+		t.Fatalf("the list row does not show its values in short:\n%s", screen)
+	}
+	current, _ = press(t, current, key(tea.KeyLeft), key(tea.KeyEnter), key(tea.KeyEnter))
+	if !current.submitted {
+		t.Fatal("the form did not apply")
+	}
+	if answers := current.answers(); !slices.Equal(answers["mode"], []string{"none"}) ||
+		len(answers) != 1 {
+		t.Fatalf("answers = %v, want only the mode", answers)
+	}
+}
+
+func TestFormEditsAListAnswer(t *testing.T) {
+	current := newModel("init", discoveryQuestions())
+	current, _ = press(t, current, key(tea.KeyRight), key(tea.KeyDown), key(tea.KeyEnter))
+	if !current.editing || current.draft != "a, b, c, d" {
+		t.Fatalf("editing = %v with draft %q, want the values to edit", current.editing, current.draft)
+	}
+	// Keys that move or quit the form are text while a list is typed.
+	current, cmd := press(
+		t,
+		current,
+		ctrl('u'),
+		text("q"),
+		text(","),
+		text(" "),
+		text("j"),
+		text("x"),
+		key(tea.KeyBackspace),
+	)
+	if cmd != nil {
+		t.Fatal("a typed key produced a command")
+	}
+	screen := ansi.Strip(current.render())
+	if !strings.Contains(screen, "‹ q, j▌ ›") || !strings.Contains(screen, "enter done") {
+		t.Fatalf("the list being typed is not shown:\n%s", screen)
+	}
+	current, _ = press(t, current, key(tea.KeyEnter))
+	if current.editing || !slices.Equal(current.values[1], []string{"q", "j"}) {
+		t.Fatalf("values = %v, editing = %v, want the typed values kept", current.values[1], current.editing)
+	}
+	if current.items[current.cursor].question != applyRow {
+		t.Fatal("finishing the list did not move to the next row")
+	}
+	current, _ = press(t, current, key(tea.KeyEnter))
+	if answers := current.answers(); !current.submitted ||
+		!slices.Equal(answers["dirs"], []string{"q", "j"}) {
+		t.Fatalf("submitted = %v, answers = %v, want the typed list", current.submitted, answers)
+	}
+}
+
+func paste(t *testing.T, current model, content string) model {
+	t.Helper()
+	next, _ := current.Update(tea.PasteMsg{Content: content})
+	updated, ok := next.(model)
+	if !ok {
+		t.Fatalf("Update returned %T, want model", next)
+	}
+	return updated
+}
+
+func TestFormPastesIntoAListOnlyWhileEditing(t *testing.T) {
+	current := newModel("init", discoveryQuestions())
+	current, _ = press(t, current, key(tea.KeyRight), key(tea.KeyDown))
+	current = paste(t, current, "ignored")
+	current, _ = press(t, current, key(tea.KeyEnter), ctrl('u'))
+	current = paste(t, current, "out, tools/*/gen\ngitlab-runner\r\n")
+	current, _ = press(t, current, key(tea.KeyEnter))
+	want := []string{"out", "tools/*/gen", "gitlab-runner"}
+	if !slices.Equal(current.values[1], want) {
+		t.Fatalf("values = %v, want the pasted lines as values %v", current.values[1], want)
+	}
+}
+
+func TestFormEscapeDropsAListEdit(t *testing.T) {
+	current := newModel("init", discoveryQuestions())
+	current, _ = press(t, current, key(tea.KeyRight), key(tea.KeyDown), key(tea.KeySpace))
+	current, cmd := press(t, current, text("z"), key(tea.KeyEscape))
+	if cmd != nil || current.editing {
+		t.Fatal("escape closed the form or kept editing, want the edit dropped")
+	}
+	if !slices.Equal(current.values[1], []string{"a", "b", "c", "d"}) {
+		t.Fatalf("values = %v, want them unchanged", current.values[1])
+	}
+}
+
+func TestFormRefusesAListValidateRejects(t *testing.T) {
+	current := newModel("init", discoveryQuestions())
+	current, _ = press(
+		t,
+		current,
+		key(tea.KeyRight),
+		key(tea.KeyDown),
+		key(tea.KeyEnter),
+		ctrl('u'),
+		key(tea.KeyEnter),
+		key(tea.KeyEnter),
+	)
+	if current.submitted {
+		t.Fatal("the form applied an empty list its question refuses")
+	}
+	if current.items[current.cursor].question != 1 {
+		t.Fatal("the cursor did not return to the refused list")
+	}
+	screen := ansi.Strip(current.render())
+	if !strings.Contains(screen, "‹ none ›") || !strings.Contains(screen, "list at least one directory") {
+		t.Fatalf("the refused list is not shown:\n%s", screen)
+	}
+}
+
 func TestDecideShowsTheFormOnlyInACapableTerminal(t *testing.T) {
 	for _, testCase := range []struct {
 		name  string

@@ -30,6 +30,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/runstore"
 	"github.com/palchukovsky/just-mcp-work/internal/version"
+	"github.com/palchukovsky/just-mcp-work/internal/workspace"
 )
 
 func TestRunPrintsVersionWithFlagAlias(t *testing.T) {
@@ -116,7 +117,7 @@ func TestRunRejectsRemovedInitBetaTestCommand(t *testing.T) {
 }
 
 func defaultRunnerInput() *strings.Reader {
-	return strings.NewReader(strings.Repeat("\n", 9))
+	return strings.NewReader(strings.Repeat("\n", 10))
 }
 
 func initArgsWithRunnerModes(dir string) []string {
@@ -124,6 +125,16 @@ func initArgsWithRunnerModes(dir string) []string {
 }
 
 func initArgsWithRunnerModesWithoutAI(dir string) []string {
+	return append(initArgsAskingOnlyExclusionsWithoutAI(dir), "--exclude-mode", "none")
+}
+
+// initArgsAskingOnlyExclusions answers every init question by a flag except
+// which directories discovery skips.
+func initArgsAskingOnlyExclusions(dir string) []string {
+	return append(initArgsAskingOnlyExclusionsWithoutAI(dir), "--ai", "codex")
+}
+
+func initArgsAskingOnlyExclusionsWithoutAI(dir string) []string {
 	return []string{
 		"--dir", dir,
 		"--instructions-target", "workspace",
@@ -1105,8 +1116,9 @@ func TestInitRunnerQuestionRepromptsAndSharesInputWithClaudeConfirmation(t *test
 	// The first line is invalid for Just, and the sixth line is a valid Go mode
 	// typed in the wrong case, which must be rejected literally rather than
 	// silently lowercased. The remaining lines answer the repeated Just
-	// question, the other runner questions, and the Claude confirmation.
-	input := strings.NewReader("\nsafe\nall\nsafe\nall\nall\nSAFE\nsafe\nall\n\ny\n")
+	// question, the other runner questions, the skipped directories, the shell
+	// permission, and the Claude confirmation.
+	input := strings.NewReader("\nsafe\nall\nsafe\nall\nall\nSAFE\nsafe\nall\n\n\ny\n")
 	err := initWithBetaTest(
 		false,
 		[]string{
@@ -1234,6 +1246,418 @@ func TestInitDryRunReportsPolicyWithoutWritingIt(t *testing.T) {
 	}
 }
 
+func mkdirs(t *testing.T, root string, paths ...string) {
+	t.Helper()
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(path)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestFindRecommendationsReportsOnlyTheOutermostVisibleMatch(t *testing.T) {
+	dir := t.TempDir()
+	mkdirs(
+		t,
+		dir,
+		"desktop/build/_deps/json-src/tests",
+		"rnp/build",
+		"web/node_modules/pkg/build",
+		".hidden/external",
+		"src/builder",
+	)
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(filepath.Join(dir, "src"), filepath.Join(dir, "vendor")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	found, unreadable, err := findRecommendations(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unreadable) != 0 {
+		t.Fatalf("unreadable = %v, want none", unreadable)
+	}
+	want := []recommendation{
+		{name: "build", paths: []string{"desktop/build", "rnp/build"}},
+		{name: "node_modules", paths: []string{"web/node_modules"}},
+	}
+	if !reflect.DeepEqual(found, want) {
+		t.Fatalf("recommendations = %#v, want %#v", found, want)
+	}
+}
+
+func TestInitRecordsRecommendedAndCustomExclusionsAndOffersThemAgain(t *testing.T) {
+	dir := t.TempDir()
+	mkdirs(t, dir, "app/build", "vendor")
+	var diagnostics bytes.Buffer
+	if err := initWithBetaTest(
+		false,
+		initArgsAskingOnlyExclusions(dir),
+		strings.NewReader("both\nout, tools/*/gen\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"2 recommended found",
+		"Recommended here: build (app/build); vendor (vendor).",
+		"  recommended - Recommended only: skip every directory named build, vendor",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("diagnostics do not contain %q:\n%s", want, diagnostics.String())
+		}
+	}
+	loaded, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.ExcludeRecorded ||
+		!slices.Equal(loaded.Exclude.Recommended, []string{"build", "vendor"}) ||
+		!slices.Equal(loaded.Exclude.Custom, []string{"out", "tools/*/gen"}) {
+		t.Fatalf("recorded exclusions = %+v, want recommended and custom lists", loaded)
+	}
+
+	diagnostics.Reset()
+	if initErr := initWithBetaTest(
+		false,
+		initArgsAskingOnlyExclusions(dir),
+		strings.NewReader("\n\n"),
+		io.Discard,
+		&diagnostics,
+	); initErr != nil {
+		t.Fatal(initErr)
+	}
+	for _, want := range []string{
+		"Skip [both, current]: ",
+		"Directories [out, tools/*/gen; current]: ",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("re-init does not offer %q:\n%s", want, diagnostics.String())
+		}
+	}
+	again, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(again.Exclude, loaded.Exclude) {
+		t.Fatalf("re-init exclusions = %+v, want %+v kept", again.Exclude, loaded.Exclude)
+	}
+}
+
+func TestInitKeepsRecordedRecommendationsAndAnnouncesNewOnes(t *testing.T) {
+	dir := t.TempDir()
+	mkdirs(t, dir, "app/build", "web/node_modules")
+	if err := initWithBetaTest(
+		false,
+		append(initArgsAskingOnlyExclusions(dir), "--exclude-mode", "recommended"),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "web", "node_modules")); err != nil {
+		t.Fatal(err)
+	}
+	mkdirs(t, dir, "out")
+	var diagnostics bytes.Buffer
+	if err := initWithBetaTest(
+		false,
+		initArgsAskingOnlyExclusions(dir),
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"Recommended since the last init: out; the recorded answer now skips them too.",
+		"Recommended earlier and absent now, still skipped when they return: node_modules.",
+		"Skip [recommended, current]: ",
+	} {
+		if !strings.Contains(diagnostics.String(), want) {
+			t.Fatalf("re-init does not say %q:\n%s", want, diagnostics.String())
+		}
+	}
+	loaded, loadErr := policy.Load(dir)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	want := []string{"build", "node_modules", "out"}
+	if !slices.Equal(loaded.Exclude.Recommended, want) {
+		t.Fatalf(
+			"recommended = %v, want the recorded names kept and out added: %v",
+			loaded.Exclude.Recommended,
+			want,
+		)
+	}
+
+	// Build output that is absent now is still the recorded answer.
+	for _, gone := range []string{"app", "out"} {
+		if removeErr := os.RemoveAll(filepath.Join(dir, gone)); removeErr != nil {
+			t.Fatal(removeErr)
+		}
+	}
+	if initErr := initWithBetaTest(
+		false,
+		append(initArgsAskingOnlyExclusions(dir), "--exclude-mode", "recommended"),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); initErr != nil {
+		t.Fatalf("recommended with only recorded names: %v", initErr)
+	}
+	again, againErr := policy.Load(dir)
+	if againErr != nil {
+		t.Fatal(againErr)
+	}
+	if !slices.Equal(again.Exclude.Recommended, want) {
+		t.Fatalf("recommended = %v, want %v kept", again.Exclude.Recommended, want)
+	}
+}
+
+func TestInitSkipsUnreadableDirectoriesWhileLookingForRecommendations(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("needs a directory the current user cannot read")
+	}
+	dir := t.TempDir()
+	locked := filepath.Join(dir, "pgdata")
+	mkdirs(t, dir, "pgdata/base", "app/build")
+	if err := os.Chmod(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(locked, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	var diagnostics bytes.Buffer
+	if searchErr := initWithBetaTest(
+		false,
+		initArgsAskingOnlyExclusions(dir),
+		strings.NewReader("recommended\n"),
+		io.Discard,
+		&diagnostics,
+	); searchErr != nil {
+		t.Fatalf("init stopped at an unreadable directory: %v", searchErr)
+	}
+	const notice = "Could not read pgdata, so recommendations inside are not known"
+	if !strings.Contains(diagnostics.String(), notice) {
+		t.Fatalf("init did not say what it could not read:\n%s", diagnostics.String())
+	}
+	searched, searchLoadErr := policy.Load(dir)
+	if searchLoadErr != nil {
+		t.Fatal(searchLoadErr)
+	}
+	if !slices.Equal(searched.Exclude.Recommended, []string{"build"}) {
+		t.Fatalf("recommended = %v, want build found around pgdata", searched.Exclude.Recommended)
+	}
+
+	// With the mode given by a flag no question carries the notice, so it
+	// goes to the diagnostic output on its own.
+	diagnostics.Reset()
+	if flagErr := initWithBetaTest(
+		false,
+		append(initArgsAskingOnlyExclusions(dir), "--exclude-mode", "recommended"),
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); flagErr != nil {
+		t.Fatal(flagErr)
+	}
+	if !strings.Contains(diagnostics.String(), notice) {
+		t.Fatalf("the flag answer hid the notice:\n%s", diagnostics.String())
+	}
+	if initErr := initWithBetaTest(
+		false,
+		append(
+			initArgsAskingOnlyExclusions(dir),
+			"--exclude-mode", "custom",
+			"--exclude", "pgdata",
+		),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); initErr != nil {
+		t.Fatalf("init with --exclude-mode custom still searched: %v", initErr)
+	}
+	loaded, loadErr := policy.Load(dir)
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if !slices.Equal(loaded.Exclude.Custom, []string{"pgdata"}) {
+		t.Fatalf("custom = %v, want pgdata", loaded.Exclude.Custom)
+	}
+}
+
+func TestInitWithoutRecommendationsOffersNoRecommendedAnswer(t *testing.T) {
+	dir := t.TempDir()
+	var diagnostics bytes.Buffer
+	if err := initWithBetaTest(
+		false,
+		initArgsAskingOnlyExclusions(dir),
+		strings.NewReader("\n"),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(diagnostics.String(), "recommended") {
+		t.Fatalf("a workspace without recommendations was offered some:\n%s", diagnostics.String())
+	}
+	if !strings.Contains(diagnostics.String(), "Skip [none, default]: ") {
+		t.Fatalf("the skipped directories question does not offer none:\n%s", diagnostics.String())
+	}
+	loaded, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.ExcludeRecorded || len(loaded.Exclude.Patterns()) != 0 {
+		t.Fatalf("recorded exclusions = %+v, want recorded as none", loaded)
+	}
+}
+
+func TestInitChecksTheExclusionFlags(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		want  string
+		flags []string
+	}{
+		{
+			name:  "recommended without recommendations",
+			flags: []string{"--exclude-mode", "recommended"},
+			want:  "no recommended directory was found under",
+		},
+		{
+			name:  "list without a mode that uses it",
+			flags: []string{"--exclude", "out"},
+			want:  "needs --exclude-mode custom or both",
+		},
+		{
+			name:  "list with a mode that ignores it",
+			flags: []string{"--exclude-mode", "none", "--exclude", "out"},
+			want:  "needs --exclude-mode custom or both",
+		},
+		{
+			name:  "malformed pattern",
+			flags: []string{"--exclude-mode", "custom", "--exclude", "out,a["},
+			want:  `pattern "a[" is malformed`,
+		},
+		{
+			name:  "empty list",
+			flags: []string{"--exclude-mode", "custom", "--exclude="},
+			want:  "list at least one directory",
+		},
+		{
+			name:  "unknown mode",
+			flags: []string{"--exclude-mode", "sometimes"},
+			want:  `unsupported --exclude-mode "sometimes"`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			err := initWithBetaTest(
+				false,
+				append(initArgsAskingOnlyExclusions(dir), test.flags...),
+				strings.NewReader(""),
+				io.Discard,
+				io.Discard,
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("init error = %v, want %q", err, test.want)
+			}
+			if _, statErr := os.Stat(policy.Path(dir)); !os.IsNotExist(statErr) {
+				t.Fatalf("a refused init wrote the policy: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInitExclusionFlagsAnswerWithoutAsking(t *testing.T) {
+	dir := t.TempDir()
+	mkdirs(t, dir, "dist")
+	if err := initWithBetaTest(
+		false,
+		append(
+			initArgsAskingOnlyExclusions(dir),
+			"--exclude-mode", "both",
+			"--exclude", "gitlab-runner, tools/*/out",
+		),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := policy.Exclusions{
+		Recommended: []string{"dist"},
+		Custom:      []string{"gitlab-runner", "tools/*/out"},
+	}
+	if !reflect.DeepEqual(loaded.Exclude, want) {
+		t.Fatalf("recorded exclusions = %+v, want %+v", loaded.Exclude, want)
+	}
+}
+
+func TestDiscoveryExclusionsKeepTheDirectoryEachPatternWasWrittenFor(t *testing.T) {
+	got := discoveryExclusions("/ws", []string{"app/gen"}, "/ws/app", []string{"out"})
+	want := []workspace.Exclusion{
+		{Base: "/ws", Pattern: "app/gen"},
+		{Base: "/ws/app", Pattern: "out"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("exclusions = %#v, want %#v", got, want)
+	}
+}
+
+func TestResolveWorkspacePolicyReturnsTheRecordedExclusions(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for _, test := range []struct {
+		name     string
+		document string
+		want     []string
+	}{
+		{
+			name: "recorded",
+			document: `{"version":1,"runners":[` +
+				`{"name":"just","mode":"all"},{"name":"agent","mode":"safe"},` +
+				`{"name":"cmake","mode":"all"},{"name":"docker","mode":"all"},` +
+				`{"name":"go","mode":"safe"},{"name":"make","mode":"all"}],` +
+				`"exclude":{"recommended":["build"],"custom":["tools/*/out"]}}`,
+			want: []string{"build", "tools/*/out"},
+		},
+		{
+			name: "written before exclusions",
+			document: `{"version":1,"runners":[` +
+				`{"name":"just","mode":"all"},{"name":"agent","mode":"safe"},` +
+				`{"name":"cmake","mode":"all"},{"name":"docker","mode":"all"},` +
+				`{"name":"go","mode":"safe"},{"name":"make","mode":"all"}]}`,
+		},
+		{name: "absent"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			if test.document != "" {
+				if err := os.WriteFile(policy.Path(root), []byte(test.document), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, excludes, err := resolveWorkspacePolicy(root, logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(excludes, test.want) {
+				t.Fatalf("exclusions = %q, want %q", excludes, test.want)
+			}
+		})
+	}
+}
+
 func TestInitOffersExistingRunnerModesAsCurrent(t *testing.T) {
 	dir := t.TempDir()
 	catalog, err := runnerCatalog()
@@ -1249,7 +1673,7 @@ func TestInitOffersExistingRunnerModesAsCurrent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if saveErr := policy.Save(dir, current); saveErr != nil {
+	if saveErr := policy.Save(dir, current, policy.Exclusions{}); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	want, err := current.Selections()
@@ -1816,6 +2240,7 @@ func claudeInitArgs(dir string) []string {
 		"--runner-mode", "docker=all",
 		"--runner-mode", "go=safe",
 		"--runner-mode", "make=all",
+		"--exclude-mode", "none",
 	}
 }
 
@@ -1998,6 +2423,8 @@ func TestRunSelectsTheRequestedManagedBlock(t *testing.T) {
 				"go=safe",
 				"--runner-mode",
 				"make=all",
+				"--exclude-mode",
+				"none",
 			}); err != nil {
 				t.Fatal(err)
 			}
@@ -2746,12 +3173,12 @@ func TestRunnerRegistryRequiresCompleteKnownPolicyAndFailsClosedWhenAbsent(t *te
 				}
 			}
 			logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-			registry, err := runnerRegistry(root, logger)
+			registry, _, err := resolveWorkspacePolicy(root, logger)
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) ||
 					!strings.Contains(err.Error(), policy.Path(root)) {
 					t.Fatalf(
-						"runnerRegistry error = %v, want %q and policy path",
+						"resolveWorkspacePolicy error = %v, want %q and policy path",
 						err,
 						test.wantError,
 					)
@@ -2791,7 +3218,7 @@ func TestRunnerRegistryWarnsOnceWhenPolicyIsAbsent(t *testing.T) {
 	root := t.TempDir()
 	var output bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&output, nil))
-	registry, err := runnerRegistry(root, logger)
+	registry, _, err := resolveWorkspacePolicy(root, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

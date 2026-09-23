@@ -274,11 +274,15 @@ func serve(args []string) (resultErr error) {
 	} else {
 		logger.Info("AI profile not declared")
 	}
-	registry, err := runnerRegistry(stateRoot, logger)
+	registry, policyExcludes, err := resolveWorkspacePolicy(stateRoot, logger)
 	if err != nil {
 		return err
 	}
-	workspaceRegistry, err := workspace.NewRegistry(root, registry, options.Exclude)
+	workspaceRegistry, err := workspace.NewRegistry(
+		root,
+		registry,
+		discoveryExclusions(stateRoot, policyExcludes, root, options.Exclude),
+	)
 	if err != nil {
 		return fmt.Errorf("create workspace registry: %w", err)
 	}
@@ -393,14 +397,41 @@ func runnerCatalog() (*runner.Catalog, error) {
 	return catalog, nil
 }
 
-func runnerRegistry(root string, logger *slog.Logger) (*runner.Registry, error) {
+// discoveryExclusions pairs every pattern with the directory it was written
+// for: the policy's with the state root init wrote it at, --exclude's with the
+// served root, so a policy pattern keeps its meaning when serve runs on a
+// subtree of the workspace.
+func discoveryExclusions(
+	stateRoot string,
+	policyPatterns []string,
+	root string,
+	flagPatterns []string,
+) []workspace.Exclusion {
+	exclusions := make([]workspace.Exclusion, 0, len(policyPatterns)+len(flagPatterns))
+	for _, pattern := range policyPatterns {
+		exclusions = append(exclusions, workspace.Exclusion{Base: stateRoot, Pattern: pattern})
+	}
+	for _, pattern := range flagPatterns {
+		exclusions = append(exclusions, workspace.Exclusion{Base: root, Pattern: pattern})
+	}
+	return exclusions
+}
+
+// resolveWorkspacePolicy reads the workspace policy at root once and returns
+// the runners it enables together with the directory patterns project
+// discovery skips. A policy written before init recorded exclusions skips
+// none; an absent policy enables no runner and skips none.
+func resolveWorkspacePolicy(
+	root string,
+	logger *slog.Logger,
+) (*runner.Registry, []string, error) {
 	workspacePolicy, err := policy.Load(root)
 	if err != nil {
-		return nil, fmt.Errorf("load runner policy: %w", err)
+		return nil, nil, fmt.Errorf("load runner policy: %w", err)
 	}
 	catalog, err := runnerCatalog()
 	if err != nil {
-		return nil, fmt.Errorf("create runner catalog: %w", err)
+		return nil, nil, fmt.Errorf("create runner catalog: %w", err)
 	}
 	if !workspacePolicy.Found {
 		logger.Warn(
@@ -410,16 +441,16 @@ func runnerRegistry(root string, logger *slog.Logger) (*runner.Registry, error) 
 		)
 		registry, resolveErr := catalog.Resolve(catalog.DisabledSelections())
 		if resolveErr != nil {
-			return nil, fmt.Errorf(
+			return nil, nil, fmt.Errorf(
 				"resolve disabled runner modes: %w",
 				resolveErr,
 			)
 		}
-		return registry, nil
+		return registry, nil, nil
 	}
 	_, err = catalog.CompleteSelections(workspacePolicy.Selections)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"validate runner policy %s: %w",
 			policy.Path(root),
 			err,
@@ -427,13 +458,13 @@ func runnerRegistry(root string, logger *slog.Logger) (*runner.Registry, error) 
 	}
 	registry, err := catalog.Resolve(workspacePolicy.Selections)
 	if err != nil {
-		return nil, fmt.Errorf(
+		return nil, nil, fmt.Errorf(
 			"resolve runner policy %s: %w",
 			policy.Path(root),
 			err,
 		)
 	}
-	return registry, nil
+	return registry, workspacePolicy.Exclude.Patterns(), nil
 }
 
 func serverRunError(ctx context.Context, err error) error {
@@ -561,6 +592,18 @@ func initCommandWithIO(
 		"runner permission mode as name=mode (case-sensitive); repeat to answer "+
 			"runner questions up front",
 	)
+	excludeMode := flags.String(
+		"exclude-mode",
+		"",
+		"directories project discovery skips besides .git and .just-mcp-work: "+
+			strings.Join(excludeModes(), ", ")+"; empty asks on the console",
+	)
+	exclude := flags.String(
+		"exclude",
+		"",
+		"comma-separated directory names or slash-separated globs of your own for "+
+			"discovery to skip, with --exclude-mode custom or both",
+	)
 	flags.Usage = func() {
 		//nolint:errcheck // FlagSet usage callbacks cannot return output errors.
 		// nosemgrep: discarded-error
@@ -572,7 +615,9 @@ func initCommandWithIO(
 				"[--instructions-target project|workspace|machine] "+
 				"[--ai "+initAIFlagValues()+"] "+
 				"[--instructions-pointer] "+
-				"[--runner-mode <name>=<mode>]...",
+				"[--runner-mode <name>=<mode>]... "+
+				"[--exclude-mode "+strings.Join(excludeModes(), "|")+"] "+
+				"[--exclude <pattern>,...]",
 		)
 		flags.PrintDefaults()
 	}
@@ -635,12 +680,28 @@ func initCommandWithIO(
 	for _, selection := range runnerModes {
 		overridden[selection.Name] = struct{}{}
 	}
+	recorded, err := readRecordedPolicy(scope)
+	if err != nil {
+		return fmt.Errorf("read the recorded policy: %w", err)
+	}
+	exclusions, err := newExclusionPlan(
+		scope,
+		recorded,
+		*excludeMode,
+		*exclude,
+		flagWasSet(flags, "exclude"),
+	)
+	if err != nil {
+		return fmt.Errorf("select skipped directories: %w", err)
+	}
 	questions, notices, err := initQuestionPlan{
 		scope:              scope,
 		agentsFlag:         *agents,
 		agents:             agentinit.SelectedAgents(selectedAgents),
 		catalog:            catalog,
 		overriddenRunners:  overridden,
+		recorded:           recorded,
+		exclusions:         exclusions,
 		betaTestAnswered:   flagWasSet(flags, "beta-test"),
 		targetAnswered:     instructionsTarget != "",
 		aiFamiliesAnswered: *aiFamily != "",
@@ -697,6 +758,10 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("select runner modes: %w", err)
 	}
+	excluded, err := exclusions.exclusions(answers)
+	if err != nil {
+		return fmt.Errorf("select skipped directories: %w", err)
+	}
 	if values, asked := answers[shellPermissionQuestionID]; asked {
 		parsedShellPermission = agentinit.ShellPermission(values[0])
 	}
@@ -746,6 +811,7 @@ func initCommandWithIO(
 			InstructionsTarget:  instructionsTarget,
 			AIFamilies:          families,
 			RunnerModes:         canonicalModes,
+			Exclude:             excluded,
 			ClaudePermissions:   permissions,
 			ShellPermission:     parsedShellPermission,
 		},

@@ -22,8 +22,13 @@ const (
 	chosenMark   = "●"
 	openMark     = "○"
 	absentMark   = "·"
-	keysLine     = "↑↓ move  ←→ change  space toggle  enter next / apply  ? all details  q quit"
+	editMark     = "▌"
+	keysLine     = "↑↓ move  ←→ change  space toggle  enter next / edit / apply  ? all details  q quit"
+	editKeysLine = "type values separated by commas  enter done  esc cancel  ctrl+u clear"
 	answerMargin = "    "
+	// listRowLimit is how many values a List row names before it says how
+	// many more there are; its details name them all.
+	listRowLimit = 3
 )
 
 // View draws the whole form on the alternate screen, so closing it restores
@@ -34,11 +39,17 @@ func (m model) View() tea.View {
 	return view
 }
 
-func (m model) render() string {
-	width := m.width
-	if width <= 0 {
-		width = defaultWidth
+// formWidth is the terminal width, or defaultWidth before the terminal has
+// reported one.
+func (m model) formWidth() int {
+	if m.width <= 0 {
+		return defaultWidth
 	}
+	return m.width
+}
+
+func (m model) render() string {
+	width := m.formWidth()
 	problems := m.problems()
 	header := []string{bold(" " + m.title), rule(width)}
 	for _, question := range m.questions {
@@ -62,10 +73,14 @@ func (m model) render() string {
 		details = details[:min(len(details), available-1)]
 		room = max(available-len(details), 1)
 	}
+	keys := keysLine
+	if m.editing {
+		keys = editKeysLine
+	}
 	footer := slices.Concat(
 		[]string{rule(width)},
 		details,
-		[]string{rule(width), muted(" " + keysLine)},
+		[]string{rule(width), muted(" " + keys)},
 	)
 	body = window(body, focus, anchor, room)
 	lines := slices.Concat(header, body, footer)
@@ -117,20 +132,23 @@ func (m model) body(problems map[int]string) ([]string, int, int) {
 		heading = len(lines)
 		lines = append(lines, line)
 	}
+	applies := m.applicable()
 	for index := 0; index < len(m.questions); {
 		question := m.questions[index]
 		switch {
+		case !applies[index]:
 		case question.Section != "" && !question.Multiple:
 			end := sectionEnd(m.questions, index)
+			shown := applying(applies, index, end)
 			gap()
-			if tabular(m.questions[index:end]) {
+			if tabular(m.questions[index:end], applies[index:end]) {
 				title(m.sectionHeading(index, end, nameWidth))
-				for current := index; current < end; current++ {
+				for _, current := range shown {
 					emit(m.matrixRow(current, row == m.cursor, nameWidth, problems))
 				}
 			} else {
 				title(" " + bold(question.Section))
-				for current := index; current < end; current++ {
+				for _, current := range shown {
 					emit(m.singleRow(current, row == m.cursor, nameWidth, problems))
 				}
 			}
@@ -176,10 +194,22 @@ func sectionEnd(questions []questionnaire.Question, start int) int {
 	return end
 }
 
-// tabular reports whether a section is drawn as a table: it needs at least
-// two rows to compare, each choosing one of its own choices.
-func tabular(section []questionnaire.Question) bool {
-	if len(section) < 2 {
+// applying lists the indexes from start to end of the questions that apply.
+func applying(applies []bool, start int, end int) []int {
+	indexes := make([]int, 0, end-start)
+	for index := start; index < end; index++ {
+		if applies[index] {
+			indexes = append(indexes, index)
+		}
+	}
+	return indexes
+}
+
+// tabular reports whether a section is drawn as a table: every question in it
+// applies, and there are at least two rows to compare, each choosing one of
+// its own choices.
+func tabular(section []questionnaire.Question, applies []bool) bool {
+	if len(section) < 2 || slices.Contains(applies, false) {
 		return false
 	}
 	for _, question := range section {
@@ -256,15 +286,44 @@ func (m model) choiceRow(index int, choice int, focused bool, nameWidth int) str
 		" " + muted(option.Description)
 }
 
-// singleRow shows a single answer, followed by its label when it has one.
+// singleRow shows a single answer, followed by its label when it has one and
+// by the question's badge. A List answer is shown in short, or as the text
+// being typed while it is edited.
 func (m model) singleRow(index int, focused bool, nameWidth int, problems map[int]string) string {
 	question := m.questions[index]
-	line := marker(focused) + " " + pad(name(question.Subject, focused), nameWidth) + "  " +
-		accent("‹ "+strings.Join(m.values[index], ", ")+" ›")
-	if label := answerLabel(question, m.values[index][0]); label != "" {
-		line += "  " + label
+	line := marker(focused) + " " + pad(name(question.Subject, focused), nameWidth) + "  "
+	switch {
+	case question.Kind == questionnaire.List && focused && m.editing:
+		// The end being typed stays in view: a draft wider than the row
+		// loses its beginning, which the details still show in full.
+		// Four cells go to the brackets and three to a problem mark.
+		room := max(m.formWidth()-ansi.StringWidth(line)-7, 2)
+		draft := m.draft + editMark
+		if overflow := ansi.StringWidth(draft) - room; overflow > 0 {
+			draft = ansi.TruncateLeft(draft, overflow+1, "…")
+		}
+		line += accent("‹ " + draft + " ›")
+	case question.Kind == questionnaire.List:
+		line += accent("‹ " + listText(m.values[index], listRowLimit) + " ›")
+	default:
+		line += accent("‹ " + strings.Join(m.values[index], ", ") + " ›")
+		if label := answerLabel(question, m.values[index][0]); label != "" {
+			line += "  " + label
+		}
+	}
+	if question.Badge != "" {
+		line += "  " + bold(warning(question.Badge))
 	}
 	return line + problemMark(problems, index)
+}
+
+// listText names the values of a List answer, the first limit of them and how
+// many more there are, or says there are none.
+func listText(values []string, limit int) string {
+	if len(values) == 0 {
+		return "none"
+	}
+	return questionnaire.Summary(values, limit)
 }
 
 func applyLine(focused bool, blocked bool) string {
@@ -322,7 +381,11 @@ func (m model) details(problems map[int]string, width int, compact bool) []strin
 	for _, line := range context {
 		intro = append(intro, wrap(line, width, plain)...)
 	}
-	blocks := [][]string{intro, m.answerDetails(current, width, compact)}
+	answers := m.answerDetails(current, width, compact)
+	if question.Kind == questionnaire.List {
+		answers = m.listDetails(current.question, width)
+	}
+	blocks := [][]string{intro, answers}
 	if problem, found := problems[current.question]; found {
 		blocks = append(blocks, wrap(problem, width, danger))
 	}
@@ -374,6 +437,22 @@ func (m model) answerDetails(current item, width int, compact bool) []string {
 		}
 	}
 	return lines
+}
+
+// listDetails names every value of a List answer, which its row shows only in
+// short, or the whole text being typed while it is edited.
+func (m model) listDetails(index int, width int) []string {
+	if m.editing {
+		return wrap("Typing: "+m.draft+editMark, width, plain)
+	}
+	if len(m.values[index]) == 0 {
+		return wrap("No values yet; press enter to type them.", width, plain)
+	}
+	return wrap(
+		"Values: "+strings.Join(m.values[index], ", ")+"; press enter to edit them.",
+		width,
+		plain,
+	)
 }
 
 // answerMark shows whether an answer is chosen, the way its row does.

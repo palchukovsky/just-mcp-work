@@ -1722,7 +1722,7 @@ func TestApplyWriteFailureLeavesPreviousPolicyUnchanged(t *testing.T) {
 			{Name: "go", Mode: runner.ModeDisabled},
 		},
 	)
-	if err := policy.Save(dir, previous); err != nil {
+	if err := policy.Save(dir, previous, policy.Exclusions{}); err != nil {
 		t.Fatal(err)
 	}
 	policyPath := policy.Path(dir)
@@ -2185,7 +2185,7 @@ func mustParseAIProfile(t *testing.T, value string) aiprofile.Profile {
 
 // TestShortPromptCarriesTheAlwaysOnContract bounds the text every session pays
 // for. A 128-byte guide path is the representative allowance; the 1200-byte
-// product budget leaves 116 bytes for wording or path growth. Runtime does not
+// product budget leaves 76 bytes for wording or path growth. Runtime does not
 // reject longer paths.
 func TestShortPromptCarriesTheAlwaysOnContract(t *testing.T) {
 	const (
@@ -2212,7 +2212,7 @@ func TestShortPromptCarriesTheAlwaysOnContract(t *testing.T) {
 	for _, expected := range []string{
 		"JMW is this workspace's task runner",
 		"saves context budget",
-		"list_tasks then run_task or start_task",
+		"list_tasks with a project_path from list_projects, then run_task or start_task.",
 		"Trust a green receipt; do not fetch logs of a successful run.",
 		"read stdout_tail/stderr_tail first, then a byte range if needed.",
 		"Status: running with a run_id is normal",
@@ -4156,7 +4156,7 @@ func TestApplyRejectsPolicyCollisionThroughSymlinkedWorkspace(t *testing.T) {
 		t.Fatal(linkErr)
 	}
 	modes := testRunnerModes(t)
-	if saveErr := policy.Save(realScope, modes); saveErr != nil {
+	if saveErr := policy.Save(realScope, modes, policy.Exclusions{}); saveErr != nil {
 		t.Fatal(saveErr)
 	}
 	policyPath := policy.Path(realScope)

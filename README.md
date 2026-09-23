@@ -73,8 +73,9 @@ just-mcp-work init
 ```
 
 It asks whether the workspace takes part in the JMW beta test, where the
-managed instruction block goes, what mode each runner gets, which AI families
-to declare, and whether the shell tools may run without a client confirmation.
+managed instruction block goes, what mode each runner gets, which directories
+project discovery skips, which AI families to declare, and whether the shell
+tools may run without a client confirmation.
 Then it writes those surfaces, the runner policy, and the generated agent
 guide. A terminal that can draw it shows the questions as one keyboard-driven
 form; anywhere else they come one at a time as text. Every question has a flag

@@ -44,6 +44,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 			"--runner-mode", "docker=disabled",
 			"--runner-mode", "go=all",
 			"--runner-mode", "make=all",
+			"--exclude-mode", "none",
 		},
 		strings.NewReader(""),
 		io.Discard,
@@ -98,7 +99,7 @@ func TestInitRunnerModesRoundTripThroughWorkspacePolicy(t *testing.T) {
 		})
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	registry, err := runnerRegistry(root, logger)
+	registry, _, err := resolveWorkspacePolicy(root, logger)
 	if err != nil {
 		t.Fatalf("resolve workspace runner policy: %v", err)
 	}
@@ -169,6 +170,7 @@ func initWorkspaceBelowScope(t *testing.T) (scope string, project string) {
 			"--runner-mode", "docker=disabled",
 			"--runner-mode", "go=all",
 			"--runner-mode", "make=all",
+			"--exclude-mode", "none",
 		},
 		strings.NewReader(""),
 		io.Discard,
@@ -222,7 +224,7 @@ func TestResolvedStateRootKeepsRunnersEnabledBelowWorkspaceScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	registry, err := runnerRegistry(stateRoot, logger)
+	registry, _, err := resolveWorkspacePolicy(stateRoot, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,12 +236,12 @@ func TestResolvedStateRootKeepsRunnersEnabledBelowWorkspaceScope(t *testing.T) {
 	}
 	// The registry must stay a strict read of the one root it is given: an upward
 	// search inside it would be an unrequested fallback rather than this fix.
-	below, err := runnerRegistry(project, logger)
+	below, _, err := resolveWorkspacePolicy(project, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, found := below.Get("go"); found {
-		t.Fatal("runnerRegistry searched above the root it was given")
+		t.Fatal("resolveWorkspacePolicy searched above the root it was given")
 	}
 }
 

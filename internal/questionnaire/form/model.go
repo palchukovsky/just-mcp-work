@@ -6,6 +6,7 @@ package form
 
 import (
 	"slices"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 
@@ -29,22 +30,43 @@ type item struct {
 // applying an untouched form answers exactly what the console dialog would
 // with every answer left empty.
 type model struct {
-	title     string
+	title string
+	// draft is what the operator types into the focused List answer while
+	// editing is set; the answer itself changes only when the edit is
+	// finished.
+	draft     string
 	questions []questionnaire.Question
 	values    [][]string
+	// items are the rows of the questions that apply to the answers as they
+	// stand, followed by the apply row; changing an answer rebuilds them.
 	items     []item
 	cursor    int
 	width     int
 	height    int
+	editing   bool
 	showAll   bool
 	submitted bool
 }
 
 func newModel(title string, questions []questionnaire.Question) model {
 	values := make([][]string, len(questions))
-	items := make([]item, 0, len(questions)+1)
 	for index, question := range questions {
 		values[index] = slices.Clone(question.Offer)
+	}
+	m := model{title: title, questions: questions, values: values}
+	m.items = m.rows()
+	return m
+}
+
+// rows lists a row per question that applies - one per choice for a question
+// that takes several - and the apply row last.
+func (m model) rows() []item {
+	items := make([]item, 0, len(m.questions)+1)
+	applies := m.applicable()
+	for index, question := range m.questions {
+		if !applies[index] {
+			continue
+		}
 		if !question.Multiple {
 			items = append(items, item{question: index, choice: -1})
 			continue
@@ -53,8 +75,23 @@ func newModel(title string, questions []questionnaire.Question) model {
 			items = append(items, item{question: index, choice: choice})
 		}
 	}
-	items = append(items, item{question: applyRow, choice: -1})
-	return model{title: title, questions: questions, values: values, items: items}
+	return append(items, item{question: applyRow, choice: -1})
+}
+
+// applicable reports, by question index, whether each question applies to
+// the answers of the applicable questions before it, the order the console
+// dialog asks them in.
+func (m model) applicable() []bool {
+	applies := make([]bool, len(m.questions))
+	answers := make(questionnaire.Answers, len(m.questions))
+	for index, question := range m.questions {
+		if !question.Applies(answers) {
+			continue
+		}
+		applies[index] = true
+		answers[question.ID] = m.values[index]
+	}
+	return applies
 }
 
 // Init starts the form without a command.
@@ -68,7 +105,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
 	case tea.KeyPressMsg:
+		if m.editing {
+			return m.edit(msg)
+		}
 		return m.press(msg.String())
+	case tea.PasteMsg:
+		// A pasted list may come one value per line; the draft is one line,
+		// so each line break separates values the way a comma does.
+		if m.editing {
+			m.draft += strings.NewReplacer("\r\n", ", ", "\n", ", ", "\r", ", ").
+				Replace(msg.Content)
+		}
 	}
 	return m, nil
 }
@@ -88,6 +135,10 @@ func (m model) press(key string) (tea.Model, tea.Cmd) {
 	case "right", "l":
 		m.change(1, false)
 	case "space":
+		if m.focusedList() {
+			m.startEdit()
+			break
+		}
 		m.change(1, true)
 	case "?":
 		m.showAll = !m.showAll
@@ -95,9 +146,50 @@ func (m model) press(key string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// edit types into the focused List answer. Enter keeps the typed values and
+// moves to the next row, esc drops the edit, backspace erases the last
+// character and ctrl+u the whole line; ctrl+c still closes the form.
+func (m model) edit(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "enter":
+		m.values[m.items[m.cursor].question] = questionnaire.SplitList(m.draft)
+		m.editing, m.draft = false, ""
+		m.items = m.rows()
+		m.cursor++
+	case "esc":
+		m.editing, m.draft = false, ""
+	case "backspace":
+		runes := []rune(m.draft)
+		m.draft = string(runes[:max(len(runes)-1, 0)])
+	case "ctrl+u":
+		m.draft = ""
+	default:
+		m.draft += msg.Text
+	}
+	return m, nil
+}
+
+func (m model) focusedList() bool {
+	current := m.items[m.cursor]
+	return current.question != applyRow &&
+		m.questions[current.question].Kind == questionnaire.List
+}
+
+func (m *model) startEdit() {
+	m.editing = true
+	m.draft = strings.Join(m.values[m.items[m.cursor].question], ", ")
+}
+
 // enter moves to the next row, and on the apply row applies the form unless
-// an answer still needs attention; then it takes the cursor there instead.
+// an answer still needs attention; then it takes the cursor there instead. On
+// a List row it starts typing that answer.
 func (m model) enter() (tea.Model, tea.Cmd) {
+	if m.focusedList() {
+		m.startEdit()
+		return m, nil
+	}
 	if m.items[m.cursor].question != applyRow {
 		m.cursor++
 		return m, nil
@@ -125,7 +217,10 @@ func (m *model) change(delta int, cycle bool) {
 		return
 	}
 	question := m.questions[current.question]
-	if question.Multiple {
+	switch {
+	case question.Kind == questionnaire.List:
+		return
+	case question.Multiple:
 		value := question.Choices[current.choice].Value
 		selected := slices.Contains(m.values[current.question], value)
 		if cycle {
@@ -134,10 +229,13 @@ func (m *model) change(delta int, cycle bool) {
 			selected = delta > 0
 		}
 		m.values[current.question] = withChoice(question, m.values[current.question], value, selected)
-		return
+	default:
+		values := choiceValues(question)
+		m.values[current.question] = []string{step(values, m.values[current.question][0], delta, cycle)}
 	}
-	values := choiceValues(question)
-	m.values[current.question] = []string{step(values, m.values[current.question][0], delta, cycle)}
+	// A changed answer may bring in or leave out questions that follow it;
+	// the focused row itself stays where it is.
+	m.items = m.rows()
 }
 
 // choiceValues lists the answers a single-answer question accepts, in the
@@ -186,10 +284,15 @@ func withChoice(
 
 // problems returns, by question index, why an answer cannot be applied yet: a
 // question that takes several choices needs at least one, the way the console
-// never accepts an empty answer to it, and Validate may refuse the rest.
+// never accepts an empty answer to it, and Validate may refuse the rest. A
+// question that does not apply has no answer to refuse.
 func (m model) problems() map[int]string {
 	problems := make(map[int]string)
+	applies := m.applicable()
 	for index, question := range m.questions {
+		if !applies[index] {
+			continue
+		}
 		if question.Multiple && len(m.values[index]) == 0 {
 			problems[index] = "Choose at least one."
 			continue
@@ -204,10 +307,14 @@ func (m model) problems() map[int]string {
 	return problems
 }
 
+// answers returns the answers of the questions that apply.
 func (m model) answers() questionnaire.Answers {
 	answers := make(questionnaire.Answers, len(m.questions))
+	applies := m.applicable()
 	for index, question := range m.questions {
-		answers[question.ID] = slices.Clone(m.values[index])
+		if applies[index] {
+			answers[question.ID] = slices.Clone(m.values[index])
+		}
 	}
 	return answers
 }

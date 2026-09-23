@@ -10,7 +10,9 @@ package questionnaire
 
 import (
 	"context"
+	"fmt"
 	"slices"
+	"strings"
 )
 
 // Kind says how a question is answered.
@@ -22,6 +24,9 @@ const (
 	Choose Kind = iota
 	// Confirm answers Yes or No.
 	Confirm
+	// List answers with values the operator types, separated by commas; it
+	// has no Choices, and Validate decides which lists it accepts.
+	List
 )
 
 // Yes and No are the answers of a Confirm question.
@@ -66,6 +71,13 @@ type Question struct {
 	// Notices are what the operator should know before answering, such as a
 	// recorded answer that could not be reused.
 	Notices []string
+	// Badge is a short note shown beside the answer, such as how many
+	// recommended values were found; empty shows none.
+	Badge string
+	// When decides from the answers given so far whether the question applies;
+	// nil means it always does. A question that does not apply is not shown
+	// and has no answer.
+	When func(Answers) bool
 	// Choices are the answers a Choose question accepts. A Confirm question
 	// may describe its Yes and No here; its answers stay those two either way.
 	Choices []Choice
@@ -111,6 +123,32 @@ type Answers map[string][]string
 // stops before every question is answered, so it never returns a partial set.
 type Renderer interface {
 	Ask(ctx context.Context, questions []Question) (Answers, error)
+}
+
+// Applies reports whether question is asked after answers.
+func (question Question) Applies(answers Answers) bool {
+	return question.When == nil || question.When(answers)
+}
+
+// SplitList reads a typed List answer: the values between its commas, with
+// surrounding spaces removed and empty values left out.
+func SplitList(text string) []string {
+	values := make([]string, 0, strings.Count(text, ",")+1)
+	for value := range strings.SplitSeq(text, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+// Summary lists values on a line that has to stay short: the first limit of
+// them, then how many more there are.
+func Summary(values []string, limit int) string {
+	if len(values) <= limit {
+		return strings.Join(values, ", ")
+	}
+	return fmt.Sprintf("%s, +%d more", strings.Join(values[:limit], ", "), len(values)-limit)
 }
 
 // DynamicContext returns the explanation of question that depends on answers,

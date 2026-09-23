@@ -273,6 +273,93 @@ func TestConfirmListsTheAnswersItDescribes(t *testing.T) {
 	}
 }
 
+func directoriesQuestion(offer ...string) questionnaire.Question {
+	return questionnaire.Question{
+		ID:      "dirs",
+		Kind:    questionnaire.List,
+		Title:   "Which directories?",
+		Badge:   "2 recommended found",
+		Offer:   offer,
+		Current: len(offer) > 0,
+		Label:   "Directories",
+		Flag:    "--dirs <name>,...",
+		Validate: func(values []string) error {
+			if len(values) == 0 {
+				return errors.New("list at least one directory")
+			}
+			if slices.Contains(values, "bad") {
+				return errors.New(`"bad" is not a directory`)
+			}
+			return nil
+		},
+		ReadDescription:       "directories",
+		UnansweredDescription: "directories",
+	}
+}
+
+func TestAskListTakesTheOfferInShortOnAnEmptyAnswer(t *testing.T) {
+	answers, output, err := ask("\n", directoriesQuestion("a", "b", "c", "d", "e"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(answers["dirs"], []string{"a", "b", "c", "d", "e"}) {
+		t.Fatalf("answers = %v, want the offered list", answers)
+	}
+	const want = "\nWhich directories?\n2 recommended found\n" +
+		"Separate the values with commas.\n" +
+		"Directories [a, b, c, +2 more; current]: "
+	if output != want {
+		t.Fatalf("output = %q, want %q", output, want)
+	}
+}
+
+func TestAskListReadsTypedValuesAndAsksAgainAfterARefusal(t *testing.T) {
+	answers, output, err := ask("\nbad, x\n x , ,y\n", directoriesQuestion())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(answers["dirs"], []string{"x", "y"}) {
+		t.Fatalf("answers = %v, want x and y", answers)
+	}
+	for _, refusal := range []string{"list at least one directory\n", `"bad" is not a directory` + "\n"} {
+		if !strings.Contains(output, refusal) {
+			t.Fatalf("output = %q, want the refusal %q", output, refusal)
+		}
+	}
+}
+
+func TestAskListFailsWhenInputEnds(t *testing.T) {
+	if _, _, err := ask("", directoriesQuestion("a")); err == nil ||
+		!strings.Contains(err.Error(), "use --dirs <name>,... for non-interactive init") {
+		t.Fatalf("error = %v, want the flag to use", err)
+	}
+	if _, _, err := ask("bad", directoriesQuestion()); err == nil ||
+		!strings.Contains(err.Error(), `"bad" is not a directory`) {
+		t.Fatalf("error = %v, want the refusal", err)
+	}
+}
+
+func TestAskSkipsAQuestionThatDoesNotApply(t *testing.T) {
+	list := directoriesQuestion()
+	list.When = func(answers questionnaire.Answers) bool {
+		return slices.Equal(answers["color"], []string{"blue"})
+	}
+	answers, output, err := ask("\n", colorQuestion(), list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, asked := answers["dirs"]; asked || strings.Contains(output, "Which directories?") {
+		t.Fatalf("answers = %v, output = %q, want the list skipped", answers, output)
+	}
+	answers, _, err = ask("blue\nx\n", colorQuestion(), list)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(answers["dirs"], []string{"x"}) {
+		t.Fatalf("answers = %v, want the list asked after blue", answers)
+	}
+}
+
 func TestSplitAnswerTokensCutsOnSeparators(t *testing.T) {
 	got := console.SplitAnswerTokens(" codex, claude;2 ")
 	if !slices.Equal(got, []string{"codex", "claude", "2"}) {

@@ -463,10 +463,12 @@ func TestDiscoverFilterPrunesBeforeInspection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := projectPaths(projects), []string{".", "top"}; !reflect.DeepEqual(got, want) {
+	// target is build output only when the workspace says so: nothing but .git
+	// and .just-mcp-work is skipped unconditionally.
+	if got, want := projectPaths(projects), []string{".", "target", "top"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("project paths = %#v, want %#v", got, want)
 	}
-	if want := (Pruned{Depth: 1, Hidden: 1, Excluded: 2}); pruned != want {
+	if want := (Pruned{Depth: 1, Hidden: 1, Excluded: 1}); pruned != want {
 		t.Fatalf("pruned = %#v, want %#v", pruned, want)
 	}
 	if calls != len(projects) {
@@ -494,7 +496,7 @@ func TestDiscoverFilterPrunesBeforeInspection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := projectPaths(projects), []string{".", ".hidden", "top", "top/deeper"}; !reflect.DeepEqual(got, want) {
+	if got, want := projectPaths(projects), []string{".", ".hidden", "target", "top", "top/deeper"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("unlimited project paths = %#v, want %#v", got, want)
 	}
 
@@ -510,21 +512,38 @@ func TestDiscoverFilterPrunesBeforeInspection(t *testing.T) {
 	}
 	if _, _, discoverErr := registry.Discover(
 		context.Background(),
-		Filter{Path: "target", MaxDepth: 0},
+		Filter{Path: ".just-mcp-work", MaxDepth: 0},
 	); discoverErr == nil {
 		t.Fatal("Discover accepted a built-in excluded base")
 	}
 
 	writeFile(t, filepath.Join(root, "ignored", "nested", "justfile"), "fixture")
-	excludedRegistry, err := NewRegistry(root, runners, []string{"ignored"})
+	excludedRegistry, err := NewRegistry(
+		root,
+		runners,
+		[]Exclusion{{Base: root, Pattern: "ignored"}, {Base: root, Pattern: "target"}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := excludedRegistry.Discover(
+	if _, _, discoverErr := excludedRegistry.Discover(
 		context.Background(),
 		Filter{Path: "ignored/nested", MaxDepth: 0},
-	); err == nil {
+	); discoverErr == nil {
 		t.Fatal("Discover accepted a base below a user-excluded directory")
+	}
+	projects, pruned, err = excludedRegistry.Discover(
+		context.Background(),
+		Filter{Path: ".", MaxDepth: 1},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := projectPaths(projects), []string{".", "top"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("project paths with declared exclusions = %#v, want %#v", got, want)
+	}
+	if want := (Pruned{Depth: 1, Hidden: 1, Excluded: 3}); pruned != want {
+		t.Fatalf("pruned with declared exclusions = %#v, want %#v", pruned, want)
 	}
 }
 
@@ -592,7 +611,11 @@ func TestDiscoverFilterKeepsProjectDetailsAndValidatesInput(t *testing.T) {
 
 func TestExcludedGlobUsesSlashSeparatorSemantics(t *testing.T) {
 	root := t.TempDir()
-	registry, err := NewRegistry(root, mustRunnerRegistry(t), []string{"*/generated"})
+	registry, err := NewRegistry(
+		root,
+		mustRunnerRegistry(t),
+		[]Exclusion{{Base: root, Pattern: "*/generated"}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -601,6 +624,60 @@ func TestExcludedGlobUsesSlashSeparatorSemantics(t *testing.T) {
 	}
 	if registry.excluded(filepath.Join(root, "a", "b", "generated")) {
 		t.Fatal("exclude glob crossed multiple slash-separated path segments")
+	}
+}
+
+func TestExclusionMatchesFromTheDirectoryItWasWrittenFor(t *testing.T) {
+	scope := t.TempDir()
+	root := filepath.Join(scope, "app")
+	if err := os.MkdirAll(filepath.Join(root, "gen"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	registry, err := NewRegistry(
+		root,
+		mustRunnerRegistry(t),
+		[]Exclusion{
+			{Base: scope, Pattern: "app/gen"},
+			{Base: scope, Pattern: "app/*/out"},
+			{Base: scope, Pattern: "other/tmp"},
+			{Base: root, Pattern: "local"},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{path: filepath.Join(root, "gen"), want: true},
+		{path: filepath.Join(root, "x", "gen"), want: false},
+		{path: filepath.Join(root, "x", "out"), want: true},
+		{path: filepath.Join(root, "tmp"), want: false},
+		{path: filepath.Join(root, "a", "b", "local"), want: true},
+	} {
+		if got := registry.excluded(test.path); got != test.want {
+			t.Errorf("excluded(%s) = %v, want %v", test.path, got, test.want)
+		}
+	}
+}
+
+func TestNewRegistryRefusesAnExclusionWrittenForAnotherTree(t *testing.T) {
+	scope := t.TempDir()
+	root := filepath.Join(scope, "app")
+	if err := os.MkdirAll(filepath.Join(scope, "other"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewRegistry(
+		root,
+		mustRunnerRegistry(t),
+		[]Exclusion{{Base: filepath.Join(scope, "other"), Pattern: "gen"}},
+	)
+	if err == nil || !strings.Contains(err.Error(), "does not contain the workspace root") {
+		t.Fatalf("NewRegistry error = %v, want a refusal of the foreign base", err)
 	}
 }
 

@@ -7,6 +7,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"path/filepath"
 	"slices"
 	"strings"
 
@@ -24,14 +26,63 @@ const (
 	shellPermissionQuestionID    = "shell-permission"
 	claudePermissionsQuestionID  = "claude-permissions"
 	runnerQuestionIDPrefix       = "runner:"
+	excludeModeQuestionID        = "exclude-mode"
+	excludeQuestionID            = "exclude"
 	runnersSection               = "Runners"
+	discoverySection             = "Project discovery"
 	permissionsSection           = "Permissions"
+
+	excludeModeNone        = "none"
+	excludeModeRecommended = "recommended"
+	excludeModeCustom      = "custom"
+	excludeModeBoth        = "both"
+	// recommendationPathLimit is how many places of one recommended name the
+	// question names before it says how many more there are.
+	recommendationPathLimit = 2
+	// unreadableNoticeLimit is how many unreadable directories the notice
+	// names before it says how many more there are.
+	unreadableNoticeLimit = 3
 
 	runnerIntro = "A runner offers the tasks of one tool to your AI agents; its mode " +
 		"decides which of those commands they can run."
 	unreviewedRunnerNote = "JMW has not reviewed this runner's commands yet, so it is " +
 		"either fully on or off."
 )
+
+// excludeModes returns the answers to which directories discovery skips.
+func excludeModes() []string {
+	return []string{
+		excludeModeNone,
+		excludeModeRecommended,
+		excludeModeCustom,
+		excludeModeBoth,
+	}
+}
+
+// recommendedExclusionNames returns directory names that usually hold build
+// output, fetched or vendored dependencies, or a CI checkout rather than a
+// project of the operator's own. init recommends the ones it finds in the
+// workspace; discovery skips none of them unless the answer records it.
+func recommendedExclusionNames() []string {
+	return []string{
+		"build",
+		"builds",
+		"_build",
+		"out",
+		"dist",
+		"distr",
+		"target",
+		"obj",
+		"_deps",
+		"node_modules",
+		"vendor",
+		"external",
+		"third_party",
+		"thirdparty",
+		"3rdparty",
+		"venv",
+	}
+}
 
 // initQuestionPlan holds what init knows before it asks anything: the scope,
 // the agents, and every answer a flag already gave. Its questions are exactly
@@ -46,6 +97,8 @@ type initQuestionPlan struct {
 	// agents are the agents Apply writes for, as agentinit.SelectedAgents
 	// resolves them, so every question matches what Apply will plan.
 	agents             []string
+	exclusions         exclusionPlan
+	recorded           recordedPolicy
 	betaTestAnswered   bool
 	targetAnswered     bool
 	aiFamiliesAnswered bool
@@ -56,7 +109,7 @@ type initQuestionPlan struct {
 // questions returns the questions to ask and the notices no question carries,
 // which the caller prints before asking.
 func (plan initQuestionPlan) questions() ([]questionnaire.Question, []string, error) {
-	questions := make([]questionnaire.Question, 0, len(plan.catalog.PermissionRequests())+5)
+	questions := make([]questionnaire.Question, 0, len(plan.catalog.PermissionRequests())+7)
 	if !plan.betaTestAnswered {
 		question, err := betaTestQuestion(plan.scope)
 		if err != nil {
@@ -78,15 +131,16 @@ func (plan initQuestionPlan) questions() ([]questionnaire.Question, []string, er
 		}
 		questions = append(questions, question)
 	}
-	runnerQuestions, notices, err := runnerModeQuestions(
+	runnerQuestions, notices := runnerModeQuestions(
 		plan.scope,
 		plan.catalog,
 		plan.overriddenRunners,
+		plan.recorded,
 	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read current runner modes: %w", err)
-	}
 	questions = append(questions, runnerQuestions...)
+	exclusionQuestions, exclusionNotices := plan.exclusions.questions()
+	questions = append(questions, exclusionQuestions...)
+	notices = append(notices, exclusionNotices...)
 	if plan.asksShellPermission() {
 		offer, current, offerErr := agentinit.OfferShellPermission(plan.scope, plan.agents)
 		if offerErr != nil {
@@ -323,6 +377,39 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 	}, nil
 }
 
+// recordedPolicy is the workspace policy as init finds it before asking:
+// absent, parsed, or present but unparsable, with the reason. init reads it
+// once, and the runner and exclusion questions both offer from it.
+type recordedPolicy struct {
+	parseErr error
+	parsed   policy.Policy
+	found    bool
+}
+
+// readRecordedPolicy reads the policy under scope. A policy that cannot be
+// read at all is an error; one that cannot be parsed is kept with the reason,
+// which the runner questions report.
+func readRecordedPolicy(scope string) (recordedPolicy, error) {
+	data, found, err := policy.Read(scope)
+	if err != nil {
+		return recordedPolicy{}, fmt.Errorf("read runner policy %s: %w", policy.Path(scope), err)
+	}
+	if !found {
+		return recordedPolicy{}, nil
+	}
+	parsed, parseErr := policy.Parse(data)
+	return recordedPolicy{parsed: parsed, parseErr: parseErr, found: true}, nil
+}
+
+// exclusions returns the exclusions the policy records, and whether it
+// records an answer at all; an unparsable policy records none.
+func (recorded recordedPolicy) exclusions() (policy.Exclusions, bool) {
+	if !recorded.found || recorded.parseErr != nil {
+		return policy.Exclusions{}, false
+	}
+	return recorded.parsed.Exclude, recorded.parsed.ExcludeRecorded
+}
+
 // runnerModeQuestions asks for the mode of every runner no --runner-mode
 // named, offering its current mode when the policy records one. It returns
 // the policy notices separately only when no question is left to carry them.
@@ -330,11 +417,9 @@ func runnerModeQuestions(
 	scope string,
 	catalog *runner.Catalog,
 	overridden map[string]struct{},
-) ([]questionnaire.Question, []string, error) {
-	currentModes, notices, err := currentRunnerModes(scope, catalog)
-	if err != nil {
-		return nil, nil, err
-	}
+	recorded recordedPolicy,
+) ([]questionnaire.Question, []string) {
+	currentModes, notices := currentRunnerModes(scope, catalog, recorded)
 	var questions []questionnaire.Question
 	for _, request := range catalog.PermissionRequests() {
 		if _, found := overridden[request.Name]; found {
@@ -354,41 +439,37 @@ func runnerModeQuestions(
 	if len(questions) == 0 {
 		// Flags answered every runner, so no offer needs the notices; they
 		// still report what happened to the recorded policy.
-		return nil, notices, nil
+		return nil, notices
 	}
-	return questions, nil, nil
+	return questions, nil
 }
 
-// currentRunnerModes reads the modes the policy records for the registered
-// runners. A policy that cannot be parsed, or that names an unsupported mode,
-// is replaced by the declared defaults and reported by a notice; a policy that
-// cannot be read at all is an error.
+// currentRunnerModes returns the modes the recorded policy gives the
+// registered runners. A policy that cannot be parsed, or that names an
+// unsupported mode, is replaced by the declared defaults and reported by a
+// notice.
 func currentRunnerModes(
 	scope string,
 	catalog *runner.Catalog,
-) (map[string]runner.Mode, []string, error) {
-	data, found, err := policy.Read(scope)
-	if err != nil {
-		return nil, nil, fmt.Errorf("read runner policy %s: %w", policy.Path(scope), err)
+	recorded recordedPolicy,
+) (map[string]runner.Mode, []string) {
+	if !recorded.found {
+		return map[string]runner.Mode{}, nil
 	}
-	if !found {
-		return map[string]runner.Mode{}, nil, nil
+	if recorded.parseErr != nil {
+		return map[string]runner.Mode{}, []string{policyFallbackNotice(scope, recorded.parseErr)}
 	}
-	currentPolicy, err := policy.Parse(data)
+	current, changed, err := currentModesForCatalog(catalog, recorded.parsed.Selections)
 	if err != nil {
-		return map[string]runner.Mode{}, []string{policyFallbackNotice(scope, err)}, nil
-	}
-	current, changed, err := currentModesForCatalog(catalog, currentPolicy.Selections)
-	if err != nil {
-		return map[string]runner.Mode{}, []string{policyFallbackNotice(scope, err)}, nil
+		return map[string]runner.Mode{}, []string{policyFallbackNotice(scope, err)}
 	}
 	if !changed {
-		return current, nil, nil
+		return current, nil
 	}
 	return current, []string{
 		"Registered runner set changed; keeping current modes for matching runners, " +
 			"using declared defaults for new runners, and dropping unregistered runners.",
-	}, nil
+	}
 }
 
 func policyFallbackNotice(scope string, policyErr error) string {
@@ -597,4 +678,398 @@ func answeredRunnerModes(
 		)
 	}
 	return canonical, nil
+}
+
+// recommendation is a recommended directory name found in the workspace, with
+// the slash-separated paths from the scope it was found at.
+type recommendation struct {
+	name  string
+	paths []string
+}
+
+// exclusionPlan holds what init knows about the directories discovery skips
+// before it asks: the recommended names found in the workspace, what the
+// policy records, and the answers --exclude-mode and --exclude gave.
+type exclusionPlan struct {
+	found         []recommendation
+	recorded      policy.Exclusions
+	mode          string
+	custom        []string
+	unreadable    []string
+	recordedFound bool
+	customSet     bool
+}
+
+// newExclusionPlan checks the exclusion flags and, unless they leave the
+// recommendations unused, looks for recommended directories under scope.
+// --exclude lists the operator's own directories, so it needs a mode that
+// uses them, and a mode that uses the recommendations needs some.
+func newExclusionPlan(
+	scope string,
+	recorded recordedPolicy,
+	mode string,
+	custom string,
+	customSet bool,
+) (exclusionPlan, error) {
+	if mode != "" && !slices.Contains(excludeModes(), mode) {
+		return exclusionPlan{}, fmt.Errorf(
+			"unsupported --exclude-mode %q; choose one of %s",
+			mode,
+			strings.Join(excludeModes(), ", "),
+		)
+	}
+	plan := exclusionPlan{mode: mode, customSet: customSet}
+	plan.recorded, plan.recordedFound = recorded.exclusions()
+	if customSet {
+		if mode != excludeModeCustom && mode != excludeModeBoth {
+			return exclusionPlan{}, fmt.Errorf(
+				"--exclude lists your own directories, so it needs --exclude-mode %s or %s",
+				excludeModeCustom,
+				excludeModeBoth,
+			)
+		}
+		plan.custom = questionnaire.SplitList(custom)
+		if err := validateExcludeList(plan.custom); err != nil {
+			return exclusionPlan{}, fmt.Errorf("--exclude %q: %w", custom, err)
+		}
+	}
+	if mode == excludeModeNone || mode == excludeModeCustom {
+		return plan, nil
+	}
+	found, unreadable, err := findRecommendations(scope)
+	if err != nil {
+		return exclusionPlan{}, fmt.Errorf(
+			"%w; --exclude-mode %s or %s answers without the search",
+			err,
+			excludeModeNone,
+			excludeModeCustom,
+		)
+	}
+	plan.found, plan.unreadable = found, unreadable
+	if len(plan.recommendedNames()) == 0 &&
+		(mode == excludeModeRecommended || mode == excludeModeBoth) {
+		return exclusionPlan{}, fmt.Errorf(
+			"--exclude-mode %s: no recommended directory was found under %s; choose %s or %s",
+			mode,
+			scope,
+			excludeModeNone,
+			excludeModeCustom,
+		)
+	}
+	return plan, nil
+}
+
+// recommendedNames returns what the recommended answer skips: the names an
+// earlier init recorded, which stay even while their directories are absent -
+// build output comes and goes - and then the names found now.
+func (plan exclusionPlan) recommendedNames() []string {
+	names := slices.Clone(plan.recorded.Recommended)
+	for _, found := range plan.found {
+		if !slices.Contains(names, found.name) {
+			names = append(names, found.name)
+		}
+	}
+	return names
+}
+
+// findRecommendations walks scope for directories with a recommended name. It
+// skips hidden directories and neither follows symbolic links nor descends
+// into a match, so dependencies fetched into build output are found once, as
+// the build output. The result follows recommendedExclusionNames.
+//
+// A directory below scope that the user may not read is skipped and returned
+// among the unreadable ones: the search only suggests, so by the owner's
+// decision it reports what it could not look into rather than stopping init.
+// Any other failure stops it.
+func findRecommendations(scope string) ([]recommendation, []string, error) {
+	found := make(map[string][]string)
+	var unreadable []string
+	err := filepath.WalkDir(scope, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil && (path == scope || !errors.Is(walkErr, fs.ErrPermission)) {
+			return walkErr
+		}
+		if path == scope || !entry.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(scope, path)
+		if err != nil {
+			return fmt.Errorf("relate %s to the workspace: %w", path, err)
+		}
+		if walkErr != nil {
+			unreadable = append(unreadable, filepath.ToSlash(rel))
+			return filepath.SkipDir
+		}
+		if strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir
+		}
+		if !slices.Contains(recommendedExclusionNames(), entry.Name()) {
+			return nil
+		}
+		found[entry.Name()] = append(found[entry.Name()], filepath.ToSlash(rel))
+		return filepath.SkipDir
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("look for recommended exclusions under %s: %w", scope, err)
+	}
+	var recommendations []recommendation
+	for _, name := range recommendedExclusionNames() {
+		if paths, ok := found[name]; ok {
+			recommendations = append(recommendations, recommendation{name: name, paths: paths})
+		}
+	}
+	return recommendations, unreadable, nil
+}
+
+// unreadableNotice says which directories the search could not look into,
+// or nothing when it read them all.
+func (plan exclusionPlan) unreadableNotice() []string {
+	if len(plan.unreadable) == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf(
+		"Could not read %s, so recommendations inside are not known; "+
+			"list what to skip there yourself if anything.",
+		questionnaire.Summary(plan.unreadable, unreadableNoticeLimit),
+	)}
+}
+
+// validateExcludeList accepts a non-empty list of patterns discovery can
+// match, none of them twice.
+func validateExcludeList(patterns []string) error {
+	if len(patterns) == 0 {
+		return errors.New("list at least one directory")
+	}
+	for index, pattern := range patterns {
+		if err := policy.ValidateExcludePattern(pattern); err != nil {
+			return fmt.Errorf("entry %d: %w", index+1, err)
+		}
+		if slices.Contains(patterns[:index], pattern) {
+			return fmt.Errorf("%q is listed twice", pattern)
+		}
+	}
+	return nil
+}
+
+// questions asks which directories discovery skips, and the operator's own
+// list when the answer uses one, unless the flags answered them. It offers
+// what the policy records. When a flag answered the mode, the notice about
+// directories the search could not read comes back on its own.
+func (plan exclusionPlan) questions() ([]questionnaire.Question, []string) {
+	var questions []questionnaire.Question
+	var notices []string
+	if plan.mode == "" {
+		questions = append(questions, plan.modeQuestion())
+	} else {
+		notices = plan.unreadableNotice()
+	}
+	if plan.customSet || plan.mode == excludeModeNone || plan.mode == excludeModeRecommended {
+		return questions, notices
+	}
+	return append(questions, plan.listQuestion()), notices
+}
+
+func (plan exclusionPlan) modeQuestion() questionnaire.Question {
+	offer, current := excludeModeNone, false
+	if plan.recordedFound {
+		offer, current = recordedExcludeMode(plan.recorded), true
+	}
+	names := plan.recommendedNames()
+	notices := plan.unreadableNotice()
+	if added := plan.foundSinceRecorded(); len(added) > 0 &&
+		(offer == excludeModeRecommended || offer == excludeModeBoth) {
+		notices = append(notices, fmt.Sprintf(
+			"Recommended since the last init: %s; the recorded answer now skips them too.",
+			strings.Join(added, ", "),
+		))
+	}
+	var badge string
+	if len(plan.found) > 0 {
+		badge = fmt.Sprintf("%d recommended found", len(plan.found))
+	}
+	context := slices.Concat(
+		[]string{
+			"Project discovery finds the projects whose tasks your AI agents can run; " +
+				"skipping build output, fetched dependencies, and CI checkouts keeps it to " +
+				"your own projects.",
+			"JMW always skips .git and .just-mcp-work; nothing else is skipped unless you " +
+				"choose it here.",
+		},
+		plan.recommendationContext(),
+	)
+	choices := []questionnaire.Choice{{
+		Value:       excludeModeNone,
+		Label:       "Nothing else",
+		Description: "discovery skips only .git and .just-mcp-work",
+	}}
+	if len(names) > 0 {
+		choices = append(choices, questionnaire.Choice{
+			Value:       excludeModeRecommended,
+			Label:       "Recommended only",
+			Description: "skip every directory named " + strings.Join(names, ", "),
+		})
+	}
+	choices = append(choices, questionnaire.Choice{
+		Value:       excludeModeCustom,
+		Label:       "Your list only",
+		Description: "skip only the directories you list",
+	})
+	if len(names) > 0 {
+		choices = append(choices, questionnaire.Choice{
+			Value:       excludeModeBoth,
+			Label:       "Recommended and your list",
+			Description: "skip the recommended directories and the ones you list",
+		})
+	}
+	values := make([]string, 0, len(choices))
+	for _, choice := range choices {
+		values = append(values, choice.Value)
+	}
+	return questionnaire.Question{
+		ID:       excludeModeQuestionID,
+		Section:  discoverySection,
+		Subject:  "Skipped directories",
+		Title:    "Which directories should project discovery skip?",
+		Context:  context,
+		Notices:  notices,
+		Badge:    badge,
+		Choices:  choices,
+		Defaults: []string{excludeModeNone},
+		Offer:    []string{offer},
+		Current:  current,
+		Label:    "Skip",
+		Flag:     "--exclude-mode " + strings.Join(values, "|"),
+		Parse: func(value string) (string, bool) {
+			return value, slices.Contains(values, value)
+		},
+		Unsupported: func(value string) error {
+			return fmt.Errorf("unsupported answer %q about skipped directories", value)
+		},
+		UnsupportedPrompt: func(value string) string {
+			return fmt.Sprintf(
+				"Unsupported answer %q; choose one of %s.\n",
+				value,
+				strings.Join(values, ", "),
+			)
+		},
+		ReadDescription:       "skipped directories answer",
+		UnansweredDescription: "skipped directories",
+	}
+}
+
+// foundSinceRecorded returns the names found now that the recorded
+// recommended answer did not take; none when nothing was recorded.
+func (plan exclusionPlan) foundSinceRecorded() []string {
+	if len(plan.recorded.Recommended) == 0 {
+		return nil
+	}
+	var added []string
+	for _, found := range plan.found {
+		if !slices.Contains(plan.recorded.Recommended, found.name) {
+			added = append(added, found.name)
+		}
+	}
+	return added
+}
+
+// recommendationContext says where each recommended name was found, and which
+// recorded ones are absent now but stay skipped.
+func (plan exclusionPlan) recommendationContext() []string {
+	var context []string
+	places := make([]string, 0, len(plan.found))
+	foundNames := make([]string, 0, len(plan.found))
+	for _, found := range plan.found {
+		foundNames = append(foundNames, found.name)
+		places = append(places, fmt.Sprintf(
+			"%s (%s)",
+			found.name,
+			questionnaire.Summary(found.paths, recommendationPathLimit),
+		))
+	}
+	if len(places) > 0 {
+		context = append(context, "Recommended here: "+strings.Join(places, "; ")+".")
+	}
+	var absent []string
+	for _, name := range plan.recorded.Recommended {
+		if !slices.Contains(foundNames, name) {
+			absent = append(absent, name)
+		}
+	}
+	if len(absent) > 0 {
+		context = append(
+			context,
+			"Recommended earlier and absent now, still skipped when they return: "+
+				strings.Join(absent, ", ")+".",
+		)
+	}
+	return context
+}
+
+// recordedExcludeMode names the answer that recorded exclusions came from.
+func recordedExcludeMode(recorded policy.Exclusions) string {
+	switch {
+	case len(recorded.Recommended) > 0 && len(recorded.Custom) > 0:
+		return excludeModeBoth
+	case len(recorded.Recommended) > 0:
+		return excludeModeRecommended
+	case len(recorded.Custom) > 0:
+		return excludeModeCustom
+	default:
+		return excludeModeNone
+	}
+}
+
+func (plan exclusionPlan) listQuestion() questionnaire.Question {
+	question := questionnaire.Question{
+		ID:      excludeQuestionID,
+		Kind:    questionnaire.List,
+		Section: discoverySection,
+		Subject: "Your directories",
+		Title:   "Which directories of your own should project discovery skip?",
+		Context: []string{
+			"A plain name skips every directory so named anywhere in the workspace. " +
+				"An entry with a slash or a glob character, such as tools/*/out, is " +
+				"matched against the whole path from the workspace root, one path " +
+				"segment per *, so cmake-build-* skips only top-level directories.",
+		},
+		Offer:                 slices.Clone(plan.recorded.Custom),
+		Current:               plan.recordedFound && len(plan.recorded.Custom) > 0,
+		Label:                 "Directories",
+		Flag:                  "--exclude <pattern>,...",
+		Validate:              validateExcludeList,
+		ReadDescription:       "skipped directories",
+		UnansweredDescription: "your skipped directories",
+	}
+	if plan.mode == "" {
+		question.When = func(answers questionnaire.Answers) bool {
+			mode := answers[excludeModeQuestionID]
+			return len(mode) == 1 &&
+				(mode[0] == excludeModeCustom || mode[0] == excludeModeBoth)
+		}
+	}
+	return question
+}
+
+// exclusions turns the flags and the answers into what the policy records.
+func (plan exclusionPlan) exclusions(answers questionnaire.Answers) (policy.Exclusions, error) {
+	mode := plan.mode
+	if values, asked := answers[excludeModeQuestionID]; asked {
+		mode = values[0]
+	}
+	custom := plan.custom
+	if values, asked := answers[excludeQuestionID]; asked {
+		custom = values
+	}
+	recommended := plan.recommendedNames()
+	switch mode {
+	case excludeModeNone:
+		return policy.Exclusions{}, nil
+	case excludeModeRecommended:
+		return policy.Exclusions{Recommended: recommended}, nil
+	case excludeModeCustom:
+		return policy.Exclusions{Custom: custom}, nil
+	case excludeModeBoth:
+		return policy.Exclusions{Recommended: recommended, Custom: custom}, nil
+	default:
+		return policy.Exclusions{}, fmt.Errorf("unsupported exclusion mode %q", mode)
+	}
 }

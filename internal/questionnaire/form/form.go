@@ -72,19 +72,29 @@ func (r *Renderer) Ask(
 	if !result.submitted {
 		return nil, ErrCancelled
 	}
-	if err := writeSummary(r.output, questions, result.values); err != nil {
+	answers := result.answers()
+	if err := writeSummary(r.output, questions, answers); err != nil {
 		return nil, err
 	}
-	return result.answers(), nil
+	return answers, nil
 }
 
-func writeSummary(output io.Writer, questions []questionnaire.Question, values [][]string) error {
-	for index, question := range questions {
+// writeSummary writes the answer of every question that applied, in order.
+func writeSummary(
+	output io.Writer,
+	questions []questionnaire.Question,
+	answers questionnaire.Answers,
+) error {
+	for _, question := range questions {
+		values, answered := answers[question.ID]
+		if !answered {
+			continue
+		}
 		if _, err := fmt.Fprintf(
 			output,
 			"%s: %s\n",
 			question.Subject,
-			strings.Join(values[index], ", "),
+			strings.Join(values, ", "),
 		); err != nil {
 			return fmt.Errorf("write the form answers: %w", err)
 		}

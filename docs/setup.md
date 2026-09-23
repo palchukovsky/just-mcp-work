@@ -141,6 +141,46 @@ and say what it runs; `--runner-mode` and the policy file use the short names.
 [SECURITY.md](../SECURITY.md) describes what each mode exposes and what it does
 not restrict. To change the selection, run `init`, not `serve --runner-mode`.
 
+## Skipped directories
+
+Project discovery always skips `.git` and `.just-mcp-work`; everything else it
+skips is the workspace's own choice. `init` asks which directories that is:
+
+- `none` - nothing else.
+- `recommended` - the recommended directories found in this workspace.
+- `custom` - only the directories you list.
+- `both` - the recommended ones and your list.
+
+`init` recommends a directory by name when it usually holds build output,
+fetched or vendored dependencies, or a CI checkout - `build`, `builds`,
+`_build`, `out`, `dist`, `distr`, `target`, `obj`, `_deps`, `node_modules`,
+`vendor`, `external`, `third_party`, `thirdparty`, `3rdparty`, `venv` - and
+only when such a directory exists in the workspace. Hidden directories and
+the inside of a match are not searched, and a directory you may not read is
+skipped with a notice naming it. Without any, `recommended` and `both` are
+not offered. The question names what was found and where.
+
+Your list is typed as comma-separated entries. A plain name skips every
+directory so named anywhere in the workspace. An entry with a slash or a glob
+character, such as `tools/*/out`, is matched against the whole path from the
+workspace root, one path segment per `*`, so `cmake-build-*` skips only
+top-level directories; it keeps that meaning when `serve --root` names a
+subdirectory of the workspace. In the form, Enter on the list row starts
+typing it, pasted lines become entries, and Enter again keeps it; `Esc` drops
+the edit.
+
+`init` writes the answer to `.just-mcp-work.json` as the recommended names it
+took and your list, and a later run offers both again. A recorded recommended
+name stays while its directory is absent - build output comes and goes - and a
+name found since joins the recommended answer, which the question says. The
+offer is `none` in a workspace that has none recorded. Pass `--exclude-mode
+none|recommended|custom|both` and, with `custom` or `both`,
+`--exclude <entry>,...` to answer non-interactively; `none` and `custom` skip
+the search for recommendations. A policy written before this question existed
+skips nothing beyond `.git` and `.just-mcp-work` until `init` runs again.
+`serve --exclude` adds entries for one server on top of the policy, matched
+from the directory `serve` runs on.
+
 ## AI families
 
 `init` also asks which AI families the managed server should declare. The

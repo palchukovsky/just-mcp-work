@@ -68,11 +68,29 @@ type Registry struct {
 	root         string
 	worktreeRoot string
 	runners      *runner.Registry
-	excludes     []string
+	excludes     []exclusion
 }
 
-// NewRegistry creates a workspace registry rooted at root.
-func NewRegistry(root string, runners *runner.Registry, excludes []string) (*Registry, error) {
+// Exclusion is one directory pattern discovery skips. A pattern equal to a
+// directory's name skips that directory wherever it is; any pattern is also
+// matched, as a slash-separated glob, against the path from Base, the
+// directory it was written for, which must contain the registry root.
+type Exclusion struct {
+	Base    string
+	Pattern string
+}
+
+// exclusion is an Exclusion with its base resolved: prefix is the root's path
+// from the base, "." when they are the same directory.
+type exclusion struct {
+	pattern string
+	prefix  string
+}
+
+// NewRegistry creates a workspace registry rooted at root. Discovery skips
+// .git, .just-mcp-work, and every directory an exclusion matches. It refuses
+// an exclusion whose base does not contain root.
+func NewRegistry(root string, runners *runner.Registry, excludes []Exclusion) (*Registry, error) {
 	if runners == nil {
 		return nil, fmt.Errorf("runner registry must not be nil")
 	}
@@ -91,12 +109,54 @@ func NewRegistry(root string, runners *runner.Registry, excludes []string) (*Reg
 			return nil, fmt.Errorf("resolve canonical workspace root: %w", err)
 		}
 	}
+	resolved, err := resolveExclusions(absRoot, excludes)
+	if err != nil {
+		return nil, err
+	}
 	return &Registry{
 		root:         absRoot,
 		worktreeRoot: worktreeRoot,
 		runners:      runners,
-		excludes:     append([]string(nil), excludes...),
+		excludes:     resolved,
 	}, nil
+}
+
+// resolveExclusions finds root's path from each exclusion's base. Both sides
+// are compared canonically, so a base reached through a symbolic link still
+// matches the root it contains.
+func resolveExclusions(root string, excludes []Exclusion) ([]exclusion, error) {
+	if len(excludes) == 0 {
+		return nil, nil
+	}
+	canonicalRoot, err := canonicalPathWithMissing(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve canonical workspace root: %w", err)
+	}
+	resolved := make([]exclusion, 0, len(excludes))
+	for _, exclude := range excludes {
+		base, err := filepath.Abs(exclude.Base)
+		if err != nil {
+			return nil, fmt.Errorf("resolve base of exclusion %q: %w", exclude.Pattern, err)
+		}
+		canonicalBase, err := canonicalPathWithMissing(base)
+		if err != nil {
+			return nil, fmt.Errorf("resolve base of exclusion %q: %w", exclude.Pattern, err)
+		}
+		prefix, err := filepath.Rel(canonicalBase, canonicalRoot)
+		if err != nil || prefix == ".." || strings.HasPrefix(prefix, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf(
+				"exclusion %q is written for %s, which does not contain the workspace root %s",
+				exclude.Pattern,
+				exclude.Base,
+				root,
+			)
+		}
+		resolved = append(resolved, exclusion{
+			pattern: exclude.Pattern,
+			prefix:  filepath.ToSlash(prefix),
+		})
+	}
+	return resolved, nil
 }
 
 // Root returns the resolved workspace root.
@@ -487,14 +547,17 @@ func (r *Registry) excluded(path string) bool {
 		return true
 	}
 	name := filepath.Base(path)
-	for _, pattern := range append(
-		[]string{".git", "node_modules", "target", ".just-mcp-work"},
-		r.excludes...,
-	) {
-		if name == pattern {
+	// Only version-control and JMW's own state are skipped unconditionally;
+	// build output and vendored code are whatever the workspace declares.
+	builtin := []exclusion{{pattern: ".git", prefix: "."}, {pattern: ".just-mcp-work", prefix: "."}}
+	for _, exclude := range append(builtin, r.excludes...) {
+		if name == exclude.pattern {
 			return true
 		}
-		matched, matchErr := pathpkg.Match(pattern, filepath.ToSlash(rel))
+		matched, matchErr := pathpkg.Match(
+			exclude.pattern,
+			pathpkg.Join(exclude.prefix, filepath.ToSlash(rel)),
+		)
 		if matchErr == nil && matched {
 			return true
 		}

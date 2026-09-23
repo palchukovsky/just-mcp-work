@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 // Please see https://github.com/palchukovsky/just-mcp-work for details.
 
-// Package policy persists workspace runner selections.
+// Package policy persists workspace runner selections and the directories
+// project discovery skips.
 package policy
 
 import (
@@ -13,7 +14,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 )
@@ -32,8 +36,32 @@ const (
 type Policy struct {
 	// Selections preserves the exact order recorded in the policy file.
 	Selections []runner.Selection
+	// Exclude holds the directories project discovery skips beyond the ones it
+	// always skips. It is empty when the policy records none, and when the
+	// policy was written before init asked about them.
+	Exclude Exclusions
+	// ExcludeRecorded distinguishes a policy whose init recorded the exclusions,
+	// even as none, from one written before init asked about them.
+	ExcludeRecorded bool
 	// Found distinguishes an existing policy that selects no runners from no policy file.
 	Found bool
+}
+
+// Exclusions are the directory patterns project discovery skips, kept apart by
+// where init took them from, so a later init can offer the same answer again.
+// Each pattern is either a directory name, which skips every directory so
+// named, or a slash-separated glob matched against the path from the
+// workspace root.
+type Exclusions struct {
+	// Recommended are the patterns init recommended and the operator accepted.
+	Recommended []string
+	// Custom are the patterns the operator listed.
+	Custom []string
+}
+
+// Patterns returns every pattern project discovery skips.
+func (e Exclusions) Patterns() []string {
+	return slices.Concat(e.Recommended, e.Custom)
 }
 
 // policyDocument mirrors the on-disk schema: the version member is written
@@ -41,11 +69,45 @@ type Policy struct {
 type policyDocument struct {
 	Version *int             `json:"version"`
 	Runners *[]fileSelection `json:"runners"`
+	Exclude *fileExclusions  `json:"exclude,omitempty"`
 }
 
 type fileSelection struct {
 	Name string      `json:"name"`
 	Mode runner.Mode `json:"mode"`
+}
+
+type fileExclusions struct {
+	Recommended *[]string `json:"recommended"`
+	Custom      *[]string `json:"custom"`
+}
+
+// ValidateExcludePattern refuses a pattern project discovery could never
+// match as written: an empty one, one with surrounding spaces, an absolute
+// one, one that is not a clean path inside the workspace - a trailing or
+// doubled slash, a . or .. segment - or a malformed glob.
+func ValidateExcludePattern(pattern string) error {
+	switch {
+	case pattern == "":
+		return fmt.Errorf("pattern is empty")
+	case strings.TrimSpace(pattern) != pattern:
+		return fmt.Errorf("pattern %q has surrounding spaces", pattern)
+	case strings.HasPrefix(pattern, "/"):
+		return fmt.Errorf(
+			"pattern %q is absolute; patterns are relative to the workspace root",
+			pattern,
+		)
+	case path.Clean(pattern) != pattern || pattern == "." || pattern == ".." ||
+		strings.HasPrefix(pattern, "../"):
+		return fmt.Errorf(
+			"pattern %q is not a clean path inside the workspace, such as build or tools/*/out",
+			pattern,
+		)
+	}
+	if _, err := path.Match(pattern, ""); err != nil {
+		return fmt.Errorf("pattern %q is malformed: %w", pattern, err)
+	}
+	return nil
 }
 
 // Path returns the workspace policy file path for root.
@@ -107,21 +169,44 @@ func Parse(data []byte) (Policy, error) {
 	if err != nil {
 		return Policy{}, err
 	}
-	return Policy{Found: true, Selections: selections}, nil
+	exclude, err := structuralExclusions(document.Exclude)
+	if err != nil {
+		return Policy{}, err
+	}
+	return Policy{
+		Found:           true,
+		Selections:      selections,
+		Exclude:         exclude,
+		ExcludeRecorded: document.Exclude != nil,
+	}, nil
 }
 
-// Save atomically writes catalog-validated selections in their existing catalog order.
-func Save(root string, selections runner.ValidatedSelections) error {
-	return save(root, selections, os.Rename)
+// Save atomically writes catalog-validated selections in their existing catalog order,
+// together with the discovery exclusions.
+func Save(root string, selections runner.ValidatedSelections, exclude Exclusions) error {
+	return save(root, selections, exclude, os.Rename)
 }
 
 // Encode returns the exact policy bytes Save writes without accessing the filesystem.
-func Encode(selections runner.ValidatedSelections) ([]byte, error) {
+// It refuses exclusions that Parse would refuse, so no written policy fails to load.
+func Encode(selections runner.ValidatedSelections, exclude Exclusions) ([]byte, error) {
 	validated, err := selections.Selections()
 	if err != nil {
 		return nil, fmt.Errorf("obtain validated selections: %w", err)
 	}
-	data, err := encodeDocument(validated)
+	recommended := slices.Clone(exclude.Recommended)
+	if recommended == nil {
+		recommended = []string{}
+	}
+	custom := slices.Clone(exclude.Custom)
+	if custom == nil {
+		custom = []string{}
+	}
+	document := &fileExclusions{Recommended: &recommended, Custom: &custom}
+	if _, err = structuralExclusions(document); err != nil {
+		return nil, fmt.Errorf("validate exclusions: %w", err)
+	}
+	data, err := encodeDocument(validated, document)
 	if err != nil {
 		return nil, fmt.Errorf("encode JSON: %w", err)
 	}
@@ -131,6 +216,7 @@ func Encode(selections runner.ValidatedSelections) ([]byte, error) {
 func save(
 	root string,
 	selections runner.ValidatedSelections,
+	exclude Exclusions,
 	publish func(string, string) error,
 ) error {
 	path := Path(root)
@@ -141,7 +227,7 @@ func save(
 	if err != nil {
 		return fmt.Errorf("save policy %s: %w", path, err)
 	}
-	data, err := Encode(selections)
+	data, err := Encode(selections, exclude)
 	if err != nil {
 		return fmt.Errorf("save policy %s: %w", path, err)
 	}
@@ -252,24 +338,8 @@ func validateDocumentMembers(data []byte) error {
 			return fmt.Errorf("JSON member %q is repeated", member)
 		}
 		seen[member] = struct{}{}
-		switch member {
-		case "version":
-			var value json.RawMessage
-			if err := decoder.Decode(&value); err != nil {
-				return fmt.Errorf("decode JSON member %q: %w", member, err)
-			}
-		case "runners":
-			var entries []json.RawMessage
-			if err := decoder.Decode(&entries); err != nil {
-				return fmt.Errorf("decode JSON member %q: %w", member, err)
-			}
-			for index, entry := range entries {
-				if err := validateSelectionMembers(entry, index); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("unknown JSON member %q", member)
+		if err := validateRootMember(decoder, member); err != nil {
+			return err
 		}
 	}
 	if _, err := decoder.Token(); err != nil {
@@ -278,48 +348,84 @@ func validateDocumentMembers(data []byte) error {
 	return nil
 }
 
-func validateSelectionMembers(data []byte, index int) error {
+// validateRootMember reads the value of one root member, and the members of
+// the objects nested in it.
+func validateRootMember(decoder *json.Decoder, member string) error {
+	switch member {
+	case "version":
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("decode JSON member %q: %w", member, err)
+		}
+	case "runners":
+		var entries []json.RawMessage
+		if err := decoder.Decode(&entries); err != nil {
+			return fmt.Errorf("decode JSON member %q: %w", member, err)
+		}
+		for index, entry := range entries {
+			if err := validateObjectMembers(
+				entry,
+				fmt.Sprintf("runners[%d]", index),
+				"name",
+				"mode",
+			); err != nil {
+				return err
+			}
+		}
+	case "exclude":
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return fmt.Errorf("decode JSON member %q: %w", member, err)
+		}
+		// A null would decode as an absent member, which records no answer;
+		// only leaving the member out means that.
+		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return fmt.Errorf("exclude must be an object")
+		}
+		return validateObjectMembers(value, member, "recommended", "custom")
+	default:
+		return fmt.Errorf("unknown JSON member %q", member)
+	}
+	return nil
+}
+
+// validateObjectMembers rejects a repeated member of the nested object at
+// where, and any member but allowed, for the same reason the root pre-pass
+// does. A value that is not an object is left to the decoder to refuse.
+func validateObjectMembers(data []byte, where string, allowed ...string) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	token, err := decoder.Token()
 	if err != nil {
-		return fmt.Errorf("decode runners[%d]: %w", index, err)
+		return fmt.Errorf("decode %s: %w", where, err)
 	}
 	delimiter, isDelimiter := token.(json.Delim)
 	if !isDelimiter || delimiter != '{' {
 		return nil
 	}
-	seen := make(map[string]struct{}, 2)
+	seen := make(map[string]struct{}, len(allowed))
 	for decoder.More() {
 		memberToken, tokenErr := decoder.Token()
 		if tokenErr != nil {
-			return fmt.Errorf("decode runners[%d] member: %w", index, tokenErr)
+			return fmt.Errorf("decode %s member: %w", where, tokenErr)
 		}
 		member, isString := memberToken.(string)
 		if !isString {
-			return fmt.Errorf("decode runners[%d] member: name is not a string", index)
+			return fmt.Errorf("decode %s member: name is not a string", where)
 		}
 		if _, repeated := seen[member]; repeated {
-			return fmt.Errorf(
-				"runners[%d] JSON member %q is repeated",
-				index,
-				member,
-			)
+			return fmt.Errorf("%s JSON member %q is repeated", where, member)
 		}
 		seen[member] = struct{}{}
-		if member != "name" && member != "mode" {
-			return fmt.Errorf(
-				"runners[%d] has unknown JSON member %q",
-				index,
-				member,
-			)
+		if !slices.Contains(allowed, member) {
+			return fmt.Errorf("%s has unknown JSON member %q", where, member)
 		}
 		var value json.RawMessage
 		if err := decoder.Decode(&value); err != nil {
-			return fmt.Errorf("decode runners[%d].%s: %w", index, member, err)
+			return fmt.Errorf("decode %s.%s: %w", where, member, err)
 		}
 	}
 	if _, err := decoder.Token(); err != nil {
-		return fmt.Errorf("decode runners[%d] object: %w", index, err)
+		return fmt.Errorf("decode %s object: %w", where, err)
 	}
 	return nil
 }
@@ -352,14 +458,47 @@ func structuralSelections(document policyDocument) ([]runner.Selection, error) {
 	return selections, nil
 }
 
-func encodeDocument(selections []runner.Selection) ([]byte, error) {
+// structuralExclusions reads the exclude member. A policy without it records
+// no exclusions; one with it must carry both lists, each holding patterns that
+// pass ValidateExcludePattern and no pattern twice.
+func structuralExclusions(document *fileExclusions) (Exclusions, error) {
+	if document == nil {
+		return Exclusions{Recommended: []string{}, Custom: []string{}}, nil
+	}
+	recommended, err := structuralPatterns(document.Recommended, "exclude.recommended")
+	if err != nil {
+		return Exclusions{}, err
+	}
+	custom, err := structuralPatterns(document.Custom, "exclude.custom")
+	if err != nil {
+		return Exclusions{}, err
+	}
+	return Exclusions{Recommended: recommended, Custom: custom}, nil
+}
+
+func structuralPatterns(patterns *[]string, where string) ([]string, error) {
+	if patterns == nil {
+		return nil, fmt.Errorf("%s must be an array", where)
+	}
+	for index, pattern := range *patterns {
+		if err := ValidateExcludePattern(pattern); err != nil {
+			return nil, fmt.Errorf("%s[%d]: %w", where, index, err)
+		}
+		if slices.Contains((*patterns)[:index], pattern) {
+			return nil, fmt.Errorf("%s[%d] %q is duplicated", where, index, pattern)
+		}
+	}
+	return slices.Clone(*patterns), nil
+}
+
+func encodeDocument(selections []runner.Selection, exclude *fileExclusions) ([]byte, error) {
 	runners := make([]fileSelection, 0, len(selections))
 	for _, selection := range selections {
 		runners = append(runners, fileSelection{Name: selection.Name, Mode: selection.Mode})
 	}
 	version := currentVersion
 	data, err := json.MarshalIndent(
-		policyDocument{Version: &version, Runners: &runners},
+		policyDocument{Version: &version, Runners: &runners, Exclude: exclude},
 		"",
 		"  ",
 	)

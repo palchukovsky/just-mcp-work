@@ -123,10 +123,10 @@ dot-directories. Widen it deliberately:
 - `runners` keeps only projects exposing one of the named runners.
 
 Some directories are never descended into while scanning: `.git`,
-`node_modules`, `target`,
-`.just-mcp-work`, and whatever the operator passed to `--exclude`. Symlinked
-directories are not followed. Exclusions are an operator setting and cannot be
-widened over MCP.
+`.just-mcp-work`, the directories the operator chose to skip during `init`,
+and whatever the operator passed to `serve --exclude`. Symlinked directories
+are not followed. Exclusions are an operator setting and cannot be widened over
+MCP; a directory they skip is not inspected, so it reports no status either.
 
 The `applied_filter` field reports the effective filter and a `pruned`
 breakdown: `depth`, `hidden`, and `excluded` count skipped directory subtrees,
@@ -219,10 +219,14 @@ started them until `docker:compose:down` stops them.
 Every runner registers a permission declaration, and the operator picks a mode
 during `init`. `init` writes `.just-mcp-work.json` in the workspace scope root,
 next to `.mcp.json`. The file starts with `version` and has an ordered `runners`
-array of selections:
+array of selections, followed by the directories discovery skips:
 
 ```json
-{"version": 1, "runners": [{"name": "go", "mode": "safe"}]}
+{
+  "version": 1,
+  "runners": [{"name": "go", "mode": "safe"}],
+  "exclude": {"recommended": ["build"], "custom": ["tools/*/out"]}
+}
 ```
 
 During `init`, the operator selects any number of the declarable families,
@@ -771,7 +775,7 @@ The operator sets these; an agent cannot change them at runtime.
 | `--timeout` | `JMW_TIMEOUT` | `15m` | Per-run timeout; `0` disables it. |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` | Default synchronous wait. |
 | `--retention` | `JMW_RETENTION` | `72h` | Run-log retention. |
-| `--exclude` | - | none | Extra directories to skip. |
+| `--exclude` | - | none | Directories to skip on top of the policy. |
 
 `just-mcp-work init` writes the managed instruction block and the MCP
 configuration for the selected agents, and writes the runner policy.
@@ -780,7 +784,7 @@ configuration for the selected agents, and writes the runner policy.
 ## On-disk layout
 
 ```text
-<workspace root>/.just-mcp-work.json  runner policy; selects runners
+<workspace root>/.just-mcp-work.json  runner policy; selects runners and skipped directories
 <workspace root>/.just-mcp-work/
 ├── managed.json              init record checked when serve starts
 ├── guide.txt                 generated agent reference

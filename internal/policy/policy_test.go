@@ -58,7 +58,7 @@ func TestSaveLoadRoundTripPreservesOrder(t *testing.T) {
 		[]string{"just", "go", "make"},
 		[]runner.Selection{{Name: "go", Mode: runner.ModeDisabled}},
 	)
-	if err := Save(root, validated); err != nil {
+	if err := Save(root, validated, Exclusions{}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	if runtime.GOOS != "windows" {
@@ -103,7 +103,7 @@ func TestLoadEmptyPolicy(t *testing.T) {
 
 func TestSaveLoadRoundTripEmptyCatalog(t *testing.T) {
 	root := t.TempDir()
-	if err := Save(root, validatedSelections(t, nil, nil)); err != nil {
+	if err := Save(root, validatedSelections(t, nil, nil), Exclusions{}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	loaded, err := Load(root)
@@ -122,7 +122,7 @@ func TestSaveWritesStableDocument(t *testing.T) {
 		[]string{"go"},
 		[]runner.Selection{{Name: "go", Mode: runner.ModeDisabled}},
 	)
-	if err := Save(root, validated); err != nil {
+	if err := Save(root, validated, Exclusions{}); err != nil {
 		t.Fatalf("Save() error = %v", err)
 	}
 	data, err := os.ReadFile(Path(root))
@@ -136,10 +136,135 @@ func TestSaveWritesStableDocument(t *testing.T) {
 		"      \"name\": \"go\",\n" +
 		"      \"mode\": \"disabled\"\n" +
 		"    }\n" +
-		"  ]\n" +
+		"  ],\n" +
+		"  \"exclude\": {\n" +
+		"    \"recommended\": [],\n" +
+		"    \"custom\": []\n" +
+		"  }\n" +
 		"}\n"
 	if string(data) != want {
 		t.Fatalf("saved policy = %q, want %q", data, want)
+	}
+}
+
+func TestSaveLoadRoundTripKeepsExclusions(t *testing.T) {
+	root := t.TempDir()
+	exclude := Exclusions{
+		Recommended: []string{"node_modules", "build"},
+		Custom:      []string{"tools/*/out", "gitlab-runner"},
+	}
+	if err := Save(root, validatedSelections(t, nil, nil), exclude); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !loaded.ExcludeRecorded {
+		t.Fatal("Load() ExcludeRecorded = false, want true")
+	}
+	if !slices.Equal(loaded.Exclude.Recommended, exclude.Recommended) ||
+		!slices.Equal(loaded.Exclude.Custom, exclude.Custom) {
+		t.Fatalf("Load() Exclude = %+v, want %+v", loaded.Exclude, exclude)
+	}
+	want := []string{"node_modules", "build", "tools/*/out", "gitlab-runner"}
+	if got := loaded.Exclude.Patterns(); !slices.Equal(got, want) {
+		t.Fatalf("Patterns() = %v, want %v", got, want)
+	}
+}
+
+func TestLoadPolicyWithoutExclusionsRecordsNone(t *testing.T) {
+	root := t.TempDir()
+	writePolicyFile(t, root, `{"version":1,"runners":[]}`)
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if loaded.ExcludeRecorded {
+		t.Fatal("Load() ExcludeRecorded = true, want false for a policy without exclude")
+	}
+	if patterns := loaded.Exclude.Patterns(); len(patterns) != 0 {
+		t.Fatalf("Patterns() = %v, want none", patterns)
+	}
+}
+
+func TestLoadRecordsEmptyExclusions(t *testing.T) {
+	root := t.TempDir()
+	writePolicyFile(
+		t,
+		root,
+		`{"version":1,"runners":[],"exclude":{"recommended":[],"custom":[]}}`,
+	)
+	loaded, err := Load(root)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !loaded.ExcludeRecorded || len(loaded.Exclude.Patterns()) != 0 {
+		t.Fatalf("Load() = %+v, want recorded exclusions with no patterns", loaded)
+	}
+}
+
+func TestEncodeRejectsInvalidExclusions(t *testing.T) {
+	root := t.TempDir()
+	validated := validatedSelections(t, nil, nil)
+	tests := []struct {
+		name    string
+		want    string
+		exclude Exclusions
+	}{
+		{
+			name:    "malformed glob",
+			exclude: Exclusions{Custom: []string{"build["}},
+			want:    `exclude.custom[0]: pattern "build[" is malformed`,
+		},
+		{
+			name:    "duplicate pattern",
+			exclude: Exclusions{Recommended: []string{"build", "build"}},
+			want:    `exclude.recommended[1] "build" is duplicated`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Encode(validated, test.exclude); err == nil ||
+				!strings.Contains(err.Error(), test.want) {
+				t.Fatalf("Encode() error = %v, want %q", err, test.want)
+			}
+			if err := Save(root, validated, test.exclude); err == nil {
+				t.Fatal("Save() error = nil, want an error")
+			}
+			if _, err := os.Lstat(Path(root)); !os.IsNotExist(err) {
+				t.Fatalf("policy after refused Save: %v, want no file", err)
+			}
+		})
+	}
+}
+
+func TestValidateExcludePattern(t *testing.T) {
+	for _, pattern := range []string{"build", "_deps", "tools/*/out", "cmake-build-*"} {
+		if err := ValidateExcludePattern(pattern); err != nil {
+			t.Errorf("ValidateExcludePattern(%q) error = %v, want nil", pattern, err)
+		}
+	}
+	tests := []struct {
+		pattern string
+		want    string
+	}{
+		{pattern: "", want: "pattern is empty"},
+		{pattern: " build", want: `pattern " build" has surrounding spaces`},
+		{pattern: "/build", want: `pattern "/build" is absolute`},
+		{pattern: "a/[", want: `pattern "a/[" is malformed`},
+		{pattern: "node_modules/", want: `pattern "node_modules/" is not a clean path`},
+		{pattern: "./build", want: `pattern "./build" is not a clean path`},
+		{pattern: "a//b", want: `pattern "a//b" is not a clean path`},
+		{pattern: "../x", want: `pattern "../x" is not a clean path`},
+		{pattern: ".", want: `pattern "." is not a clean path`},
+		{pattern: "..", want: `pattern ".." is not a clean path`},
+	}
+	for _, test := range tests {
+		err := ValidateExcludePattern(test.pattern)
+		if err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Errorf("ValidateExcludePattern(%q) error = %v, want %q", test.pattern, err, test.want)
+		}
 	}
 }
 
@@ -150,11 +275,11 @@ func TestEncodeMatchesSave(t *testing.T) {
 		[]string{"just", "go"},
 		[]runner.Selection{{Name: "go", Mode: runner.ModeDisabled}},
 	)
-	encoded, err := Encode(validated)
+	encoded, err := Encode(validated, Exclusions{})
 	if err != nil {
 		t.Fatalf("Encode() error = %v", err)
 	}
-	if saveErr := Save(root, validated); saveErr != nil {
+	if saveErr := Save(root, validated, Exclusions{}); saveErr != nil {
 		t.Fatalf("Save() error = %v", saveErr)
 	}
 	saved, err := os.ReadFile(Path(root))
@@ -257,6 +382,51 @@ func TestLoadRejectsMalformedPolicy(t *testing.T) {
 			name:    "garbage after top-level value",
 			content: `{"version":1,"runners":[]} garbage`,
 			want:    "decode trailing JSON",
+		},
+		{
+			name:    "null exclude",
+			content: `{"version":1,"runners":[],"exclude":null}`,
+			want:    "exclude must be an object",
+		},
+		{
+			name:    "exclude without custom",
+			content: `{"version":1,"runners":[],"exclude":{"recommended":[]}}`,
+			want:    "exclude.custom must be an array",
+		},
+		{
+			name:    "exclude with null recommended",
+			content: `{"version":1,"runners":[],"exclude":{"recommended":null,"custom":[]}}`,
+			want:    "exclude.recommended must be an array",
+		},
+		{
+			name: "case-variant exclude member",
+			content: `{"version":1,"runners":[],` +
+				`"exclude":{"recommended":[],"custom":[],"Custom":[]}}`,
+			want: `exclude has unknown JSON member "Custom"`,
+		},
+		{
+			name: "repeated exclude member",
+			content: `{"version":1,"runners":[],` +
+				`"exclude":{"recommended":[],"custom":[],"custom":["x"]}}`,
+			want: `exclude JSON member "custom" is repeated`,
+		},
+		{
+			name: "duplicate excluded pattern",
+			content: `{"version":1,"runners":[],` +
+				`"exclude":{"recommended":[],"custom":["out","out"]}}`,
+			want: `exclude.custom[1] "out" is duplicated`,
+		},
+		{
+			name: "absolute excluded pattern",
+			content: `{"version":1,"runners":[],` +
+				`"exclude":{"recommended":["/build"],"custom":[]}}`,
+			want: `exclude.recommended[0]: pattern "/build" is absolute`,
+		},
+		{
+			name: "empty excluded pattern",
+			content: `{"version":1,"runners":[],` +
+				`"exclude":{"recommended":[],"custom":[""]}}`,
+			want: "exclude.custom[0]: pattern is empty",
 		},
 	}
 	for _, test := range tests {
@@ -361,7 +531,7 @@ func TestLoadAndSaveRejectEmptyRoot(t *testing.T) {
 				return nil
 			},
 		},
-		{name: "save", run: func() error { return Save("", validated) }},
+		{name: "save", run: func() error { return Save("", validated, Exclusions{}) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -419,7 +589,7 @@ func TestLoadRejectsInvalidRoot(t *testing.T) {
 
 func TestSaveRejectsUnvalidatedSelections(t *testing.T) {
 	root := t.TempDir()
-	err := Save(root, runner.ValidatedSelections{})
+	err := Save(root, runner.ValidatedSelections{}, Exclusions{})
 	if err == nil {
 		t.Fatal("Save() error = nil, want an error")
 	}
@@ -446,7 +616,7 @@ func TestSaveRejectsPolicySymlink(t *testing.T) {
 	if err := os.Symlink(target, path); err != nil {
 		t.Fatalf("create policy symlink: %v", err)
 	}
-	err := Save(root, validatedSelections(t, nil, nil))
+	err := Save(root, validatedSelections(t, nil, nil), Exclusions{})
 	if err == nil {
 		t.Fatal("Save() error = nil, want an error")
 	}
@@ -477,7 +647,7 @@ func TestSaveOverwritesExistingPolicyAndPreservesMode(t *testing.T) {
 		[]string{"go"},
 		[]runner.Selection{{Name: "go", Mode: runner.ModeDisabled}},
 	)
-	if err := Save(root, first); err != nil {
+	if err := Save(root, first, Exclusions{}); err != nil {
 		t.Fatalf("first Save() error = %v", err)
 	}
 	if runtime.GOOS != "windows" {
@@ -490,7 +660,7 @@ func TestSaveOverwritesExistingPolicyAndPreservesMode(t *testing.T) {
 		[]string{"go"},
 		[]runner.Selection{{Name: "go", Mode: runner.ModeAll}},
 	)
-	if err := Save(root, second); err != nil {
+	if err := Save(root, second, Exclusions{}); err != nil {
 		t.Fatalf("second Save() error = %v", err)
 	}
 	loaded, err := Load(root)
@@ -522,7 +692,7 @@ func TestSavePreservesExistingPolicyOnPublishFailure(t *testing.T) {
 		[]string{"go"},
 		[]runner.Selection{{Name: "go", Mode: runner.ModeDisabled}},
 	)
-	if err := Save(root, first); err != nil {
+	if err := Save(root, first, Exclusions{}); err != nil {
 		t.Fatalf("first Save() error = %v", err)
 	}
 	before, err := os.ReadFile(Path(root))
@@ -538,6 +708,7 @@ func TestSavePreservesExistingPolicyOnPublishFailure(t *testing.T) {
 	err = save(
 		root,
 		second,
+		Exclusions{},
 		func(source string, destination string) error {
 			if destination != Path(root) {
 				t.Errorf("publish destination = %q, want %q", destination, Path(root))
@@ -584,7 +755,7 @@ func TestSaveReportsUnwritableDirectory(t *testing.T) {
 		}
 		t.Skip("current user can write to permission-restricted directories")
 	}
-	err := Save(root, validatedSelections(t, nil, nil))
+	err := Save(root, validatedSelections(t, nil, nil), Exclusions{})
 	if err == nil {
 		t.Fatal("Save() error = nil, want an error")
 	}

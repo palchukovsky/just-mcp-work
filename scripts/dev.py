@@ -115,6 +115,7 @@ def smoke(_: argparse.Namespace) -> None:
                 "--agents", "claude",
                 "--claude-permissions", "no",
                 "--runner-mode", "just=all",
+                "--exclude-mode", "none",
             ],
             cwd=ROOT, check=True, text=True, input="\n" * 8,
         )

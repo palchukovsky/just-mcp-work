@@ -75,7 +75,7 @@ transport: %s`
 
 const shortPromptText = `JMW is this workspace's task runner; it saves context budget.
 
-For build, test, lint, format, and check/verify, use list_tasks then run_task or start_task. Trust a green receipt; do not fetch logs of a successful run. On failure, read stdout_tail/stderr_tail first, then a byte range if needed. Status: running with a run_id is normal: follow with wait_run or get_run_status; never launch the task twice.
+For build, test, lint, format, and check/verify, use list_tasks with a project_path from list_projects, then run_task or start_task. Trust a green receipt; do not fetch logs of a successful run. On failure, read stdout_tail/stderr_tail first, then a byte range if needed. Status: running with a run_id is normal: follow with wait_run or get_run_status; never launch the task twice.
 
 Run a command directly only when the full output you need is too large for a tail. A task may be absent because the operator withheld it through a runner mode; never recreate or run it through run_shell_command, start_shell_command, or another shell path. Pass the same rule to sub-agents and other executors.
 
@@ -417,6 +417,9 @@ type Options struct {
 	// RunnerModes is the complete, catalog-ordered runner selection persisted in
 	// the workspace policy file.
 	RunnerModes runner.ValidatedSelections
+	// Exclude holds the directories project discovery skips, persisted in the
+	// workspace policy file beside RunnerModes. Its zero value records none.
+	Exclude policy.Exclusions
 	// ClaudePermissions selects how the Claude permission lists are treated. The
 	// zero value asks through Confirm.
 	ClaudePermissions ClaudePermissions
@@ -501,7 +504,7 @@ func Apply(options Options) (Result, error) {
 		return Result{}, shellPermissionErr
 	}
 	options.ShellPermission = resolvedShellPermission
-	policyEdit, err := planPolicy(scope, options.RunnerModes)
+	policyEdit, err := planPolicy(scope, options.RunnerModes, options.Exclude)
 	if err != nil {
 		return Result{}, err
 	}
@@ -1056,6 +1059,7 @@ func planClaudeSettings(scope string, options Options) (*plannedEdit, *manifestS
 func planPolicy(
 	scope string,
 	selections runner.ValidatedSelections,
+	exclude policy.Exclusions,
 ) (*plannedEdit, error) {
 	path := policy.Path(scope)
 	resolvedScope, err := resolveWorkspaceScope(scope)
@@ -1066,7 +1070,7 @@ func planPolicy(
 	if err != nil {
 		return nil, fmt.Errorf("plan workspace policy %s: %w", path, err)
 	}
-	after, err := policyContents(selections)
+	after, err := policyContents(selections, exclude)
 	if err != nil {
 		return nil, err
 	}
@@ -1074,7 +1078,7 @@ func planPolicy(
 	edit.collisionPath = filepath.Join(resolvedScope, filepath.Base(path))
 	if edit.changed {
 		edit.apply = func() error {
-			if err := policy.Save(scope, selections); err != nil {
+			if err := policy.Save(scope, selections, exclude); err != nil {
 				return fmt.Errorf("save workspace policy: %w", err)
 			}
 			return nil
@@ -1083,8 +1087,11 @@ func planPolicy(
 	return edit, nil
 }
 
-func policyContents(selections runner.ValidatedSelections) ([]byte, error) {
-	data, err := policy.Encode(selections)
+func policyContents(
+	selections runner.ValidatedSelections,
+	exclude policy.Exclusions,
+) ([]byte, error) {
+	data, err := policy.Encode(selections, exclude)
 	if err != nil {
 		return nil, fmt.Errorf("render workspace policy: %w", err)
 	}

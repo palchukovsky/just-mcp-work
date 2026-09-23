@@ -21,6 +21,10 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/questionnaire"
 )
 
+// listOfferLimit is how many values of an offered list the prompt names
+// before it says how many more there are.
+const listOfferLimit = 3
+
 // Renderer asks questions on a line-based console.
 type Renderer struct {
 	input  *bufio.Reader
@@ -34,15 +38,19 @@ func New(input io.Reader, output io.Writer) *Renderer {
 	return &Renderer{input: bufio.NewReader(input), output: output}
 }
 
-// Ask asks each question in order. A typed answer that names no choice is
-// asked again; an answer Validate refuses, and input ending before a Choose
-// question is answered, stop it with an error.
+// Ask asks each question that applies, in order. A typed answer that names no
+// choice is asked again, and so is a typed list Validate refuses; any other
+// answer Validate refuses, and input ending before a Choose or List question
+// is answered, stop it with an error.
 func (r *Renderer) Ask(
 	_ context.Context,
 	questions []questionnaire.Question,
 ) (questionnaire.Answers, error) {
 	answers := make(questionnaire.Answers, len(questions))
 	for _, question := range questions {
+		if !question.Applies(answers) {
+			continue
+		}
 		values, err := r.ask(question, answers)
 		if err != nil {
 			return nil, err
@@ -88,18 +96,91 @@ func (r *Renderer) ask(
 		return nil, err
 	}
 	lines := slices.Concat(question.Context, question.DynamicContext(answers))
+	if question.Badge != "" {
+		lines = append([]string{question.Badge}, lines...)
+	}
 	for _, line := range lines {
 		if err := r.write("%s\n", line); err != nil {
 			return nil, err
 		}
 	}
-	if question.Kind == questionnaire.Confirm {
+	switch question.Kind {
+	case questionnaire.Confirm:
 		if err := r.writeChoices(question); err != nil {
 			return nil, err
 		}
 		return r.confirm(question)
+	case questionnaire.List:
+		return r.readList(question)
+	case questionnaire.Choose:
+		return r.choose(question)
+	default:
+		return nil, fmt.Errorf("unsupported question kind %d", question.Kind)
 	}
-	return r.choose(question)
+}
+
+// readList reads a List answer as one line of comma-separated values. An
+// empty line takes the offer; a list Validate refuses is asked for again, and
+// input ending first stops the questionnaire, with the reason it would have
+// printed.
+func (r *Renderer) readList(question questionnaire.Question) ([]string, error) {
+	if err := r.write("Separate the values with commas.\n"); err != nil {
+		return nil, err
+	}
+	for {
+		if err := r.writeListPrompt(question); err != nil {
+			return nil, err
+		}
+		answer, err := r.input.ReadString('\n')
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf("read %s: %w", question.ReadDescription, err)
+		}
+		values := question.Offer
+		if trimmed := strings.TrimSpace(answer); trimmed != "" {
+			values = questionnaire.SplitList(trimmed)
+		} else if errors.Is(err, io.EOF) {
+			if writeErr := r.write("\n"); writeErr != nil {
+				return nil, writeErr
+			}
+			return nil, unansweredError(question)
+		}
+		if question.Validate == nil {
+			return values, nil
+		}
+		validateErr := question.Validate(values)
+		if validateErr == nil {
+			return values, nil
+		}
+		if errors.Is(err, io.EOF) {
+			return nil, fmt.Errorf(
+				"refuse %s %q: %w",
+				question.ReadDescription,
+				strings.Join(values, ","),
+				validateErr,
+			)
+		}
+		if writeErr := r.write("%v\n", validateErr); writeErr != nil {
+			return nil, writeErr
+		}
+	}
+}
+
+// writeListPrompt asks for a list, showing the offer in short when there is
+// one, since an empty line takes it.
+func (r *Renderer) writeListPrompt(question questionnaire.Question) error {
+	if len(question.Offer) == 0 {
+		return r.write("%s: ", question.Label)
+	}
+	source := "default"
+	if question.Current {
+		source = "current"
+	}
+	return r.write(
+		"%s [%s; %s]: ",
+		question.Label,
+		questionnaire.Summary(question.Offer, listOfferLimit),
+		source,
+	)
 }
 
 func (r *Renderer) choose(question questionnaire.Question) ([]string, error) {
