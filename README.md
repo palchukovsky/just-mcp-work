@@ -112,7 +112,8 @@ this checkout: golangci-lint under `.tmp/bin/` and Semgrep under `.venv/`.
 `just verify` checks formatting, dependencies, strict lint, vet, race-enabled
 tests, build, and the MCP smoke flow. `just build-all` produces the Linux,
 macOS, and Windows binaries; `just package` creates the release archives and
-checksums.
+checksums. `just build-run <arguments>` builds the command for this machine
+and runs it, for example `just build-run init --dir ~/work/my-project`.
 
 `just release patch|minor|major` verifies the project, creates and pushes the
 next tag, then GitHub Actions builds and publishes the release.

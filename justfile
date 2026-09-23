@@ -10,6 +10,7 @@ w64devkit_sha256 := env_var("CI_W64DEVKIT_SHA256")
 local_tool_dir := repo_dir / ".tmp" / "bin"
 default_golangci_lint := if os_family() == "windows" { local_tool_dir / "golangci-lint.exe" } else { local_tool_dir / "golangci-lint" }
 golangci_lint := env_var_or_default("GOLANGCI_LINT", default_golangci_lint)
+dev_binary := if os_family() == "windows" { local_tool_dir / "just-mcp-work.exe" } else { local_tool_dir / "just-mcp-work" }
 go_cache := env_var_or_default("GOCACHE", repo_dir / ".tmp" / "go-build-cache")
 golangci_lint_cache := env_var_or_default("GOLANGCI_LINT_CACHE", repo_dir / ".tmp" / "golangci-lint-cache")
 python := if os_family() == "windows" { "python" } else { "python3" }
@@ -37,6 +38,21 @@ versions:
 # Build every package in the module.
 build:
     go build ./...
+
+# build-run keeps its binary at one path: init records the path of the binary
+# that wrote a workspace's MCP configuration, and serve checks it.
+
+# Build the command for this machine and run it with the given arguments.
+[unix]
+build-run *args:
+    go build -o "{{ dev_binary }}" ./cmd/just-mcp-work
+    "{{ dev_binary }}" {{ args }}
+
+# Build the command for this machine and run it with the given arguments.
+[windows]
+build-run *args:
+    go build -o "{{ dev_binary }}" ./cmd/just-mcp-work
+    & "{{ dev_binary }}" {{ args }}
 
 # Format Go files in place using the configured golangci formatters.
 fmt:
