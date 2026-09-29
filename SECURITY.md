@@ -27,9 +27,11 @@ option answers selected questions non-interactively. `serve --runner-mode` is
 retired and tells the operator to run `init`.
 
 For automation, pass `--runner-mode <name>=<mode>` for every runner whose
-question is not answered interactively. If input ends with a runner question
+question is not answered interactively, or `--keep-recorded` to keep the mode
+the policy records for each runner. If input ends with a runner question
 unanswered, `init` fails and names that runner and flag instead of accepting a
-mode. When an existing policy is readable, an interactive prompt offers its
+mode; `--keep-recorded` accepts only a usable recorded mode, never the declared
+default. When an existing policy is readable, an interactive prompt offers its
 current mode and labels it `current`; otherwise it offers the declared default.
 If the existing policy cannot be parsed or has an unsupported current mode,
 `init` prints that fallback. If the registered runner set changed, it prints

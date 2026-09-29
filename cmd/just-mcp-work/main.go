@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -543,6 +544,12 @@ func initCommandWithIO(
 		"comma-separated agent targets: claude,codex,cursor,copilot,windsurf",
 	)
 	dryRun := flags.Bool("dry-run", false, "print planned diffs without writing files")
+	keepRecorded := flags.Bool(
+		"keep-recorded",
+		false,
+		"keep every answer an earlier init recorded instead of asking for it again; "+
+			"a question without a recorded answer is still asked",
+	)
 	betaTest := flags.Bool(
 		"beta-test",
 		false,
@@ -610,6 +617,7 @@ func initCommandWithIO(
 		_, _ = fmt.Fprintln(
 			flags.Output(),
 			"Usage: just-mcp-work init [--dir <dir>] [--agents <names>] [--dry-run] "+
+				"[--keep-recorded] "+
 				"[--beta-test[=true|false]] "+
 				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
 				"[--instructions-target project|workspace|machine] "+
@@ -713,6 +721,15 @@ func initCommandWithIO(
 	if err != nil {
 		return err
 	}
+	var kept questionnaire.Answers
+	if *keepRecorded {
+		var keptNotices []string
+		kept, keptNotices, questions, err = questionnaire.KeepCurrent(questions)
+		if err != nil {
+			return fmt.Errorf("keep recorded answers: %w", err)
+		}
+		notices = append(notices, keptNotices...)
+	}
 	for _, notice := range notices {
 		if writeErr := writeInitOutput(diagnosticOutput, "%s\n", notice); writeErr != nil {
 			return writeErr
@@ -728,6 +745,7 @@ func initCommandWithIO(
 	if err != nil {
 		return fmt.Errorf("ask init questions: %w", err)
 	}
+	maps.Copy(answers, kept)
 	// The answers were given for the scope resolved before asking, and Apply
 	// resolves it again; a scope that moved meanwhile would receive
 	// permissions nobody confirmed for it.

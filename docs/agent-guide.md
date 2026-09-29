@@ -283,9 +283,11 @@ now lives in <path>; run just-mcp-work init to write it` instead of an unknown
 flag error.
 
 For automation, pass `--runner-mode <name>=<mode>` for every runner whose
-question is not answered interactively. If input ends with a runner question
+question is not answered interactively, or `--keep-recorded` to keep the mode
+the policy records for each runner. If input ends with a runner question
 unanswered, `init` fails and names that runner and flag instead of accepting a
-mode. When an existing policy is readable, an interactive prompt offers its
+mode; `--keep-recorded` accepts only a usable recorded mode, never the declared
+default. When an existing policy is readable, an interactive prompt offers its
 current mode and labels it `current`; otherwise it offers the declared default.
 If the existing policy cannot be parsed or has an unsupported current mode,
 `init` prints that fallback. If the registered runner set changed, it prints
@@ -679,9 +681,12 @@ records none. A malformed manifest, or one with an unsupported schema, stops
 `no`, and a malformed manifest is still refused when `init` plans its writes.
 Input that ends before the question is answered stops `init` before it writes,
 so pass `--beta-test` to stay in the beta test or `--beta-test=false` to leave
-it. If changing mode would leave managed instruction files outside the current
-`--agents` selection, preflight refuses and names the files and the widened
-selection.
+it, or `--keep-recorded` to keep every answer the workspace records. The Claude
+Code permissions answer is never recorded: with Claude Code among the agents,
+pass `--claude-permissions yes` or `no` as well, because input that ends at
+that question answers `no` and removes the JMW entries. If changing mode would
+leave managed instruction files outside the current `--agents` selection,
+preflight refuses and names the files and the widened selection.
 
 - `invalid project path "..."` - the path is absolute, empty, or leaves the
   workspace root. The message states the expected form: `project_path` is

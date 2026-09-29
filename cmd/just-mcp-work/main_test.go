@@ -4092,3 +4092,377 @@ func TestInitRejectsUnsupportedShellPermission(t *testing.T) {
 		t.Fatalf("initCommand error = %v", err)
 	}
 }
+
+// recordedInitAnswers are the answers init records in the runner policy and
+// the managed manifest.
+type recordedInitAnswers struct {
+	target   agentinit.InstructionsTarget
+	shell    agentinit.ShellPermission
+	families []string
+	policy   policy.Policy
+	betaTest bool
+}
+
+func readRecordedInitAnswers(t *testing.T, dir string) recordedInitAnswers {
+	t.Helper()
+	loaded, err := policy.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	betaTest, betaFound, err := agentinit.ReadRecordedBetaTest(dir)
+	if err != nil || !betaFound {
+		t.Fatalf("recorded beta test found %t: %v", betaFound, err)
+	}
+	target, targetFound, err := agentinit.ReadRecordedInstructionsTarget(dir)
+	if err != nil || !targetFound {
+		t.Fatalf("recorded instructions target found %t: %v", targetFound, err)
+	}
+	shell, shellFound, err := agentinit.ReadRecordedShellPermission(dir)
+	if err != nil || !shellFound {
+		t.Fatalf("recorded shell permission found %t: %v", shellFound, err)
+	}
+	return recordedInitAnswers{
+		target:   target,
+		shell:    shell,
+		families: initRecordedAIFamilies(t, dir),
+		policy:   loaded,
+		betaTest: betaTest,
+	}
+}
+
+// stageRecordedInitAnswers answers every init question by a flag, none of them
+// the way a new workspace is offered, and seeds a staging directory with what
+// init recorded - the runner policy and the managed manifest, nothing else.
+func stageRecordedInitAnswers(t *testing.T) string {
+	t.Helper()
+	source := t.TempDir()
+	mkdirs(t, source, "build")
+	if err := initCommandWithIO(
+		recordedStagingArgs(
+			source,
+			"--beta-test=true",
+			"--instructions-target", "project",
+			"--ai", "claude",
+			"--shell-permission", "allow",
+			"--runner-mode", "just=disabled",
+			"--runner-mode", "agent=disabled",
+			"--runner-mode", "cmake=disabled",
+			"--runner-mode", "docker=disabled",
+			"--runner-mode", "go=all",
+			"--runner-mode", "make=disabled",
+			"--exclude-mode", "both",
+			"--exclude", "tools/*/gen",
+		),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	staging := t.TempDir()
+	mkdirs(t, staging, ".just-mcp-work")
+	for _, name := range []string{".just-mcp-work.json", ".just-mcp-work/managed.json"} {
+		data, err := os.ReadFile(filepath.Join(source, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := filepath.Join(staging, filepath.FromSlash(name))
+		//nolint:gosec // The test path is a fixed filename below t.TempDir().
+		if err = os.WriteFile(target, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return staging
+}
+
+// recordedStagingArgs runs init on dir with the flags a tool re-running it
+// passes whatever was recorded: the agents and the Claude permissions, which
+// are not recorded answers.
+func recordedStagingArgs(dir string, extra ...string) []string {
+	return append(
+		[]string{"--dir", dir, "--agents", "claude,codex", "--claude-permissions", "yes"},
+		extra...,
+	)
+}
+
+// readRecordedState returns the bytes of the policy and the manifest of dir, so
+// a test can tell that init wrote neither.
+func readRecordedState(t *testing.T, dir string) []byte {
+	t.Helper()
+	var state []byte
+	for _, path := range []string{
+		policy.Path(dir),
+		filepath.Join(dir, ".just-mcp-work", "managed.json"),
+	} {
+		data, err := os.ReadFile(path)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		state = append(append(state, data...), 0)
+	}
+	return state
+}
+
+func TestInitKeepRecordedTakesEveryRecordedAnswerWithoutInput(t *testing.T) {
+	staging := stageRecordedInitAnswers(t)
+	want := readRecordedInitAnswers(t, staging)
+	err := initCommandWithIO(
+		recordedStagingArgs(staging),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	)
+	if err == nil ||
+		!strings.Contains(err.Error(), "use --beta-test=true|false for non-interactive init") {
+		t.Fatalf("init without --keep-recorded error = %v, want the beta test unanswered", err)
+	}
+
+	var diagnostics bytes.Buffer
+	if err = initCommandWithIO(
+		recordedStagingArgs(staging, "--keep-recorded"),
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatalf("init --keep-recorded: %v\n%s", err, diagnostics.String())
+	}
+	if strings.Contains(diagnostics.String(), "current]") {
+		t.Fatalf("init --keep-recorded asked a recorded question:\n%s", diagnostics.String())
+	}
+	if got := readRecordedInitAnswers(t, staging); !reflect.DeepEqual(got, want) {
+		t.Fatalf("answers after init --keep-recorded = %+v, want %+v", got, want)
+	}
+}
+
+func TestInitKeepRecordedAsksOnlyWhatNothingRecorded(t *testing.T) {
+	staging := stageRecordedInitAnswers(t)
+	want := readRecordedInitAnswers(t, staging)
+	if err := os.Remove(filepath.Join(staging, ".just-mcp-work", "managed.json")); err != nil {
+		t.Fatal(err)
+	}
+	before := readRecordedState(t, staging)
+	err := initCommandWithIO(
+		recordedStagingArgs(staging, "--keep-recorded"),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(
+		err.Error(),
+		"beta test was unanswered at end of input; "+
+			"use --beta-test=true|false for non-interactive init",
+	) {
+		t.Fatalf("init --keep-recorded error = %v, want the unrecorded beta test named", err)
+	}
+	if !bytes.Equal(readRecordedState(t, staging), before) {
+		t.Fatal("init --keep-recorded wrote the recorded state before failing")
+	}
+
+	// The runner and exclusion answers are kept, so the typed lines answer
+	// the four questions the removed manifest recorded, in their order.
+	if err = initCommandWithIO(
+		recordedStagingArgs(staging, "--keep-recorded"),
+		strings.NewReader("yes\nproject\nclaude\nallow\n"),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := readRecordedInitAnswers(t, staging); !reflect.DeepEqual(got, want) {
+		t.Fatalf("answers after init --keep-recorded = %+v, want %+v", got, want)
+	}
+}
+
+func TestInitKeepRecordedAsksARunnerThePolicyDoesNotRecord(t *testing.T) {
+	staging := stageRecordedInitAnswers(t)
+	document := `{"version":1,"runners":[` +
+		`{"name":"just","mode":"disabled"},{"name":"agent","mode":"disabled"},` +
+		`{"name":"cmake","mode":"disabled"},{"name":"docker","mode":"disabled"},` +
+		`{"name":"go","mode":"all"}],` +
+		`"exclude":{"recommended":["build"],"custom":["tools/*/gen"]}}`
+	if err := os.WriteFile(policy.Path(staging), []byte(document), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := readRecordedState(t, staging)
+	var diagnostics bytes.Buffer
+	err := initCommandWithIO(
+		recordedStagingArgs(staging, "--keep-recorded"),
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	)
+	if err == nil || !strings.Contains(
+		err.Error(),
+		`runner "make" mode was unanswered at end of input; use --runner-mode make=<mode>`,
+	) {
+		t.Fatalf("init --keep-recorded error = %v, want the unrecorded make runner named", err)
+	}
+	if strings.Count(diagnostics.String(), "Registered runner set changed") != 1 {
+		t.Fatalf("the notice of the kept runners is not shown once:\n%s", diagnostics.String())
+	}
+	if !bytes.Equal(readRecordedState(t, staging), before) {
+		t.Fatal("init --keep-recorded wrote the recorded state before failing")
+	}
+}
+
+func TestInitKeepRecordedNeverTakesTheDefaultForAnUnusableRecordedAnswer(t *testing.T) {
+	for _, test := range []struct {
+		spoil  func(t *testing.T, staging string)
+		name   string
+		want   string
+		notice string
+	}{
+		{
+			name: "unsupported runner mode",
+			spoil: func(t *testing.T, staging string) {
+				t.Helper()
+				document := `{"version":1,"runners":[` +
+					`{"name":"just","mode":"disabled"},{"name":"agent","mode":"disabled"},` +
+					`{"name":"cmake","mode":"disabled"},{"name":"docker","mode":"disabled"},` +
+					`{"name":"go","mode":"everything"},{"name":"make","mode":"disabled"}]}`
+				if err := os.WriteFile(policy.Path(staging), []byte(document), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: `runner "just" mode was unanswered at end of input; ` +
+				"use --runner-mode just=<mode>",
+			notice: "could not be read; using declared defaults",
+		},
+		{
+			name: "unrecognized AI families",
+			spoil: func(t *testing.T, staging string) {
+				t.Helper()
+				path := filepath.Join(staging, ".just-mcp-work", "managed.json")
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var document map[string]any
+				if err = json.Unmarshal(data, &document); err != nil {
+					t.Fatal(err)
+				}
+				delete(document, "ai_families")
+				document["ai_family"] = "unknown"
+				if data, err = json.Marshal(document); err != nil {
+					t.Fatal(err)
+				}
+				if err = os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want:   "AI families was unanswered at end of input; use --ai ",
+			notice: "The AI families recorded by an earlier init cannot be used",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			staging := stageRecordedInitAnswers(t)
+			test.spoil(t, staging)
+			before := readRecordedState(t, staging)
+			var diagnostics bytes.Buffer
+			err := initCommandWithIO(
+				recordedStagingArgs(staging, "--keep-recorded"),
+				strings.NewReader(""),
+				io.Discard,
+				&diagnostics,
+			)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("init --keep-recorded error = %v, want %q", err, test.want)
+			}
+			if !strings.Contains(diagnostics.String(), test.notice) {
+				t.Fatalf("diagnostics lack %q:\n%s", test.notice, diagnostics.String())
+			}
+			if !bytes.Equal(readRecordedState(t, staging), before) {
+				t.Fatal("init --keep-recorded wrote the recorded state before failing")
+			}
+		})
+	}
+}
+
+func TestInitKeepRecordedLeavesTheAnswerAFlagGives(t *testing.T) {
+	staging := stageRecordedInitAnswers(t)
+	want := readRecordedInitAnswers(t, staging)
+	if err := initCommandWithIO(
+		recordedStagingArgs(
+			staging,
+			"--keep-recorded",
+			"--beta-test=false",
+			"--runner-mode", "go=disabled",
+		),
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	); err != nil {
+		t.Fatal(err)
+	}
+	want.betaTest = false
+	for index, selection := range want.policy.Selections {
+		if selection.Name == "go" {
+			want.policy.Selections[index].Mode = runner.ModeDisabled
+		}
+	}
+	if got := readRecordedInitAnswers(t, staging); !reflect.DeepEqual(got, want) {
+		t.Fatalf("answers after init --keep-recorded = %+v, want %+v", got, want)
+	}
+}
+
+func TestInitKeepRecordedRefusesARecordedAnswerAFlagRulesOut(t *testing.T) {
+	staging := stageRecordedInitAnswers(t)
+	path := filepath.Join(staging, ".just-mcp-work", "managed.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err = json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	instructions, recorded := document["agent_instructions"].(map[string]any)
+	if !recorded {
+		t.Fatalf("the staged manifest records no instructions target:\n%s", data)
+	}
+	instructions["target"] = "machine"
+	if data, err = json.Marshal(document); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := readRecordedState(t, staging)
+	err = initCommandWithIO(
+		[]string{
+			"--dir", staging,
+			"--agents", "claude,codex,cursor",
+			"--claude-permissions", "yes",
+			"--keep-recorded",
+		},
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	)
+	const want = `keep recorded answers: refuse instructions target "machine": ` +
+		"instructions target machine cannot be used with --agents"
+	if err == nil || !strings.HasPrefix(err.Error(), want) {
+		t.Fatalf("init --keep-recorded error = %v, want %q", err, want)
+	}
+	if !bytes.Equal(readRecordedState(t, staging), before) {
+		t.Fatal("init --keep-recorded wrote the recorded state before failing")
+	}
+}
+
+func TestInitKeepRecordedFlagAppearsInHelp(t *testing.T) {
+	var diagnostics bytes.Buffer
+	if err := initCommandWithIO(
+		[]string{"--help"},
+		strings.NewReader(""),
+		io.Discard,
+		&diagnostics,
+	); err != nil {
+		t.Fatal(err)
+	}
+	output := diagnostics.String()
+	if !strings.Contains(output, "[--keep-recorded]") ||
+		!strings.Contains(output, "-keep-recorded") ||
+		!strings.Contains(output, "keep every answer an earlier init recorded") {
+		t.Fatalf("init help omits --keep-recorded:\n%s", output)
+	}
+}

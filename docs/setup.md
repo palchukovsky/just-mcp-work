@@ -8,7 +8,8 @@ just-mcp-work init
 
 It writes the managed instruction block for the selected agents, the MCP
 configuration their clients read, the runner policy, and the generated agent
-guide. Every question below has a flag that answers it in a scripted run;
+guide. Every question below has a flag that answers it in a scripted run, and
+a later run can [keep the recorded answers](#keeping-recorded-answers) instead;
 `init --help` and `serve --help` list the agent targets and the server options.
 
 ## How `init` asks
@@ -30,6 +31,25 @@ In the last three it first names a terminal that shows the form - Windows
 Terminal on Windows. On Windows the form runs in a terminal that hosts the
 console through a pseudo console, such as Windows Terminal or the VS Code
 terminal.
+
+## Keeping recorded answers
+
+A later `init` offers the answers an earlier one recorded, marked `current`.
+Pass `--keep-recorded` to take every one of them without asking, in the form
+and on the console alike: `init` then asks only what nothing recorded, such as
+a runner registered since. A flag still answers its own question over the
+recorded answer. A recorded answer `init` cannot use - a runner policy that
+does not parse, a runner mode or AI families this release does not recognize -
+is asked again rather than replaced by the default, and one another flag rules
+out, such as the `machine` target with a Cursor or Copilot agent, stops `init`
+before it writes. So does a policy file `init` cannot read at all.
+
+The Claude Code permissions answer is never recorded: with `claude` among the
+agents, a scripted run passes `--claude-permissions yes` or `no`. Without it,
+`init` asks, and input that ends first answers `no`, which removes the JMW
+entries from `.claude/settings.json`. Input that ends before any other
+question is answered stops `init` and names the flag that answers it, with or
+without `--keep-recorded`.
 
 ## Where the instruction block goes
 

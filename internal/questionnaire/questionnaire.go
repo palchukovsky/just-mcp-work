@@ -11,6 +11,7 @@ package questionnaire
 import (
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -128,6 +129,66 @@ type Renderer interface {
 // Applies reports whether question is asked after answers.
 func (question Question) Applies(answers Answers) bool {
 	return question.When == nil || question.When(answers)
+}
+
+// KeepCurrent takes without asking the recorded answer of every question that
+// offers one and applies: a question whose Offer is Current gets that offer, as
+// an empty answer would give it. Whether it applies is decided on the answers
+// kept before it alone, so a When that reads the answer of a question left to
+// ask decides as though that question had no answer. KeepCurrent returns the
+// answers it kept, the Notices of their questions, which nothing shows
+// otherwise, and the questions left for a Renderer to ask, in order; the When
+// and ContextFor of a question left see the answers kept before it as given. A
+// recorded answer Validate refuses stops it, as the same answer given empty
+// would.
+func KeepCurrent(questions []Question) (Answers, []string, []Question, error) {
+	kept := make(Answers, len(questions))
+	var notices []string
+	left := make([]Question, 0, len(questions))
+	for _, question := range questions {
+		if !question.Current || !question.Applies(kept) {
+			left = append(left, question.after(kept))
+			continue
+		}
+		if question.Validate != nil {
+			if err := question.Validate(question.Offer); err != nil {
+				return nil, nil, nil, fmt.Errorf(
+					"refuse %s %q: %w",
+					question.ReadDescription,
+					strings.Join(question.Offer, ","),
+					err,
+				)
+			}
+		}
+		kept[question.ID] = slices.Clone(question.Offer)
+		notices = append(notices, question.Notices...)
+	}
+	return kept, notices, left, nil
+}
+
+// after returns question as asked once the answers in given were: its When
+// and ContextFor see them beside the answers a Renderer passes.
+func (question Question) after(given Answers) Question {
+	if len(given) == 0 {
+		return question
+	}
+	given = maps.Clone(given)
+	withGiven := func(answers Answers) Answers {
+		all := maps.Clone(given)
+		maps.Copy(all, answers)
+		return all
+	}
+	if when := question.When; when != nil {
+		question.When = func(answers Answers) bool {
+			return when(withGiven(answers))
+		}
+	}
+	if contextFor := question.ContextFor; contextFor != nil {
+		question.ContextFor = func(answers Answers) []string {
+			return contextFor(withGiven(answers))
+		}
+	}
+	return question
 }
 
 // SplitList reads a typed List answer: the values between its commas, with
