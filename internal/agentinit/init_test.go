@@ -2273,7 +2273,7 @@ func TestPromptReferenceCarriesMovedToolDetails(t *testing.T) {
 		"do not edit build files unless asked",
 		"default limit of 65536 bytes and a maximum of 1048576 bytes",
 		"search_run_logs returns bounded matches whose offsets go straight to get_run_logs.",
-		"Receipt fields include status, exit_code, message, run_id, duration_ms, promoted",
+		"Receipt fields include status, exit_code (absent until the run has finished), message, run_id, duration_ms, promoted",
 		"argv blocks bypass the shell",
 		"arguments is accepted only with an argv block_id",
 		"carries the full argv of that run, starting with the argv the block fixed",

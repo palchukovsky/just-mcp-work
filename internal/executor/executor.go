@@ -25,13 +25,15 @@ type Config struct {
 	Grace            time.Duration
 }
 
-// Result is the compact receipt returned to callers.
+// Result is the compact receipt returned to callers. ExitCode is nil until the
+// run has finished, so a running receipt carries no exit_code instead of a zero
+// that reads as success.
 //
 //nolint:govet // Field order follows the stable MCP receipt response shape.
 type Result struct {
 	RunID      string          `json:"run_id"`
 	OK         bool            `json:"ok"`
-	ExitCode   int             `json:"exit_code"`
+	ExitCode   *int            `json:"exit_code,omitempty"`
 	DurationMS int64           `json:"duration_ms"`
 	Message    string          `json:"message"`
 	Status     runstore.Status `json:"status"`
@@ -438,11 +440,13 @@ func compact(
 	result := Result{
 		RunID:      meta.RunID,
 		OK:         ok,
-		ExitCode:   exitCode,
 		DurationMS: duration,
 		Message:    message,
 		Status:     status,
 		LogsReady:  true,
+	}
+	if status != runstore.StatusRunning {
+		result.ExitCode = &exitCode
 	}
 	if !ok {
 		result.StderrTail = stderr

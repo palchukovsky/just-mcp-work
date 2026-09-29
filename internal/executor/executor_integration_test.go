@@ -6,6 +6,7 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -48,8 +49,18 @@ func TestExecuteCapturesSuccessAndNonzero(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if result.OK != test.ok || result.ExitCode != test.code {
+			if result.OK != test.ok || result.ExitCode == nil || *result.ExitCode != test.code {
 				t.Fatalf("result = %#v", result)
+			}
+			encoded, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := fmt.Sprintf(`"exit_code":%d`, test.code); !strings.Contains(
+				string(encoded),
+				want,
+			) {
+				t.Fatalf("finished receipt = %s, want %s", encoded, want)
 			}
 			stdout, err := store.ReadLog(result.RunID, "stdout", 0, 1024)
 			if err != nil || !strings.Contains(string(stdout), "stdout\n") {

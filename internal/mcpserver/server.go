@@ -1781,9 +1781,10 @@ func (s *Server) cancel(handle *runstore.Handle, reason error) executor.Result {
 	if err := handle.Finish(runstore.StatusCancelled, -1, reason.Error(), false, false); err != nil {
 		message = fmt.Sprintf("%s; finalize cancelled task: %v", message, err)
 	}
+	exitCode := -1
 	return executor.Result{
 		RunID:      handle.Meta.RunID,
-		ExitCode:   -1,
+		ExitCode:   &exitCode,
 		DurationMS: handle.Meta.DurationMS,
 		Message:    message,
 		Status:     runstore.StatusCancelled,
@@ -1803,10 +1804,11 @@ func (s *Server) reject(handle *runstore.Handle, reason error) executor.Result {
 	if err := handle.Finish(runstore.StatusSpawnError, -1, message, false, false); err != nil {
 		message = fmt.Sprintf("%s; finalize rejected task: %v", message, err)
 	}
+	exitCode := -1
 	return executor.Result{
 		RunID:      handle.Meta.RunID,
 		OK:         false,
-		ExitCode:   -1,
+		ExitCode:   &exitCode,
 		DurationMS: handle.Meta.DurationMS,
 		Message:    message,
 		Status:     runstore.StatusSpawnError,
@@ -2331,15 +2333,18 @@ func resultForMeta(meta runstore.Meta) executor.Result {
 	if meta.Status == runstore.StatusTimeout && meta.Error != "" {
 		message = meta.Error
 	}
-	return executor.Result{
+	result := executor.Result{
 		RunID:      meta.RunID,
 		OK:         meta.Status == runstore.StatusOK,
-		ExitCode:   meta.ExitCode,
 		DurationMS: durationFor(meta),
 		Message:    message,
 		Status:     meta.Status,
 		LogsReady:  true,
 	}
+	if meta.Status != runstore.StatusRunning {
+		result.ExitCode = &meta.ExitCode
+	}
+	return result
 }
 
 func durationFor(meta runstore.Meta) int64 {

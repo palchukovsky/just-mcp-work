@@ -1779,8 +1779,8 @@ func TestRejectedReceiptForHandleUsesMutableAIProfile(t *testing.T) {
 	wantReceiptProfile := mustTestAIProfile(t, "codex")
 	handle.Meta.AIProfile = wantReceiptProfile
 	receipt := receiptForHandle(handle, result)
-	if receipt.Status != runstore.StatusSpawnError || receipt.ExitCode != -1 ||
-		receipt.AIProfile != wantReceiptProfile {
+	if receipt.Status != runstore.StatusSpawnError || receipt.ExitCode == nil ||
+		*receipt.ExitCode != -1 || receipt.AIProfile != wantReceiptProfile {
 		t.Fatalf(
 			"rejected receipt = %#v, want mutable handle profile %#v",
 			receipt,
@@ -1999,6 +1999,7 @@ func TestRunShellCommandPromotionCanBeRecoveredAndStopped(t *testing.T) {
 		*receipt.Completed {
 		t.Fatalf("promoted shell command = %#v, %v", receipt, err)
 	}
+	requireExitCodeAbsent(t, "promoted receipt", receipt)
 	_, persisted, err := server.getRun(context.Background(), nil, getRunInput{RunID: receipt.RunID})
 	if err != nil ||
 		persisted.Run.ProjectPath != "." ||
@@ -2027,6 +2028,7 @@ func TestRunShellCommandPromotionCanBeRecoveredAndStopped(t *testing.T) {
 		waiting.Status != runstore.StatusRunning {
 		t.Fatalf("wait timeout = %#v, %v", waiting, err)
 	}
+	requireExitCodeAbsent(t, "wait_run timeout receipt", waiting)
 	_, stopped, err := server.stopRun(
 		context.Background(),
 		nil,
@@ -2035,8 +2037,47 @@ func TestRunShellCommandPromotionCanBeRecoveredAndStopped(t *testing.T) {
 	if err != nil ||
 		stopped.Completed == nil ||
 		!*stopped.Completed ||
-		stopped.Status != runstore.StatusCancelled {
+		stopped.Status != runstore.StatusCancelled ||
+		stopped.ExitCode == nil {
 		t.Fatalf("stopped run = %#v, %v", stopped, err)
+	}
+}
+
+// TestResultForMetaCarriesExitCodeOnlyOnceFinished covers the receipt built from
+// persisted metadata: a run another server owns, or one read back from the ledger.
+func TestResultForMetaCarriesExitCodeOnlyOnceFinished(t *testing.T) {
+	requireExitCodeAbsent(
+		t,
+		"running receipt from metadata",
+		resultForMeta(runstore.Meta{RunID: "running", Status: runstore.StatusRunning}),
+	)
+	for _, meta := range []runstore.Meta{
+		{RunID: "ok", Status: runstore.StatusOK, ExitCode: 0},
+		{RunID: "nonzero", Status: runstore.StatusNonzero, ExitCode: 7},
+	} {
+		encoded, err := json.Marshal(resultForMeta(meta))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := fmt.Sprintf(`"exit_code":%d`, meta.ExitCode); !strings.Contains(
+			string(encoded),
+			want,
+		) {
+			t.Fatalf("%s receipt from metadata = %s, want %s", meta.Status, encoded, want)
+		}
+	}
+}
+
+// requireExitCodeAbsent fails when the receipt of an unfinished run serializes an
+// exit_code, which a reader would take for the status of a process that has exited.
+func requireExitCodeAbsent(t *testing.T, name string, receipt any) {
+	t.Helper()
+	encoded, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"exit_code"`) {
+		t.Fatalf("%s = %s, want no exit_code before the run finishes", name, encoded)
 	}
 }
 

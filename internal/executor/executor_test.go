@@ -43,7 +43,8 @@ func TestAwaitKeepsZeroExitWhenDrainingOutputFails(t *testing.T) {
 	}
 
 	result := run.Wait(context.Background())
-	if result.Status != runstore.StatusOK || result.ExitCode != 0 || !result.OK {
+	if result.Status != runstore.StatusOK || result.ExitCode == nil || *result.ExitCode != 0 ||
+		!result.OK {
 		t.Fatalf("result = %#v, want a zero exit reported as ok", result)
 	}
 	if !strings.Contains(result.Message, "capturing its output failed") {

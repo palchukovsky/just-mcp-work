@@ -146,7 +146,8 @@ Task and shell execution
 - A receipt with status: running and run_id is normal. promoted: true means the
   synchronous call continued in the background; follow run_id with wait_run or
   get_run_status, never launch the task again. Receipt fields include status,
-  exit_code, message, run_id, duration_ms, promoted, and optional output tails.
+  exit_code (absent until the run has finished), message, run_id, duration_ms,
+  promoted, and optional output tails.
 - run_shell_command and start_shell_command are only for genuinely ad-hoc
   commands outside discovered or withheld tasks. A task may be absent because the
   operator withheld it through a runner mode. Never recreate or run such a task

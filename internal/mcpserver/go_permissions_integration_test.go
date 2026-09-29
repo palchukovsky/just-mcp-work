@@ -114,7 +114,8 @@ func TestAIProfileDoesNotChangeTaskSurfaceOrAuthorization(t *testing.T) {
 				runTaskInput{ProjectPath: ".", TaskID: "go:fmt"},
 			)
 			if err != nil || rejected.OK || rejected.Status != runstore.StatusSpawnError ||
-				rejected.ExitCode != -1 || rejected.RunID == "" || !rejected.LogsReady {
+				rejected.ExitCode == nil || *rejected.ExitCode != -1 || rejected.RunID == "" ||
+				!rejected.LogsReady {
 				t.Fatalf("withheld go:fmt receipt = %#v, %v", rejected, err)
 			}
 			if rejected.AIProfile != profile {
@@ -137,7 +138,8 @@ func TestAIProfileDoesNotChangeTaskSurfaceOrAuthorization(t *testing.T) {
 				},
 			)
 			if err != nil || result != nil || !shellReceipt.OK ||
-				shellReceipt.Status != runstore.StatusOK || shellReceipt.ExitCode != 0 ||
+				shellReceipt.Status != runstore.StatusOK || shellReceipt.ExitCode == nil ||
+				*shellReceipt.ExitCode != 0 ||
 				!shellReceipt.LogsReady || !strings.Contains(shellReceipt.StdoutTail, "shell-output") {
 				t.Fatalf("client-permitted shell receipt = %#v, %#v, %v", result, shellReceipt, err)
 			}
@@ -151,10 +153,10 @@ func TestAIProfileDoesNotChangeTaskSurfaceOrAuthorization(t *testing.T) {
 
 			outcome := authorizationOutcome{
 				rejectedStatus:   rejected.Status,
-				rejectedExitCode: rejected.ExitCode,
+				rejectedExitCode: *rejected.ExitCode,
 				rejectedMessage:  rejected.Message,
 				shellStatus:      shellReceipt.Status,
-				shellExitCode:    shellReceipt.ExitCode,
+				shellExitCode:    *shellReceipt.ExitCode,
 				shellMessage:     shellReceipt.Message,
 				shellStdoutTail:  shellReceipt.StdoutTail,
 			}
