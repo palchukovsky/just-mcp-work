@@ -993,13 +993,13 @@ func (s *Server) runTask(
 ) (*mcp.CallToolResult, runTaskOutput, error) {
 	wait, err := s.syncWaitDuration(input.MaxWaitMS)
 	if err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedReceipt(err), nil
 	}
 	if err := validateTailBytes(input.TailBytes); err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedReceipt(err), nil
 	}
 	if err := s.validateWriteScope(input.WriteScope); err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedReceipt(err), nil
 	}
 	run, stats, output := s.startTaskRun(ctx, input)
 	if run == nil {
@@ -1022,7 +1022,7 @@ func (s *Server) startTask(
 	input startTaskInput,
 ) (*mcp.CallToolResult, runTaskOutput, error) {
 	if err := s.validateWriteScope(input.WriteScope); err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedReceipt(err), nil
 	}
 	run, stats, output := s.startTaskRun(ctx, runTaskInput{
 		ProjectPath: input.ProjectPath,
@@ -1066,7 +1066,7 @@ func (s *Server) startTaskRun(
 		},
 	)
 	if err != nil {
-		return nil, stats, runTaskOutput{Error: newToolError(err)}
+		return nil, stats, s.rejectedReceipt(err)
 	}
 	s.configureTaskTimeout(&handle.Meta)
 	project, err := s.workspace.Find(ctx, input.ProjectPath)
@@ -1206,20 +1206,17 @@ func (s *Server) runShellCommand(
 ) (*mcp.CallToolResult, runShellCommandOutput, error) {
 	wait, err := s.syncWaitDuration(input.MaxWaitMS)
 	if err != nil {
-		return toolErrorResult(err), shellCommandOutput(runTaskOutput{Error: newToolError(err)}), nil
+		return toolErrorResult(err), shellCommandOutput(s.rejectedReceipt(err)), nil
 	}
 	if err = validateTailBytes(input.TailBytes); err != nil {
-		return toolErrorResult(err), shellCommandOutput(runTaskOutput{Error: newToolError(err)}), nil
+		return toolErrorResult(err), shellCommandOutput(s.rejectedReceipt(err)), nil
 	}
 	if err = s.validateWriteScope(input.WriteScope); err != nil {
-		return toolErrorResult(err), shellCommandOutput(runTaskOutput{Error: newToolError(err)}), nil
+		return toolErrorResult(err), shellCommandOutput(s.rejectedReceipt(err)), nil
 	}
 	if input.StdoutFormat != "" && input.StdoutFormat != "json" {
 		err = fmt.Errorf(`stdout_format must be omitted or "json"`)
-		return toolErrorResult(err), shellCommandOutput(runTaskOutput{
-			runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
-			Error:      newToolError(err),
-		}), nil
+		return toolErrorResult(err), shellCommandOutput(s.rejectedReceipt(err)), nil
 	}
 	command, argv, workingDirectory, err := s.resolveShellCommand(
 		input.Command,
@@ -1228,10 +1225,7 @@ func (s *Server) runShellCommand(
 		input.Arguments,
 	)
 	if err != nil {
-		return toolErrorResult(err), shellCommandOutput(runTaskOutput{
-			runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
-			Error:      newToolError(err),
-		}), nil
+		return toolErrorResult(err), shellCommandOutput(s.rejectedReceipt(err)), nil
 	}
 	input.Command = command
 	input.Arguments = argv
@@ -1290,7 +1284,7 @@ func (s *Server) startShellCommand(
 	input startShellCommandInput,
 ) (*mcp.CallToolResult, runTaskOutput, error) {
 	if err := s.validateWriteScope(input.WriteScope); err != nil {
-		return toolErrorResult(err), runTaskOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedReceipt(err), nil
 	}
 	command, argv, workingDirectory, err := s.resolveShellCommand(
 		input.Command,
@@ -1299,10 +1293,7 @@ func (s *Server) startShellCommand(
 		input.Arguments,
 	)
 	if err != nil {
-		return toolErrorResult(err), runTaskOutput{
-			runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
-			Error:      newToolError(err),
-		}, nil
+		return toolErrorResult(err), s.rejectedReceipt(err), nil
 	}
 	run, stats, output := s.startShellRun(ctx, runShellCommandInput{
 		Command:          command,
@@ -1340,7 +1331,7 @@ func (s *Server) startShellRun(
 		},
 	)
 	if err != nil {
-		return nil, stats, runTaskOutput{Error: newToolError(err)}
+		return nil, stats, s.rejectedReceipt(err)
 	}
 	s.configureTaskTimeout(&handle.Meta)
 	dir, err := s.workspace.ResolveDir(workingDirectory)
@@ -1668,6 +1659,26 @@ func receiptForHandle(handle *runstore.Handle, result executor.Result) runTaskOu
 	}
 }
 
+// rejectedReceipt is the receipt of a call refused before a run record exists.
+// It still names the worktree root: the output schema requires it, and the SDK
+// validates the structured output of an error result too, so a receipt without
+// it would replace the rejection message with an output-validation failure.
+func (s *Server) rejectedReceipt(err error) runTaskOutput {
+	return runTaskOutput{
+		runDetails: receiptDetails(s.store.WorktreeRoot(), s.config.AIProfile, nil),
+		Error:      newToolError(err),
+	}
+}
+
+// rejectedStatus is the status-tool counterpart of rejectedReceipt. It carries
+// no ai_profile: a status describes a run, and a refused call has none.
+func (s *Server) rejectedStatus(err error) runStatusOutput {
+	return runStatusOutput{
+		runDetails: &runDetails{WorktreeRoot: s.store.WorktreeRoot()},
+		Error:      newToolError(err),
+	}
+}
+
 func receiptDetails(
 	worktreeRoot string,
 	profile aiprofile.Profile,
@@ -1939,11 +1950,11 @@ func (s *Server) getRunStatus(
 ) (*mcp.CallToolResult, runStatusOutput, error) {
 	tailBytes, err := statusTailBytes(input.TailBytes)
 	if err != nil {
-		return toolErrorResult(err), runStatusOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedStatus(err), nil
 	}
 	output, err := s.statusOutput(input.RunID, tailBytes, nil)
 	if err != nil {
-		return toolErrorResult(err), runStatusOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedStatus(err), nil
 	}
 	return nil, output, nil
 }
@@ -1955,11 +1966,11 @@ func (s *Server) waitRun(
 ) (*mcp.CallToolResult, runStatusOutput, error) {
 	tailBytes, err := statusTailBytes(input.TailBytes)
 	if err != nil {
-		return toolErrorResult(err), runStatusOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedStatus(err), nil
 	}
 	wait, err := waitRunDuration(input)
 	if err != nil {
-		return toolErrorResult(err), runStatusOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedStatus(err), nil
 	}
 	if run, live := s.manager.Get(input.RunID); live {
 		waitCtx, cancel := context.WithTimeout(ctx, wait)
@@ -1968,7 +1979,7 @@ func (s *Server) waitRun(
 		s.stats.Invalidate()
 		output, statusErr := s.statusOutput(input.RunID, tailBytes, nil)
 		if statusErr != nil {
-			return toolErrorResult(statusErr), runStatusOutput{Error: newToolError(statusErr)}, nil
+			return toolErrorResult(statusErr), s.rejectedStatus(statusErr), nil
 		}
 		return nil, output, nil
 	}
@@ -1979,7 +1990,7 @@ func (s *Server) waitRun(
 	for {
 		output, statusErr := s.statusOutput(input.RunID, tailBytes, nil)
 		if statusErr != nil {
-			return toolErrorResult(statusErr), runStatusOutput{Error: newToolError(statusErr)}, nil
+			return toolErrorResult(statusErr), s.rejectedStatus(statusErr), nil
 		}
 		if output.Completed != nil && *output.Completed {
 			return nil, output, nil
@@ -2001,16 +2012,16 @@ func (s *Server) stopRun(
 ) (*mcp.CallToolResult, runStatusOutput, error) {
 	tailBytes, err := statusTailBytes(input.TailBytes)
 	if err != nil {
-		return toolErrorResult(err), runStatusOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedStatus(err), nil
 	}
 	meta, _, err := s.metaFor(input.RunID)
 	if err != nil {
-		return toolErrorResult(err), runStatusOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedStatus(err), nil
 	}
 	if meta.Status != runstore.StatusRunning {
 		output, statusErr := s.statusOutput(input.RunID, tailBytes, nil)
 		if statusErr != nil {
-			return toolErrorResult(statusErr), runStatusOutput{Error: newToolError(statusErr)}, nil
+			return toolErrorResult(statusErr), s.rejectedStatus(statusErr), nil
 		}
 		output.AlreadyFinished = true
 		return nil, output, nil
@@ -2021,7 +2032,7 @@ func (s *Server) stopRun(
 		// between the two reads above. Re-read before blaming the owner.
 		output, statusErr := s.statusOutput(input.RunID, tailBytes, nil)
 		if statusErr != nil {
-			return toolErrorResult(statusErr), runStatusOutput{Error: newToolError(statusErr)}, nil
+			return toolErrorResult(statusErr), s.rejectedStatus(statusErr), nil
 		}
 		if output.Completed != nil && *output.Completed {
 			output.AlreadyFinished = true
@@ -2032,7 +2043,7 @@ func (s *Server) stopRun(
 			input.RunID,
 			meta.OwnerPID,
 		)
-		return toolErrorResult(err), runStatusOutput{Error: newToolError(err)}, nil
+		return toolErrorResult(err), s.rejectedStatus(err), nil
 	}
 	if stopErr := run.Stop(); stopErr != nil {
 		s.config.Logger.Error("stop task run failed", "run_id", input.RunID, "error", stopErr)
@@ -2040,7 +2051,7 @@ func (s *Server) stopRun(
 	s.stats.Invalidate()
 	output, statusErr := s.statusOutput(input.RunID, tailBytes, nil)
 	if statusErr != nil {
-		return toolErrorResult(statusErr), runStatusOutput{Error: newToolError(statusErr)}, nil
+		return toolErrorResult(statusErr), s.rejectedStatus(statusErr), nil
 	}
 	return nil, output, nil
 }

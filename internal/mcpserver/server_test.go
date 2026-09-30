@@ -2168,6 +2168,53 @@ func TestRunShellCommandRejectionReportsWorktreeRoot(t *testing.T) {
 	}
 }
 
+// The SDK validates the structured output of an error result against the
+// published schema, which requires worktree_root; in-process handler calls skip
+// that check, so only a client session proves the rejection reaches the caller.
+func TestEarlyRejectionsReachMCPClientWithWorktreeRoot(t *testing.T) {
+	server := newShellTestServer(t, t.TempDir())
+	cases := []struct {
+		tool    string
+		args    map[string]any
+		message string
+	}{
+		{"run_task", map[string]any{"project_path": ".", "task_id": "just:x", "tail_bytes": 65537}, "tail_bytes"},
+		{"run_task", map[string]any{"project_path": ".", "task_id": "just:x", "max_wait_ms": -2}, "max_wait_ms"},
+		{"start_task", map[string]any{"project_path": ".", "task_id": "just:x", "write_scope": []string{}}, "write_scope"},
+		{"run_shell_command", map[string]any{"command": "true", "write_scope": []string{}}, "write_scope"},
+		{"start_shell_command", map[string]any{"command": "true", "write_scope": []string{}}, "write_scope"},
+		{"get_run_status", map[string]any{"run_id": "missing"}, "invalid run_id"},
+		{"wait_run", map[string]any{"run_id": "missing"}, "invalid run_id"},
+		{"stop_run", map[string]any{"run_id": "missing"}, "invalid run_id"},
+	}
+	withMCPClientSession(t, server, func(session *mcp.ClientSession) {
+		for _, tc := range cases {
+			result, err := session.CallTool(
+				context.Background(),
+				&mcp.CallToolParams{Name: tc.tool, Arguments: tc.args},
+			)
+			if err != nil || !result.IsError {
+				t.Errorf("%s %v = %#v, %v; want a tool error result", tc.tool, tc.args, result, err)
+				continue
+			}
+			output, ok := result.StructuredContent.(map[string]any)
+			if !ok || output["worktree_root"] != server.workspace.WorktreeRoot() {
+				t.Errorf("%s %v structured content = %#v", tc.tool, tc.args, result.StructuredContent)
+				continue
+			}
+			toolErr, ok := output["error"].(map[string]any)
+			if !ok {
+				t.Errorf("%s %v structured content has no error: %#v", tc.tool, tc.args, output)
+				continue
+			}
+			message, ok := toolErr["message"].(string)
+			if !ok || !strings.Contains(message, tc.message) {
+				t.Errorf("%s %v error = %#v, want it to mention %q", tc.tool, tc.args, output["error"], tc.message)
+			}
+		}
+	})
+}
+
 func TestNewRejectsSubMillisecondTaskTimeout(t *testing.T) {
 	root := t.TempDir()
 	runners, err := runner.NewRegistry()
