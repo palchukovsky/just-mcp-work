@@ -884,7 +884,7 @@ func TestApplyBroadToNarrowSelectionKeepsDeselectedManagedFiles(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()
-			all := []string{"claude", "codex", "cursor", "copilot", "windsurf"}
+			all := []string{"claude", "codex", "cursor", "copilot", "windsurf", "grok", "antigravity"}
 			if _, err := Apply(Options{
 				InstructionsTarget: InstructionsTargetWorkspace,
 				ShellPermission:    ShellPermissionAsk,
@@ -5771,7 +5771,7 @@ func TestApplyMachineRefusesAgentsWithoutMachinePath(t *testing.T) {
 				[]string{agent},
 			))
 			if err == nil || !strings.Contains(err.Error(), agent) ||
-				!strings.Contains(err.Error(), "claude, codex, and windsurf") {
+				!strings.Contains(err.Error(), "claude, codex, grok, antigravity, and windsurf") {
 				t.Fatalf("machine %s error = %v", agent, err)
 			}
 		})

@@ -3862,9 +3862,9 @@ func TestInitMachineTargetRejectsUnsupportedAgentsBeforeLaterQuestions(t *testin
 				t.Fatal("machine target with default agents error = nil")
 			}
 			for _, want := range []string{
-				"--agents \"claude,codex,cursor\"",
+				"--agents \"claude,codex,cursor,grok,antigravity\"",
 				"cursor",
-				"--agents claude,codex,windsurf",
+				"--agents claude,codex,grok,antigravity,windsurf",
 			} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("early machine-agent error does not contain %q: %v", want, err)

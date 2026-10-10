@@ -185,15 +185,23 @@ nothing explains itself without a second call.
   mode, `go:fmt`, `go:mod:tidy`, and `go:any`. Every fixed task rejects
   arguments; only `go:any` forwards argv.
 - **`agent`** - `agent:codex` launches `codex exec`; `agent:claude` launches
-  `claude -p`. Both take positional `prompt`, `model`, and `effort`: `prompt`
+  `claude -p`; `agent:grok` launches Grok Build (`grok --single`);
+  `agent:antigravity` launches Antigravity CLI (`agy --print`). All take
+  positional `prompt`, `model`, and `effort`: `prompt`
   is required and non-blank, and an empty `model` or `effort` slot omits its
   flag. Codex renders `-m <model>` and `-c model_reasoning_effort=<effort>`;
   Claude renders `--model <model>` and `--effort <effort>`. Optional values
   with surrounding whitespace, values starting with `-`, and unsupported efforts
   are rejected before the process starts. Codex accepts `low`, `medium`, `high`,
   `xhigh`, `max`, or `ultra`; Claude accepts `low`, `medium`, `high`, `xhigh`,
-  or `max`. The fixed `--` places the prompt after flags. Agent runs have an
-  empty `runner_version` because one runner covers two binaries.
+  or `max`. Grok uses `--model` and `--reasoning-effort`, accepting `low`,
+  `medium`, `high`, or `xhigh`. Antigravity uses `--model` and `--effort`,
+  accepting `low`, `medium`, `high`, `xhigh`, or `max`.
+  Codex and Claude place prompts after `--`; Grok and Antigravity bind prompts
+  to `--single=<prompt>` and `--print=<prompt>`, preserving flag-shaped text.
+  Tasks appear only for binaries found in `PATH`; listing never executes them.
+  Agent runs have an empty `runner_version` because one runner covers several
+  binaries. Agents retain their own tool permissions; JMW adds no auto-approval.
 
 Two task fields are worth reading before invoking anything:
 
@@ -228,6 +236,16 @@ array of selections, followed by the directories discovery skips:
   "exclude": {"recommended": ["build"], "custom": ["tools/*/out"]}
 }
 ```
+
+The default `init --agents` selection is `claude,codex,cursor,grok,antigravity`.
+Grok instructions use `AGENT.md`, a filename Grok Build reads directly;
+Antigravity instructions use `GEMINI.md`. Selecting either client also manages
+its native MCP configuration: `.grok/config.toml` for Grok and
+`.agents/mcp_config.json` for Antigravity. These files use the existing
+`--write-mcp-config` choice, preserve unrelated entries, and are checked by the
+managed manifest. A deselected client's configuration is preserved and remains
+verified. Their server entries omit `--ai`: the presentation profiles below
+remain separate from client selection.
 
 During `init`, the operator selects any number of the declarable families,
 `codex` and `claude`; both are offered in a workspace with no managed manifest.
@@ -313,8 +331,9 @@ surface.
 In Go `safe` mode the four fixed tasks reject caller arguments outright. `all`
 adds `go:fmt`, `go:mod:tidy`, and the unrestricted `go:any`. `disabled` does
 not construct the runner at all, so nothing Go-related is discovered or run.
-In agent `safe` mode, only the fixed Codex and Claude tasks accept their three
-declared values; there is no `all` mode to widen the surface. This reduces the
+In agent `safe` mode, only the fixed Codex, Claude, Grok, and Antigravity tasks
+accept their declared prompt, model, and effort values; there is no `all` mode
+to widen the surface. This reduces the
 command surface, not the trust boundary. Without `write_scope`, the launched
 agent inherits the operator's permissions and unrestricted filesystem access
 in the checkout. `disabled` does not construct the agent runner.
@@ -466,12 +485,17 @@ a declared path whose final component is itself a symbolic link. Declare the
 symbolic link's target instead. These failures are MCP errors before a run is
 recorded. For an accepted scope, JMW adds the process temporary directory
 (`TMPDIR` when set, otherwise `/tmp`) and the corresponding agent state
-directory: `CODEX_HOME` or `~/.codex` for `agent:codex`, and
-`CLAUDE_CONFIG_DIR` or `~/.claude` for `agent:claude`. A temporary or agent
+directory: `CODEX_HOME` or `~/.codex` for `agent:codex`,
+`CLAUDE_CONFIG_DIR` or `~/.claude` for `agent:claude`, `GROK_HOME` or `~/.grok`
+for `agent:grok`, and `~/.gemini` for `agent:antigravity`. A temporary or agent
 state path whose final component is a symbolic link is refused as `spawn_error`.
 The scope is also refused if either added path contains or equals a declared
 path. The receipt's effective `write_scope` has symlinks resolved and contained
 paths folded, and is exactly the list enforced by the OS.
+
+Scoped Grok runs set `--sandbox off` so its nested sandbox does not conflict
+with JMW's outer write boundary, just as scoped Codex runs disable its nested
+sandbox. Antigravity retains its configured terminal sandbox setting.
 
 Enforcement is macOS-only. An out-of-scope write fails when attempted. On
 another OS, or when `/usr/bin/sandbox-exec` is unavailable, the launch is
@@ -791,7 +815,7 @@ configuration for the selected agents, and writes the runner policy.
 ## On-disk layout
 
 ```text
-<workspace root>/.just-mcp-work.json  runner policy; selects runners and skipped directories
+<workspace root>/.just-mcp-work.json  runner policy
 <workspace root>/.just-mcp-work/
 ├── managed.json              init record checked when serve starts
 ├── guide.txt                 generated agent reference

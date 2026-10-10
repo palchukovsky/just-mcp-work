@@ -18,7 +18,7 @@ import (
 )
 
 func TestRegistrationDeclaresExactReviewedPermissionPrompt(t *testing.T) {
-	catalog, err := runner.NewCatalog(Registration("", ""))
+	catalog, err := runner.NewCatalog(Registration("", "", "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -29,14 +29,14 @@ func TestRegistrationDeclaresExactReviewedPermissionPrompt(t *testing.T) {
 	request := requests[0]
 	if request.Name != "agent" || !request.Reviewed || request.Default != runner.ModeSafe ||
 		request.Title != "AI agent" ||
-		request.Summary != "Launches Codex or Claude Code with a prompt, so one AI agent can hand work to another." {
+		request.Summary != "Launches Codex, Claude Code, Grok Build, or Antigravity CLI with a prompt." {
 		t.Fatalf("agent permission request = %#v", request)
 	}
 	want := []runner.PermissionChoice{
 		{
 			Mode:        runner.ModeSafe,
 			Label:       "Enabled (safe default)",
-			Description: "Expose only the fixed Codex and Claude prompt tasks; no extra CLI flags are accepted.",
+			Description: "Expose only the fixed coding-agent prompt tasks; no extra CLI flags are accepted.",
 			Warning:     "The launched coding agent can act with your permissions in this checkout; JMW does not sandbox it.",
 		},
 		{
@@ -51,7 +51,7 @@ func TestRegistrationDeclaresExactReviewedPermissionPrompt(t *testing.T) {
 }
 
 func TestRegistrationRejectsAllMode(t *testing.T) {
-	catalog, err := runner.NewCatalog(Registration("", ""))
+	catalog, err := runner.NewCatalog(Registration("", "", "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,13 +61,13 @@ func TestRegistrationRejectsAllMode(t *testing.T) {
 }
 
 func TestRunnerDoesNotImplementVersionProvider(t *testing.T) {
-	if _, implemented := any(newRunner(taskSpecs("", ""))).(runner.VersionProvider); implemented {
+	if _, implemented := any(newRunner(taskSpecs("", "", "", ""))).(runner.VersionProvider); implemented {
 		t.Fatal("agent runner must not implement VersionProvider")
 	}
 }
 
 func TestDetectAcceptsGitDirectoryAndRegularFileOnly(t *testing.T) {
-	r := newRunner(taskSpecs("", ""))
+	r := newRunner(taskSpecs("", "", "", ""))
 
 	directory := t.TempDir()
 	if err := os.Mkdir(filepath.Join(directory, gitPath), 0o700); err != nil {
@@ -96,7 +96,7 @@ func TestListTasksIncludesAvailableBinariesAndWarnsForMissingOnesWithoutRedetect
 		if err != nil {
 			t.Fatalf("ListTasks: %v", err)
 		}
-		if got, want := taskIDs(tasks), []string{"agent:codex", "agent:claude"}; !reflect.DeepEqual(got, want) {
+		if got, want := taskIDs(tasks), []string{"agent:codex", "agent:claude", "agent:grok", "agent:antigravity"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("task IDs = %#v, want %#v", got, want)
 		}
 		empty := ""
@@ -126,7 +126,7 @@ func TestListTasksIncludesAvailableBinariesAndWarnsForMissingOnesWithoutRedetect
 
 	t.Run("one missing", func(t *testing.T) {
 		tasks, err := resolvedAgentRunner(t, "go", "jmw-absent-claude-fixture").ListTasks(context.Background(), dir)
-		if got, want := taskIDs(tasks), []string{"agent:codex"}; !reflect.DeepEqual(got, want) {
+		if got, want := taskIDs(tasks), []string{"agent:codex", "agent:grok"}; !reflect.DeepEqual(got, want) {
 			t.Fatalf("task IDs = %#v, want %#v", got, want)
 		}
 		assertMissingToolWarning(t, err)
@@ -150,7 +150,7 @@ func TestListTasksLooksUpEachBinaryWithoutExecutingIt(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	r := newRunner(taskSpecs(binary, binary))
+	r := newRunner(taskSpecs(binary, binary, binary, binary))
 
 	tasks, err := r.ListTasks(context.Background(), dir)
 	if len(tasks) != 0 {
@@ -166,7 +166,7 @@ func TestListTasksLooksUpEachBinaryWithoutExecutingIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTasks after install: %v", err)
 	}
-	if got, want := taskIDs(tasks), []string{"agent:codex", "agent:claude"}; !reflect.DeepEqual(got, want) {
+	if got, want := taskIDs(tasks), []string{"agent:codex", "agent:claude", "agent:grok", "agent:antigravity"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("task IDs after install = %#v, want %#v", got, want)
 	}
 	if _, err := os.Stat(binary + ".ran"); !errors.Is(err, os.ErrNotExist) {
@@ -174,10 +174,32 @@ func TestListTasksLooksUpEachBinaryWithoutExecutingIt(t *testing.T) {
 	}
 }
 
+func TestListTasksDiscoversNewClientsWithoutCodexOrClaude(t *testing.T) {
+	r := newRunner(taskSpecs("jmw-absent-codex", "jmw-absent-claude", os.Args[0], os.Args[0]))
+	tasks, err := r.ListTasks(context.Background(), t.TempDir())
+	assertMissingToolWarning(t, err)
+	want := []string{"agent:grok", "agent:antigravity"}
+	if got := taskIDs(tasks); !reflect.DeepEqual(got, want) {
+		t.Fatalf("new client discovery = %q, want %q", got, want)
+	}
+	for _, task := range tasks {
+		if err = r.ValidateTaskInput(task, []string{"prompt", "--unsafe"}); err == nil {
+			t.Fatalf("%s accepted a model flag", task.ID)
+		}
+		if err = r.ValidateTaskInput(task, []string{"prompt", "", "ultra"}); err == nil {
+			t.Fatalf("%s accepted an unsupported effort", task.ID)
+		}
+	}
+	if err = r.ValidateTaskInput(taskByID(t, r, "agent:grok"),
+		[]string{"prompt", "", "max"}); err == nil {
+		t.Fatal("Grok accepted max effort")
+	}
+}
+
 func TestBuildCommandUsesExactArgv(t *testing.T) {
 	dir := t.TempDir()
 	writeGitFile(t, dir)
-	r := newRunner(taskSpecs("", ""))
+	r := newRunner(taskSpecs("", "", "", ""))
 
 	for _, test := range []struct {
 		name string
@@ -195,6 +217,13 @@ func TestBuildCommandUsesExactArgv(t *testing.T) {
 		{"claude model", "agent:claude", []string{"fix the test", "sonnet"}, []string{"claude", "-p", "--model", "sonnet", "--", "fix the test"}},
 		{"claude model effort", "agent:claude", []string{"fix the test", "sonnet", "high"}, []string{"claude", "-p", "--model", "sonnet", "--effort", "high", "--", "fix the test"}},
 		{"claude default model effort", "agent:claude", []string{"fix the test", "", "max"}, []string{"claude", "-p", "--effort", "max", "--", "fix the test"}},
+		{"grok prompt", "agent:grok", []string{"fix the test"}, []string{"grok", "--output-format", "plain", "--single=fix the test"}},
+		{"grok flag-shaped prompt", "agent:grok", []string{"--always-approve"}, []string{"grok", "--output-format", "plain", "--single=--always-approve"}},
+		{"grok model effort", "agent:grok", []string{"fix the test", "grok-model", "xhigh"}, []string{"grok", "--output-format", "plain", "--model", "grok-model", "--reasoning-effort", "xhigh", "--single=fix the test"}},
+		{"grok default model effort", "agent:grok", []string{"fix the test", "", "medium"}, []string{"grok", "--output-format", "plain", "--reasoning-effort", "medium", "--single=fix the test"}},
+		{"antigravity prompt", "agent:antigravity", []string{"fix the test"}, []string{"agy", "--output-format", "text", "--print=fix the test"}},
+		{"antigravity flag-shaped prompt", "agent:antigravity", []string{"--dangerously-skip-permissions"}, []string{"agy", "--output-format", "text", "--print=--dangerously-skip-permissions"}},
+		{"antigravity model effort", "agent:antigravity", []string{"fix the test", "gemini-model", "xhigh"}, []string{"agy", "--output-format", "text", "--model", "gemini-model", "--effort", "xhigh", "--print=fix the test"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cmd, err := r.BuildCommand(context.Background(), dir, taskByID(t, r, test.id), test.args)
@@ -214,7 +243,7 @@ func TestBuildCommandUsesExactArgv(t *testing.T) {
 func TestBuildScopedCommandUsesScopedPrefixFromTaskTable(t *testing.T) {
 	dir := t.TempDir()
 	writeGitFile(t, dir)
-	r := newRunner(taskSpecs("", ""))
+	r := newRunner(taskSpecs("", "", "", ""))
 
 	codex := taskByID(t, r, "agent:codex")
 	scopedCodex, err := r.BuildScopedCommand(
@@ -258,7 +287,7 @@ func TestTaskWriteScopeUsesCLIStateDirectoryRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := newRunner(taskSpecs(os.Args[0], os.Args[0]))
+	r := newRunner(taskSpecs(os.Args[0], os.Args[0], os.Args[0], os.Args[0]))
 	for _, test := range []struct {
 		name  string
 		id    string
@@ -324,6 +353,44 @@ func TestTaskWriteScopeUsesCLIStateDirectoryRule(t *testing.T) {
 	}
 }
 
+func TestNewAgentsKeepTheirStateInsideTheWriteScope(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := newRunner(taskSpecs("", "", "", ""))
+	t.Setenv("GROK_HOME", "")
+	for id, relative := range map[string]string{
+		"agent:grok":        ".grok",
+		"agent:antigravity": ".gemini",
+	} {
+		paths, scopeErr := r.TaskWriteScope(taskByID(t, r, id))
+		if scopeErr != nil || !reflect.DeepEqual(paths, []string{filepath.Join(home, relative)}) {
+			t.Fatalf("TaskWriteScope(%s) = %q, %v", id, paths, scopeErr)
+		}
+	}
+	t.Setenv("GROK_HOME", "custom-grok-home")
+	paths, err := r.TaskWriteScope(taskByID(t, r, "agent:grok"))
+	if err != nil || !reflect.DeepEqual(paths, []string{"custom-grok-home"}) {
+		t.Fatalf("Grok home override = %q, %v", paths, err)
+	}
+}
+
+func TestGrokScopedCommandDisablesTheNestedSandbox(t *testing.T) {
+	dir := t.TempDir()
+	writeGitFile(t, dir)
+	r := newRunner(taskSpecs("", "", "", ""))
+	cmd, err := r.BuildScopedCommand(context.Background(), dir,
+		taskByID(t, r, "agent:grok"), []string{"prompt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"grok", "--output-format", "plain", "--sandbox", "off", "--single=prompt"}
+	if !reflect.DeepEqual(cmd.Args, want) {
+		t.Fatalf("scoped Grok args = %q, want %q", cmd.Args, want)
+	}
+}
+
 func TestCommandRenderingComesFromTaskTable(t *testing.T) {
 	empty := ""
 	spec := taskSpec{
@@ -335,7 +402,7 @@ func TestCommandRenderingComesFromTaskTable(t *testing.T) {
 		description: "Run the fixture agent.",
 		argv:        []string{"run"},
 		params: []taskParam{
-			{Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"}},
+			{Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"}, argv: []string{"--", "<prompt>"}},
 			{Param: runner.Param{Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model"}, argv: []string{"--fixture-model", "<model>"}},
 		},
 	}
@@ -357,7 +424,7 @@ func TestCommandRenderingComesFromTaskTable(t *testing.T) {
 }
 
 func TestValidateTaskInputRejectsInvalidInputs(t *testing.T) {
-	r := newRunner(taskSpecs("", ""))
+	r := newRunner(taskSpecs("", "", "", ""))
 	codex := taskByID(t, r, "agent:codex")
 	claude := taskByID(t, r, "agent:claude")
 
@@ -408,11 +475,11 @@ func TestValidateTaskInputRejectsInvalidInputs(t *testing.T) {
 }
 
 func TestInvalidTaskTablesAreRejectedAtResolve(t *testing.T) {
-	valid := taskSpecs("codex", "claude")
+	valid := taskSpecs("codex", "claude", "grok", "agy")
 	missingRenderer := cloneTaskSpecs(valid)
 	missingRenderer[0].params[1].argv = nil
-	missingStateDirEnv := cloneTaskSpecs(valid)
-	missingStateDirEnv[0].stateDirEnv = ""
+	missingStateDir := cloneTaskSpecs(valid)
+	missingStateDir[0].stateDir = ""
 	for _, test := range []struct {
 		name  string
 		specs []taskSpec
@@ -420,7 +487,7 @@ func TestInvalidTaskTablesAreRejectedAtResolve(t *testing.T) {
 		{"empty", nil},
 		{"duplicate id", append(valid, valid[0])},
 		{"missing binary", []taskSpec{{id: "codex", name: "codex", description: "run", argv: []string{"exec"}, params: valid[0].params}}},
-		{"missing state directory override", missingStateDirEnv[:1]},
+		{"missing state directory", missingStateDir[:1]},
 		{"missing prompt", []taskSpec{{id: "codex", binary: "codex", name: "codex", description: "run", argv: []string{"exec"}, params: []taskParam{{Param: runner.Param{Name: "model", Kind: runner.ParamSingular}}}}}},
 		{"missing parameter renderer", missingRenderer[:1]},
 	} {
@@ -438,7 +505,7 @@ func TestInvalidTaskTablesAreRejectedAtResolve(t *testing.T) {
 
 func resolvedAgentRunner(t *testing.T, codexBinary, claudeBinary string) *Runner {
 	t.Helper()
-	catalog, err := runner.NewCatalog(Registration(codexBinary, claudeBinary))
+	catalog, err := runner.NewCatalog(registration(taskSpecs(codexBinary, claudeBinary, codexBinary, claudeBinary)))
 	if err != nil {
 		t.Fatal(err)
 	}

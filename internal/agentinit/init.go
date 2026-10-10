@@ -617,11 +617,11 @@ func OfferShellPermission(scope string, agents []string) (ShellPermission, bool,
 }
 
 // SelectedAgents returns the agents Apply writes for: the named ones trimmed,
-// lower-cased, deduplicated, and sorted, or claude, codex, and cursor when
+// lower-cased, deduplicated, and sorted, or the default clients when
 // none are named. A caller deciding what Apply will plan uses the same list.
 func SelectedAgents(agents []string) []string {
 	if len(agents) == 0 {
-		agents = []string{"claude", "codex", "cursor"}
+		agents = []string{"claude", "codex", "cursor", "grok", "antigravity"}
 	}
 	return unique(agents)
 }
@@ -657,6 +657,12 @@ func planWorkspaceConfiguration(
 	}
 	edits = appendEdit(edits, codexEdit)
 	surfaces = appendManifestSurface(surfaces, codexSurface)
+	nativeEdits, nativeSurfaces, err := planNativeMCPConfigs(scope, selected, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	edits = append(edits, nativeEdits...)
+	surfaces = append(surfaces, nativeSurfaces...)
 	// The Claude settings file belongs to the claude agent, so an invocation that
 	// does not select claude plans nothing for it, whatever ClaudePermissions says.
 	if _, claudeSelected := selected["claude"]; claudeSelected {
@@ -720,7 +726,7 @@ func planAgentInstructions(
 			if named.machinePath == "" {
 				return nil, nil, nil, fmt.Errorf(
 					"agent %q has no machine-wide instruction path; "+
-						"machine target supports claude, codex, and windsurf",
+						"machine target supports claude, codex, grok, antigravity, and windsurf",
 					named.name,
 				)
 			}
@@ -1719,6 +1725,16 @@ func agentTargets() []namedTarget {
 			machinePath: ".codex/AGENTS.md",
 		},
 		{
+			name:        "grok",
+			target:      target{path: "AGENT.md", header: "# Workspace instructions\n\n"},
+			machinePath: ".grok/AGENTS.md",
+		},
+		{
+			name:        "antigravity",
+			target:      target{path: "GEMINI.md", header: "# Workspace instructions\n\n"},
+			machinePath: ".gemini/GEMINI.md",
+		},
+		{
 			name: "cursor",
 			target: target{
 				path:   ".cursor/rules/just-mcp-work.mdc",
@@ -2268,6 +2284,19 @@ func mergeCodexConfig(
 	shellPermission ShellPermission,
 	profile aiprofile.Profile,
 ) ([]byte, error) {
+	approvalLines, err := codexApprovalLines(shellPermission)
+	if err != nil {
+		return nil, err
+	}
+	return mergeTOMLMCPConfig(before, root, profile, approvalLines)
+}
+
+func mergeTOMLMCPConfig(
+	before []byte,
+	root string,
+	profile aiprofile.Profile,
+	approvalLines []string,
+) ([]byte, error) {
 	if _, _, _, err := codexBlockRange(string(before)); err != nil {
 		return nil, err
 	}
@@ -2290,10 +2319,6 @@ func mergeCodexConfig(
 	argsValue, err := tomlStringArray(managedServerArgs(root, profile))
 	if err != nil {
 		return nil, fmt.Errorf("encode server arguments: %w", err)
-	}
-	approvalLines, err := codexApprovalLines(shellPermission)
-	if err != nil {
-		return nil, err
 	}
 	// The config keeps the line ending it is written with, the same way the
 	// instruction files and the JSON configs do.

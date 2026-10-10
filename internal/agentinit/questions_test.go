@@ -15,7 +15,7 @@ func TestSelectedAgentsNormalizesOrDefaults(t *testing.T) {
 		agents []string
 		want   []string
 	}{
-		{name: "none named", agents: nil, want: []string{"claude", "codex", "cursor"}},
+		{name: "none named", agents: nil, want: []string{"antigravity", "claude", "codex", "cursor", "grok"}},
 		{
 			name:   "mixed case and duplicates",
 			agents: []string{" Codex", "claude", "CLAUDE"},

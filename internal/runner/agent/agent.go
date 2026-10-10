@@ -50,16 +50,22 @@ type Runner struct {
 
 // Registration returns the reviewed registration for CLI coding agents.
 // Empty binary values use the respective default command names.
-func Registration(codexBinary, claudeBinary string) runner.Registration {
-	return registration(taskSpecs(codexBinary, claudeBinary))
+func Registration(codexBinary, claudeBinary, grokBinary, antigravityBinary string) runner.Registration {
+	return registration(taskSpecs(codexBinary, claudeBinary, grokBinary, antigravityBinary))
 }
 
-func taskSpecs(codexBinary, claudeBinary string) []taskSpec {
+func taskSpecs(codexBinary, claudeBinary, grokBinary, antigravityBinary string) []taskSpec {
 	if codexBinary == "" {
 		codexBinary = "codex"
 	}
 	if claudeBinary == "" {
 		claudeBinary = "claude"
+	}
+	if grokBinary == "" {
+		grokBinary = "grok"
+	}
+	if antigravityBinary == "" {
+		antigravityBinary = "agy"
 	}
 	empty := ""
 	// These are CLI-wide vocabularies; individual models may support fewer levels.
@@ -76,7 +82,7 @@ func taskSpecs(codexBinary, claudeBinary string) []taskSpec {
 			argv:             []string{"exec"},
 			scopedArgvPrefix: []string{"--sandbox", "danger-full-access"},
 			params: []taskParam{
-				{Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"}},
+				{Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"}, argv: []string{"--", "<prompt>"}},
 				{Param: runner.Param{Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model"}, argv: []string{"-m", "<model>"}},
 				{Param: runner.Param{Name: "effort", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model reasoning effort"}, argv: []string{"-c", "model_reasoning_effort=<effort>"}, allowedValues: codexEfforts},
 			},
@@ -90,9 +96,71 @@ func taskSpecs(codexBinary, claudeBinary string) []taskSpec {
 			description: "Run Claude with a prompt in this checkout.",
 			argv:        []string{"-p"},
 			params: []taskParam{
-				{Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"}},
+				{Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"}, argv: []string{"--", "<prompt>"}},
 				{Param: runner.Param{Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model"}, argv: []string{"--model", "<model>"}},
 				{Param: runner.Param{Name: "effort", Kind: runner.ParamSingular, Default: &empty, Doc: "optional effort"}, argv: []string{"--effort", "<effort>"}, allowedValues: claudeEfforts},
+			},
+		},
+		{
+			id:               "grok",
+			binary:           grokBinary,
+			stateDir:         ".grok",
+			stateDirEnv:      "GROK_HOME",
+			name:             "grok",
+			description:      "Run Grok Build with a prompt in this checkout.",
+			argv:             []string{"--output-format", "plain"},
+			scopedArgvPrefix: []string{"--sandbox", "off"},
+			params: []taskParam{
+				{
+					Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"},
+					argv:  []string{"--single=<prompt>"},
+				},
+				{
+					Param: runner.Param{
+						Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model",
+					},
+					argv: []string{"--model", "<model>"},
+				},
+				{
+					Param: runner.Param{
+						Name:    "effort",
+						Kind:    runner.ParamSingular,
+						Default: &empty,
+						Doc:     "optional reasoning effort",
+					},
+					argv:          []string{"--reasoning-effort", "<effort>"},
+					allowedValues: []string{"low", "medium", "high", "xhigh"},
+				},
+			},
+		},
+		{
+			id:          "antigravity",
+			binary:      antigravityBinary,
+			stateDir:    ".gemini",
+			name:        "antigravity",
+			description: "Run Antigravity CLI (agy) with a prompt in this checkout.",
+			argv:        []string{"--output-format", "text"},
+			params: []taskParam{
+				{
+					Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"},
+					argv:  []string{"--print=<prompt>"},
+				},
+				{
+					Param: runner.Param{
+						Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model",
+					},
+					argv: []string{"--model", "<model>"},
+				},
+				{
+					Param: runner.Param{
+						Name:    "effort",
+						Kind:    runner.ParamSingular,
+						Default: &empty,
+						Doc:     "optional reasoning effort",
+					},
+					argv:          []string{"--effort", "<effort>"},
+					allowedValues: claudeEfforts,
+				},
 			},
 		},
 	}
@@ -101,12 +169,12 @@ func taskSpecs(codexBinary, claudeBinary string) []taskSpec {
 func registration(specs []taskSpec) runner.Registration {
 	permissions := runner.ReviewedPermissions(
 		"AI agent",
-		"Launches Codex or Claude Code with a prompt, so one AI agent can hand work to another.",
+		"Launches Codex, Claude Code, Grok Build, or Antigravity CLI with a prompt.",
 		runner.ModeSafe,
 		runner.PermissionChoice{
 			Mode:        runner.ModeSafe,
 			Label:       "Enabled (safe default)",
-			Description: "Expose only the fixed Codex and Claude prompt tasks; no extra CLI flags are accepted.",
+			Description: "Expose only the fixed coding-agent prompt tasks; no extra CLI flags are accepted.",
 			Warning:     "The launched coding agent can act with your permissions in this checkout; JMW does not sandbox it.",
 		},
 		runner.PermissionChoice{
@@ -265,13 +333,19 @@ func (r *Runner) commandArgs(task runner.Task, args []string) (taskSpec, []strin
 		if len(args) <= argumentIndex || args[argumentIndex] == "" {
 			continue
 		}
-		placeholder := "<" + param.Name + ">"
-		for _, element := range param.argv {
-			argv = append(argv, strings.ReplaceAll(element, placeholder, args[argumentIndex]))
-		}
+		argv = append(argv, param.render(args[argumentIndex])...)
 	}
-	argv = append(argv, "--", args[0])
+	argv = append(argv, spec.params[0].render(args[0])...)
 	return spec, argv, nil
+}
+
+func (param taskParam) render(value string) []string {
+	argv := make([]string, len(param.argv))
+	placeholder := "<" + param.Name + ">"
+	for index, element := range param.argv {
+		argv[index] = strings.ReplaceAll(element, placeholder, value)
+	}
+	return argv
 }
 
 func (r *Runner) taskSpecFor(task runner.Task) (taskSpec, error) {
@@ -304,7 +378,7 @@ func canonicalTask(spec taskSpec) runner.Task {
 	for _, param := range spec.params[1:] {
 		command = append(command, "["+strings.Join(param.argv, " ")+"]")
 	}
-	command = append(command, "--", "<"+spec.params[0].Name+">")
+	command = append(command, spec.params[0].argv...)
 	return runner.Task{
 		ID:          runnerName + ":" + spec.id,
 		Runner:      runnerName,
@@ -315,14 +389,13 @@ func canonicalTask(spec taskSpec) runner.Task {
 	}
 }
 
-//nolint:gocyclo // Direct validation keeps the fixed task table requirements together.
 func validateTaskSpecs(specs []taskSpec) error {
 	if len(specs) == 0 {
 		return fmt.Errorf("agent command table must not be empty")
 	}
 	seen := make(map[string]struct{}, len(specs))
 	for _, spec := range specs {
-		if spec.id == "" || spec.binary == "" || spec.stateDir == "" || spec.stateDirEnv == "" ||
+		if spec.id == "" || spec.binary == "" || spec.stateDir == "" ||
 			spec.name == "" || spec.description == "" {
 			return fmt.Errorf("agent command table contains an incomplete task")
 		}
@@ -336,7 +409,7 @@ func validateTaskSpecs(specs []taskSpec) error {
 		if len(spec.params) == 0 || spec.params[0].Name != "prompt" || spec.params[0].Default != nil {
 			return fmt.Errorf("agent task %q has no required prompt parameter", spec.id)
 		}
-		for _, param := range spec.params[1:] {
+		for _, param := range spec.params {
 			if len(param.argv) == 0 {
 				return fmt.Errorf("agent task %q parameter %q has no renderer", spec.id, param.Name)
 			}

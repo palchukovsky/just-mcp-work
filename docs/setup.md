@@ -12,6 +12,15 @@ guide. Every question below has a flag that answers it in a scripted run, and
 a later run can [keep the recorded answers](#keeping-recorded-answers) instead;
 `init --help` and `serve --help` list the agent targets and the server options.
 
+The default client selection is `claude,codex,cursor,grok,antigravity`.
+Grok Build uses the `grok` executable; Antigravity CLI uses `agy`.
+`init` writes Grok's instructions to its supported `AGENT.md` filename and
+Antigravity's instructions to `GEMINI.md`. Their native MCP configurations are
+`.grok/config.toml` and `.agents/mcp_config.json`. These configurations are
+managed only when their client is selected, follow `--write-mcp-config`, and
+preserve unrelated settings. Deselected clients keep their managed files,
+including manifest verification of their MCP entry.
+
 ## How `init` asks
 
 When both standard input and standard error are a terminal with cursor control,
@@ -61,10 +70,12 @@ directory named by `--dir`, `workspace` means the resolved workspace scope, and
 target recorded by the previous `init`.
 
 The machine target supports Claude Code (`~/.claude/CLAUDE.md`), Codex
-(`~/.codex/AGENTS.md`), and Windsurf
+(`~/.codex/AGENTS.md`), Grok (`~/.grok/AGENTS.md`), Antigravity
+(`~/.gemini/GEMINI.md`), and Windsurf
 (`~/.codeium/windsurf/memories/global_rules.md`). The default `--agents
-claude,codex,cursor` is therefore not valid with `machine`: select only
-supported agents, for example `--agents claude,codex,windsurf`. The CLI checks
+claude,codex,cursor,grok,antigravity` is therefore not valid with `machine`:
+select only supported agents, for example `--agents claude,codex,grok,antigravity`.
+The CLI checks
 this immediately after the target is selected, before asking its later
 questions, and never silently drops an agent.
 
@@ -78,8 +89,9 @@ are absent or malformed. Machine files are outside the workspace: `serve`
 neither verifies nor repairs them, and notices only a release that would write
 a different block. In `--dry-run`, their diff contains only the managed block,
 never personal text around it. `.mcp.json`,
-`.codex/config.toml`, `.claude/settings.json`, `.just-mcp-work/`, and the
-runner policy remain at the workspace scope for every target.
+`.codex/config.toml`, `.grok/config.toml`, `.agents/mcp_config.json`,
+`.claude/settings.json`, `.just-mcp-work/`, and the runner policy remain at the
+workspace scope for every target.
 
 ## How much the instruction block says
 
@@ -100,7 +112,8 @@ generated configuration changed since it was written.
 
 Each invocation is authoritative inside the workspace scope resolved from
 `--dir`, for the surfaces it manages. It adds the canonical instruction block
-for the selected agents - Claude Code, Codex, Cursor, Copilot, and Windsurf -
+for the selected agents - Claude Code, Codex, Cursor, Grok, Antigravity CLI,
+Copilot, and Windsurf -
 and never reads the contents of or changes the instruction file of an agent
 that is not selected. Its recorded surface remains in the manifest so
 `serve` continues verifying it and a later run that reselects the agent can
@@ -121,9 +134,13 @@ working with JMW. Once `serve` verifies it, the short MCP instructions point to
 its absolute path; without a verified guide, they contain the full reference.
 
 A file left holding nothing but JMW state is removed, which can happen to
-`.mcp.json`, `.codex/config.toml`, and `.claude/settings.json`, except that a
+`.mcp.json`, `.codex/config.toml`, `.grok/config.toml`,
+`.agents/mcp_config.json`, and `.claude/settings.json`, except that a
 JMW-only `.mcp.json` scope anchor is kept as an empty object whenever deleting
-it would change the scope of an identical repeated `init`. Instruction files
+it would change the scope of an identical repeated `init`. For the Codex, Grok,
+Antigravity, and Claude configs, a safe in-workspace file symlink is retained
+with its target as an empty configuration instead of deleting the target.
+Instruction files
 are never removed: an agent dropped from `--agents` keeps the block an earlier
 run wrote for it and goes on obeying it, so delete that block by hand once the
 agent should stop. A selected agent is different when its target changes: its

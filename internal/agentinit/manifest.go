@@ -31,6 +31,8 @@ const (
 	manifestKindCodexConfig       = "codex-config"
 	manifestKindMCPConfig         = "mcp-config"
 	manifestKindClaudeSettings    = "claude-settings"
+	manifestKindGrokConfig        = "grok-config"
+	manifestKindAntigravityConfig = "antigravity-config"
 )
 
 //nolint:govet // Keep manifest metadata before surfaces in the stable JSON document.
@@ -133,6 +135,14 @@ func planManifest(
 			return nil, nil, decodeErr
 		}
 		if recorded.SchemaVersion == manifestSchemaVersion {
+			for _, surface := range recorded.Surfaces {
+				for _, config := range nativeMCPConfigs() {
+					if _, isSelected := selected[config.agent]; !isSelected &&
+						surface.Kind == config.kind {
+						surfaces = append(surfaces, surface)
+					}
+				}
+			}
 			recordedTarget, targetErr := recordedInstructionsTarget(recorded)
 			if targetErr != nil {
 				return nil, nil, fmt.Errorf(
@@ -1158,7 +1168,7 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			ownership := "just-mcp-work owns the entries it generates in that file, " +
 				"so keep your own entries separate"
 			switch recorded.Kind {
-			case manifestKindAgentInstructions, manifestKindCodexConfig:
+			case manifestKindAgentInstructions, manifestKindCodexConfig, manifestKindGrokConfig:
 				ownership = "just-mcp-work owns the text between its markers, " +
 					"so keep your own text outside them"
 			case manifestKindAgentGuide:
@@ -1216,6 +1226,8 @@ func generatedManifestSurface(
 			recorded.Kind,
 			[]byte(promptText+"\n"),
 		), nil
+	case manifestKindGrokConfig, manifestKindAntigravityConfig:
+		return generatedNativeMCPSurface(recorded.Kind, root)
 	case manifestKindCodexConfig:
 		content, err := mergeCodexConfig(
 			nil,
@@ -1282,9 +1294,9 @@ func manifestSurfaceFromContent(
 		fragment, found, err = managedBlockFragment(content, managedBlockRange)
 	case manifestKindAgentGuide:
 		fragment, found = content, true
-	case manifestKindCodexConfig:
+	case manifestKindCodexConfig, manifestKindGrokConfig:
 		fragment, found, err = managedBlockFragment(content, codexBlockRange)
-	case manifestKindMCPConfig:
+	case manifestKindMCPConfig, manifestKindAntigravityConfig:
 		fragment, found, err = mcpManagedFragment(content)
 	case manifestKindClaudeSettings:
 		fragment, found, err = claudeManagedFragment(content)

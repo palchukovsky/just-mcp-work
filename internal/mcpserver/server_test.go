@@ -1236,7 +1236,7 @@ func TestAgentWriteScopeComesFromRunner(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(root, "allowed"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	runners, err := runner.NewRegistry(agentrunner.Registration("/usr/bin/false", "/usr/bin/false"))
+	runners, err := runner.NewRegistry(agentrunner.Registration("/usr/bin/false", "/usr/bin/false", "/usr/bin/false", "/usr/bin/false"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -386,7 +386,7 @@ func resolveWorkspaceState(
 func runnerCatalog() (*runner.Catalog, error) {
 	catalog, err := runner.NewCatalog(
 		justrunner.Registration(""),
-		agentrunner.Registration("", ""),
+		agentrunner.Registration("", "", "", ""),
 		cmakerunner.Registration(""),
 		dockerrunner.Registration(""),
 		gorunner.Registration(""),
@@ -511,7 +511,7 @@ func validateInstructionsAgents(
 	var unsupported []string
 	for _, agent := range splitCSV(agentsValue) {
 		switch agent {
-		case "claude", "codex", "windsurf":
+		case "claude", "codex", "grok", "antigravity", "windsurf":
 		default:
 			unsupported = append(unsupported, agent)
 		}
@@ -522,7 +522,7 @@ func validateInstructionsAgents(
 	return fmt.Errorf(
 		"instructions target machine cannot be used with --agents %q: selected agents "+
 			"without a machine-wide instruction path: %s; re-run with "+
-			"--agents claude,codex,windsurf",
+			"--agents claude,codex,grok,antigravity,windsurf",
 		agentsValue,
 		strings.Join(unsupported, ","),
 	)
@@ -540,8 +540,8 @@ func initCommandWithIO(
 	dir := flags.String("dir", ".", "workspace directory")
 	agents := flags.String(
 		"agents",
-		"claude,codex,cursor",
-		"comma-separated agent targets: claude,codex,cursor,copilot,windsurf",
+		"claude,codex,cursor,grok,antigravity",
+		"comma-separated agent targets: claude,codex,cursor,grok,antigravity,copilot,windsurf",
 	)
 	dryRun := flags.Bool("dry-run", false, "print planned diffs without writing files")
 	keepRecorded := flags.Bool(
@@ -559,7 +559,7 @@ func initCommandWithIO(
 	writeMCPConfig := flags.Bool(
 		"write-mcp-config",
 		true,
-		"true writes or rewrites the managed .mcp.json and Codex config entries; "+
+		"true writes or rewrites managed workspace MCP config entries; "+
 			"false removes them and deletes a file left holding nothing else",
 	)
 	claudePermissions := flags.String(
