@@ -207,7 +207,7 @@ func (r *Run) await() {
 	case <-timeout:
 		status = runstore.StatusTimeout
 		message = fmt.Sprintf(
-			"Task exceeded configured timeout of %s; adjust --timeout or JMW_TIMEOUT.",
+			"Task exceeded configured timeout of %s; adjust task_timeout_ms, --timeout or JMW_TIMEOUT.",
 			r.config.Timeout,
 		)
 		errText = message

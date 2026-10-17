@@ -304,10 +304,10 @@ func TestRegisteredToolContextBudget(t *testing.T) {
 	if descriptionBytes > 2750 {
 		t.Errorf("tool descriptions = %d bytes, want at most 2750", descriptionBytes)
 	}
-	// Encoded input schemas measure 5890 bytes; rounding up to 6000 leaves 110
-	// bytes, so no extra step is required.
-	if schemaBytes > 6000 {
-		t.Errorf("tool input schemas = %d bytes, want at most 6000", schemaBytes)
+	// The four optional per-run timeout inputs bring encoded schemas to 6311
+	// bytes. Rounding up to 6500 leaves 189 bytes, so no extra step is required.
+	if schemaBytes > 6500 {
+		t.Errorf("tool input schemas = %d bytes, want at most 6500", schemaBytes)
 	}
 }
 
@@ -326,8 +326,10 @@ func TestRunToolSchemasExposeWriteScope(t *testing.T) {
 		if err != nil {
 			t.Fatalf("marshal %s input schema: %v", tool.Name, err)
 		}
-		if !strings.Contains(string(encoded), `"write_scope"`) {
-			t.Errorf("%s input schema has no write_scope: %s", tool.Name, encoded)
+		for _, property := range []string{"write_scope", "task_timeout_ms"} {
+			if !strings.Contains(string(encoded), `"`+property+`"`) {
+				t.Errorf("%s input schema has no %s: %s", tool.Name, property, encoded)
+			}
 		}
 		want[tool.Name] = true
 	}

@@ -138,6 +138,12 @@ Discovery
   unchanged inputs. truncated and next_cursor explicitly report continuation.
 
 Task and shell execution
+- task_timeout_ms on run_task, start_task, run_shell_command, and
+  start_shell_command overrides the execution timeout for that run only.
+  Omitted or null inherits --timeout / JMW_TIMEOUT (15 minutes by default);
+  0 disables it; positive integers are milliseconds. Negative values and
+  durations exceeding 9223372036854 ms are rejected before creating a run.
+  max_wait_ms controls response waiting separately and never extends this limit.
 - Prefer a discovered task over a hand-written command, and do not edit build
   files unless asked. run_task waits up to
   max_wait_ms (0 starts immediately; -1 waits for completion); start_task begins

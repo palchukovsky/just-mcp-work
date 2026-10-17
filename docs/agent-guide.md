@@ -461,7 +461,17 @@ same task with any arguments. Both report `runs`, `measured_runs`, `last`,
 
 ### Timeouts, termination, concurrency
 
-- Every run has a timeout: `--timeout`, 15 minutes by default, `0` disables it.
+- The server's `--timeout` / `JMW_TIMEOUT` sets the default execution timeout:
+  15 minutes unless configured otherwise; `0` disables it.
+- `run_task`, `start_task`, `run_shell_command`, and `start_shell_command`
+  accept optional `task_timeout_ms` to override that default for one run.
+  Omitted or `null` inherits the server setting; `0` disables the limit;
+  a positive integer sets milliseconds. Negative values and values above
+  `9223372036854` ms (the largest representable duration) are rejected before
+  creating a run. For example, `"task_timeout_ms": 3600000` allows one hour.
+  This does not change other runs, and `max_wait_ms` only controls how long
+  the caller waits for a response. Status views and persisted metadata carry
+  the selected limit; unlimited runs omit the timeout and countdown fields.
 - On timeout or cancellation the whole child process tree is terminated,
   best-effort. A task that deliberately daemonizes can survive.
 - One server owns at most 32 live runs; further starts are rejected.
@@ -529,10 +539,10 @@ Discovery:
 Execution:
 
 - **`run_task`** - run a discovered task and wait a bounded time. Inputs:
-  `project_path`, `task_id`, `arguments`, `write_scope`, `max_wait_ms`,
+  `project_path`, `task_id`, `arguments`, `write_scope`, `task_timeout_ms`, `max_wait_ms`,
   `tail_bytes`.
 - **`start_task`** - background; returns a `run_id`. Inputs: `project_path`,
-  `task_id`, `arguments`, `write_scope`.
+  `task_id`, `arguments`, `write_scope`, `task_timeout_ms`.
 - **`define_shell_block`** - define an ad-hoc shell block for this session.
   Inputs: `command`, `argv`, `working_directory`. Exactly one of `command` and
   `argv` defines shell text or an executable with fixed arguments. An argv
@@ -540,13 +550,15 @@ Execution:
   elements are preserved.
 - **`run_shell_command`** - an ad-hoc command with a receipt. Inputs:
   `command`, `block_id`, `arguments`, `working_directory`, `write_scope`,
-  `max_wait_ms`, `tail_bytes`, `stdout_format`. Exactly one of `command` and
+  `task_timeout_ms`, `max_wait_ms`, `tail_bytes`, `stdout_format`. Exactly one
+  of `command` and
   `block_id` selects the command; `block_id` comes from `define_shell_block`,
   and `working_directory` must not accompany it. `arguments` is accepted only
   for an argv block and is appended as exact process arguments.
   `stdout_format` accepts only `"json"` or omission.
 - **`start_shell_command`** - background; inputs: `command`, `block_id`,
-  `arguments`, `working_directory`, `write_scope`. Exactly one of `command` and
+  `arguments`, `working_directory`, `write_scope`, `task_timeout_ms`. Exactly
+  one of `command` and
   `block_id` selects the command; `block_id` comes from `define_shell_block`,
   and `working_directory` must not accompany it. `arguments` has the same argv
   block-only semantics as the synchronous tool.
@@ -803,7 +815,7 @@ The operator sets these; an agent cannot change them at runtime.
 | --- | --- | --- | --- |
 | `--root` | `JMW_ROOT` | cwd | Workspace scope. |
 | `--ai` | - | None | Declared `codex` or `claude` presentation profile. |
-| `--timeout` | `JMW_TIMEOUT` | `15m` | Per-run timeout; `0` disables it. |
+| `--timeout` | `JMW_TIMEOUT` | `15m` | Default timeout; `0` disables it. |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` | Default synchronous wait. |
 | `--retention` | `JMW_RETENTION` | `72h` | Run-log retention. |
 | `--exclude` | - | none | Directories to skip on top of the policy. |

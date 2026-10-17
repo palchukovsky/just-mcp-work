@@ -938,12 +938,13 @@ func singleTaskSelector(names, prefix, query bool) error {
 
 //nolint:govet,lll // Field order follows the MCP request shape; the schema help text is one string per field.
 type runTaskInput struct {
-	ProjectPath string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
-	TaskID      string   `json:"task_id"`
-	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
-	WriteScope  []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
-	MaxWaitMS   *int64   `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
-	TailBytes   *int64   `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
+	ProjectPath   string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
+	TaskID        string   `json:"task_id"`
+	Arguments     []string `json:"arguments,omitempty" jsonschema:"values"`
+	WriteScope    []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
+	TaskTimeoutMS *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
+	MaxWaitMS     *int64   `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
+	TailBytes     *int64   `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
 }
 
 //nolint:govet // Embedded result precedes the structured MCP error by contract.
@@ -1010,10 +1011,11 @@ func (s *Server) runTask(
 
 //nolint:lll // The schema help text is one string per field.
 type startTaskInput struct {
-	ProjectPath string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
-	TaskID      string   `json:"task_id"`
-	Arguments   []string `json:"arguments,omitempty" jsonschema:"values"`
-	WriteScope  []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
+	ProjectPath   string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
+	TaskID        string   `json:"task_id"`
+	Arguments     []string `json:"arguments,omitempty" jsonschema:"values"`
+	WriteScope    []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
+	TaskTimeoutMS *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
 }
 
 func (s *Server) startTask(
@@ -1025,10 +1027,11 @@ func (s *Server) startTask(
 		return toolErrorResult(err), s.rejectedReceipt(err), nil
 	}
 	run, stats, output := s.startTaskRun(ctx, runTaskInput{
-		ProjectPath: input.ProjectPath,
-		TaskID:      input.TaskID,
-		Arguments:   input.Arguments,
-		WriteScope:  input.WriteScope,
+		ProjectPath:   input.ProjectPath,
+		TaskID:        input.TaskID,
+		Arguments:     input.Arguments,
+		WriteScope:    input.WriteScope,
+		TaskTimeoutMS: input.TaskTimeoutMS,
 	})
 	if run == nil {
 		return mcpErrorFor(output), output, nil
@@ -1051,24 +1054,26 @@ func (s *Server) startTaskRun(
 	ctx context.Context,
 	input runTaskInput,
 ) (*executor.Run, *runstats.Stats, runTaskOutput) {
+	meta := runstore.Meta{
+		ProjectPath: input.ProjectPath,
+		TaskID:      input.TaskID,
+		Args:        input.Arguments,
+		AIProfile:   s.config.AIProfile,
+	}
+	config, err := s.configureTaskTimeout(&meta, input.TaskTimeoutMS)
+	if err != nil {
+		return nil, nil, s.rejectedReceipt(err)
+	}
 	go s.cleanup()
 	s.repairTerminalMetadata()
 	stats, statsErr := s.stats.For(input.ProjectPath, input.TaskID, input.Arguments)
 	if statsErr != nil {
 		s.config.Logger.Warn("read task duration statistics failed", "task_id", input.TaskID, "error", statsErr)
 	}
-	handle, err := s.store.Begin(
-		runstore.Meta{
-			ProjectPath: input.ProjectPath,
-			TaskID:      input.TaskID,
-			Args:        input.Arguments,
-			AIProfile:   s.config.AIProfile,
-		},
-	)
+	handle, err := s.store.Begin(meta)
 	if err != nil {
 		return nil, stats, s.rejectedReceipt(err)
 	}
-	s.configureTaskTimeout(&handle.Meta)
 	project, err := s.workspace.Find(ctx, input.ProjectPath)
 	if err != nil {
 		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
@@ -1140,7 +1145,7 @@ func (s *Server) startTaskRun(
 	if err != nil {
 		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 	}
-	return s.startRun(handle, cmd, stats, input.WriteScope, runnerWriteScope)
+	return s.startRun(handle, cmd, config, stats, input.WriteScope, runnerWriteScope)
 }
 
 var parameterAssignmentPrefix = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*=`)
@@ -1185,6 +1190,7 @@ type runShellCommandInput struct {
 	Arguments        []string `json:"arguments,omitempty" jsonschema:"full argv; starts with block argv"`
 	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"directory; default ."`
 	WriteScope       []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
+	TaskTimeoutMS    *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
 	MaxWaitMS        *int64   `json:"max_wait_ms,omitempty" jsonschema:"ms; 0 now, -1 complete"`
 	TailBytes        *int64   `json:"tail_bytes,omitempty" jsonschema:"tail bytes; 0 off"`
 	StdoutFormat     string   `json:"stdout_format,omitempty" jsonschema:"json or omitted"`
@@ -1276,6 +1282,7 @@ type startShellCommandInput struct {
 	Arguments        []string `json:"arguments,omitempty" jsonschema:"full argv; starts with block argv"`
 	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"directory; default ."`
 	WriteScope       []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
+	TaskTimeoutMS    *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
 }
 
 func (s *Server) startShellCommand(
@@ -1300,6 +1307,7 @@ func (s *Server) startShellCommand(
 		Arguments:        argv,
 		WorkingDirectory: workingDirectory,
 		WriteScope:       input.WriteScope,
+		TaskTimeoutMS:    input.TaskTimeoutMS,
 	})
 	if run == nil {
 		return mcpErrorFor(output), output, nil
@@ -1311,29 +1319,31 @@ func (s *Server) startShellRun(
 	ctx context.Context,
 	input runShellCommandInput,
 ) (*executor.Run, *runstats.Stats, runTaskOutput) {
-	go s.cleanup()
 	workingDirectory := canonicalWorkingDirectory(input.WorkingDirectory)
 	args := []string{input.Command}
 	if len(input.Arguments) > 0 {
 		args = append([]string(nil), input.Arguments...)
 	}
+	meta := runstore.Meta{
+		ProjectPath: workingDirectory,
+		TaskID:      "shell:command",
+		Args:        args,
+		AIProfile:   s.config.AIProfile,
+	}
+	config, err := s.configureTaskTimeout(&meta, input.TaskTimeoutMS)
+	if err != nil {
+		return nil, nil, s.rejectedReceipt(err)
+	}
+	go s.cleanup()
 	s.repairTerminalMetadata()
 	stats, statsErr := s.stats.For(workingDirectory, "shell:command", args)
 	if statsErr != nil {
 		s.config.Logger.Warn("read shell duration statistics failed", "error", statsErr)
 	}
-	handle, err := s.store.Begin(
-		runstore.Meta{
-			ProjectPath: workingDirectory,
-			TaskID:      "shell:command",
-			Args:        args,
-			AIProfile:   s.config.AIProfile,
-		},
-	)
+	handle, err := s.store.Begin(meta)
 	if err != nil {
 		return nil, stats, s.rejectedReceipt(err)
 	}
-	s.configureTaskTimeout(&handle.Meta)
 	dir, err := s.workspace.ResolveDir(workingDirectory)
 	if err != nil {
 		return nil, stats, receiptForHandle(handle, s.reject(handle, err))
@@ -1357,20 +1367,40 @@ func (s *Server) startShellRun(
 			return nil, stats, receiptForHandle(handle, s.reject(handle, err))
 		}
 	}
-	return s.startRun(handle, cmd, stats, input.WriteScope, nil)
+	return s.startRun(handle, cmd, config, stats, input.WriteScope, nil)
 }
 
-func (s *Server) configureTaskTimeout(meta *runstore.Meta) {
-	if s.config.TimeoutUnlimited {
-		return
+func (s *Server) configureTaskTimeout(
+	meta *runstore.Meta,
+	requestedMS *int64,
+) (executor.Config, error) {
+	config := executor.Config{
+		Timeout:          s.config.Timeout,
+		TimeoutUnlimited: s.config.TimeoutUnlimited,
+		Grace:            s.config.Grace,
 	}
-	timeout := s.config.Timeout.Milliseconds()
-	meta.TaskTimeoutMS = &timeout
+	if requestedMS != nil {
+		const maxTimeoutMS = int64((1<<63 - 1) / time.Millisecond)
+		if *requestedMS < 0 || *requestedMS > maxTimeoutMS {
+			return executor.Config{}, fmt.Errorf(
+				"task_timeout_ms must be between 0 and %d",
+				maxTimeoutMS,
+			)
+		}
+		config.Timeout = time.Duration(*requestedMS) * time.Millisecond
+		config.TimeoutUnlimited = *requestedMS == 0
+	}
+	if !config.TimeoutUnlimited {
+		timeout := config.Timeout.Milliseconds()
+		meta.TaskTimeoutMS = &timeout
+	}
+	return config, nil
 }
 
 func (s *Server) startRun(
 	handle *runstore.Handle,
 	cmd *exec.Cmd,
+	config executor.Config,
 	stats *runstats.Stats,
 	declaredWriteScope []string,
 	runnerWriteScope []string,
@@ -1403,11 +1433,7 @@ func (s *Server) startRun(
 	run, startErr := executor.Start(
 		cmd,
 		handle,
-		executor.Config{
-			Timeout:          s.config.Timeout,
-			TimeoutUnlimited: s.config.TimeoutUnlimited,
-			Grace:            s.config.Grace,
-		},
+		config,
 	)
 	if run == nil {
 		return nil, stats, runTaskOutput{

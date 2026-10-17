@@ -197,6 +197,7 @@ func TestTimeoutDiagnosticPreservesAppliedLimit(t *testing.T) {
 	result := run.Wait(context.Background())
 	if result.Status != runstore.StatusTimeout ||
 		!strings.Contains(result.Message, timeout.String()) ||
+		!strings.Contains(result.Message, "task_timeout_ms") ||
 		!strings.Contains(result.Message, "JMW_TIMEOUT") {
 		t.Fatalf("timeout result = %#v", result)
 	}
