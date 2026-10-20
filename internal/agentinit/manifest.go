@@ -139,6 +139,18 @@ func planManifest(
 				for _, config := range nativeMCPConfigs() {
 					if _, isSelected := selected[config.agent]; !isSelected &&
 						surface.Kind == config.kind {
+						expected, generationErr := generatedNativeMCPSurface(config.kind, scope, families)
+						if generationErr != nil {
+							return nil, nil, generationErr
+						}
+						if expected.SHA256 != surface.SHA256 {
+							return nil, nil, fmt.Errorf(
+								"cannot preserve %s outside --agents: its generated profile changed; "+
+									"re-run with --agents %s",
+								config.path,
+								strings.Join(append(selectedInstructionAgentNames(selected), config.agent), ","),
+							)
+						}
 						surfaces = append(surfaces, surface)
 					}
 				}
@@ -1227,7 +1239,7 @@ func generatedManifestSurface(
 			[]byte(promptText+"\n"),
 		), nil
 	case manifestKindGrokConfig, manifestKindAntigravityConfig:
-		return generatedNativeMCPSurface(recorded.Kind, root)
+		return generatedNativeMCPSurface(recorded.Kind, root, families)
 	case manifestKindCodexConfig:
 		content, err := mergeCodexConfig(
 			nil,

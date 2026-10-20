@@ -120,7 +120,7 @@ func (m model) body(problems map[int]string) ([]string, int, int) {
 				anchor = heading
 			}
 		}
-		lines = append(lines, line)
+		lines = append(lines, strings.Split(line, "\n")...)
 		row++
 	}
 	gap := func() {
@@ -160,7 +160,7 @@ func (m model) body(problems map[int]string) ([]string, int, int) {
 			gap()
 			title(" " + bold(question.Subject) + problemMark(problems, index))
 			for choice := range question.Choices {
-				emit(m.choiceRow(index, choice, row == m.cursor, nameWidth))
+				emit(m.choiceRow(index, choice, row == m.cursor))
 			}
 			gap()
 			heading = -1
@@ -276,14 +276,17 @@ func (m model) matrixRow(index int, focused bool, nameWidth int, problems map[in
 	return line.String()
 }
 
-func (m model) choiceRow(index int, choice int, focused bool, nameWidth int) string {
+func (m model) choiceRow(index int, choice int, focused bool) string {
 	option := m.questions[index].Choices[choice]
 	box := "[ ]"
 	if slices.Contains(m.values[index], option.Value) {
 		box = accent("[x]")
 	}
-	return marker(focused) + "   " + box + " " + pad(name(choiceName(option), focused), nameWidth-4) +
-		" " + muted(option.Description)
+	line := marker(focused) + "   " + box + " " + name(choiceName(option), focused)
+	if option.Description != "" {
+		line += "\n" + strings.Join(indent(option.Description, m.formWidth(), muted), "\n")
+	}
+	return line
 }
 
 // singleRow shows a single answer, followed by its label when it has one and

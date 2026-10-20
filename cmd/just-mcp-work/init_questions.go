@@ -318,7 +318,7 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 	}
 	choices := make([]questionnaire.Choice, 0, len(aiprofile.Declarable()))
 	for _, family := range aiprofile.Declarable() {
-		config, agent, declared := agentinit.AIFamilyConfig(family)
+		name, clients, declared := agentinit.AIFamilyClients(family)
 		if !declared {
 			return questionnaire.Question{}, fmt.Errorf(
 				"no generated configuration declares AI family %q",
@@ -327,8 +327,8 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 		}
 		choices = append(choices, questionnaire.Choice{
 			Value:       string(family),
-			Label:       agent,
-			Description: "declared in " + config,
+			Label:       name,
+			Description: clients,
 		})
 	}
 	offer := familyNames(defaultAIFamilies())
@@ -340,8 +340,10 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 		Subject: "AI families",
 		Title:   "Which AI families should the managed just-mcp-work server declare?",
 		Context: []string{
-			"Each family is declared in the configuration its own agent reads, so a " +
-				"workspace used by both agents declares both.",
+			"A family describes the client integration, not the language model selected in an editor.",
+			"Each family is declared in its clients' MCP configurations. Grok uses the Claude family.",
+			"--agents selects the instruction files and native Grok/Antigravity configurations; " +
+				"selecting a family adds its profile to those configurations.",
 			"A family only changes how the server introduces itself to the agent; it " +
 				"grants no access.",
 			"JMW writes no MCP server configuration for Cursor, GitHub Copilot, or " +

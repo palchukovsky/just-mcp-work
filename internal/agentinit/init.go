@@ -418,7 +418,7 @@ type Options struct {
 	InstructionsTarget InstructionsTarget
 	// AIFamilies selects the presentation profiles carried by generated managed
 	// server arguments and names at least one family. Each family reaches the
-	// one configuration its client reads; a configuration whose family is not
+	// configurations its clients read; a configuration whose family is not
 	// selected carries no profile.
 	AIFamilies aiprofile.Selection
 	// RunnerModes is the complete, catalog-ordered runner selection persisted in
@@ -2497,17 +2497,27 @@ func tomlStringArray(values []string) (string, error) {
 	return "[" + strings.Join(encoded, ", ") + "]", nil
 }
 
-// AIFamilyConfig names the generated configuration whose client declares
-// family, the same pairing planMCPConfig and planCodexConfig write, and the
-// agent that reads it, by the name people know it by.
-func AIFamilyConfig(family aiprofile.Family) (config string, agent string, found bool) {
+// AIFamilyClients names a family and the clients that use it.
+func AIFamilyClients(family aiprofile.Family) (name string, clients string, found bool) {
+	var descriptions []string
 	switch family {
 	case aiprofile.FamilyClaude:
-		return mcpConfig, "Claude Code", true
+		name = "Claude"
+		descriptions = append(descriptions, "Claude Code")
 	case aiprofile.FamilyCodex:
-		return codexConfig, "Codex", true
+		name = "Codex"
+		descriptions = append(descriptions, "Codex")
+	case aiprofile.FamilyAntigravity:
+		name = "Antigravity"
+	default:
+		return "", "", false
 	}
-	return "", "", false
+	for _, config := range nativeMCPConfigs() {
+		if config.family == family {
+			descriptions = append(descriptions, config.name)
+		}
+	}
+	return name, strings.Join(descriptions, ", "), len(descriptions) > 0
 }
 
 func managedServerArgs(root string, profile aiprofile.Profile) []string {

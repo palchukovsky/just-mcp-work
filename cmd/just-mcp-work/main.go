@@ -127,7 +127,11 @@ func parseServeOptions(args []string) (serveOptions, string, error) {
 	flags.SetOutput(os.Stderr)
 	rootFromEnvironment := os.Getenv("JMW_ROOT") != ""
 	root := flags.String("root", envOr("JMW_ROOT", "."), "workspace root")
-	ai := flags.String("ai", "", "caller AI family: codex or claude")
+	ai := flags.String(
+		"ai",
+		"",
+		"caller AI family: "+strings.Join(familyNames(aiprofile.Declarable()), ", "),
+	)
 	timeout := flags.Duration(
 		"timeout",
 		durationEnvOr("JMW_TIMEOUT", 15*time.Minute),
@@ -162,7 +166,8 @@ func parseServeOptions(args []string) (serveOptions, string, error) {
 		// nosemgrep: discarded-error
 		_, _ = fmt.Fprintln(
 			flags.Output(),
-			"Usage: just-mcp-work serve [--root <dir>] [--ai <codex|claude>] "+
+			"Usage: just-mcp-work serve [--root <dir>] [--ai <"+
+				strings.Join(familyNames(aiprofile.Declarable()), "|")+">] "+
 				"[--timeout <duration>] "+
 				"[--sync-deadline <duration>] [--retention <duration>] "+
 				"[--exclude <glob>,...]",
@@ -955,7 +960,7 @@ func parseInitAIFamilies(value string) (aiprofile.Selection, error) {
 // defaultAIFamilies is offered when no usable selection is recorded: every
 // client this product generates a configuration for is declared.
 func defaultAIFamilies() aiprofile.Selection {
-	return aiprofile.Selection{aiprofile.FamilyCodex, aiprofile.FamilyClaude}
+	return aiprofile.Declarable()
 }
 
 func writeInitOutput(output io.Writer, format string, arguments ...any) error {

@@ -10,10 +10,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 )
 
 func nativeTestOptions(t *testing.T, root, agent string) Options {
@@ -25,7 +28,7 @@ func nativeTestOptions(t *testing.T, root, agent string) Options {
 		ShellPermission:    ShellPermissionAsk,
 		ClaudePermissions:  ClaudePermissionsNo,
 		WriteMCPConfig:     true,
-		AIFamilies:         testAIFamilies(),
+		AIFamilies:         aiprofile.Declarable(),
 		RunnerModes:        testRunnerModes(t),
 	}
 }
@@ -70,9 +73,104 @@ func TestNativeClientsGenerateUsableConfigsAndVerifyTheirManifest(t *testing.T) 
 	}
 }
 
+func TestNativeClientProfilesFollowFamilySelection(t *testing.T) {
+	for _, client := range []struct {
+		agent  string
+		path   string
+		family aiprofile.Family
+	}{
+		{agent: "grok", path: ".grok/config.toml", family: aiprofile.FamilyClaude},
+		{agent: "antigravity", path: ".agents/mcp_config.json", family: aiprofile.FamilyAntigravity},
+	} {
+		for _, family := range aiprofile.Declarable() {
+			t.Run(client.agent+"/"+string(family), func(t *testing.T) {
+				root := t.TempDir()
+				options := nativeTestOptions(t, root, client.agent)
+				options.AIFamilies = aiprofile.Selection{family}
+				if _, err := Apply(options); err != nil {
+					t.Fatal(err)
+				}
+				data, err := os.ReadFile(filepath.Join(root, client.path))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var entry serverEntry
+				if client.agent == "grok" {
+					var document struct {
+						Servers map[string]serverEntry `toml:"mcp_servers"`
+					}
+					if _, err = toml.Decode(string(data), &document); err != nil {
+						t.Fatal(err)
+					}
+					entry = document.Servers[serverName]
+				} else {
+					var document struct {
+						Servers map[string]serverEntry `json:"mcpServers"`
+					}
+					if err = json.Unmarshal(data, &document); err != nil {
+						t.Fatal(err)
+					}
+					entry = document.Servers[serverName]
+				}
+				want := []string{"serve", "--root", root}
+				if family == client.family {
+					want = append(want, "--ai", string(client.family))
+				}
+				if !slices.Equal(entry.Args, want) {
+					t.Fatalf("generated args = %q, want %q", entry.Args, want)
+				}
+				if _, err = VerifyManagedSurfaces(root); err != nil {
+					t.Fatal(err)
+				}
+				if result, applyErr := Apply(options); applyErr != nil || len(result.Paths) != 0 {
+					t.Fatalf("repeat init = %q, %v", result.Paths, applyErr)
+				}
+			})
+		}
+	}
+}
+
+func TestNativeProfileChangeRequiresSelectingItsClient(t *testing.T) {
+	for _, config := range nativeMCPConfigs() {
+		t.Run(config.agent, func(t *testing.T) {
+			root := t.TempDir()
+			options := nativeTestOptions(t, root, config.agent)
+			options.AIFamilies = aiprofile.Selection{aiprofile.FamilyCodex}
+			if _, err := Apply(options); err != nil {
+				t.Fatal(err)
+			}
+			manifestPath := filepath.Join(root, manifestFile)
+			before, err := os.ReadFile(manifestPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			options.Agents = []string{"codex"}
+			options.AIFamilies = aiprofile.Declarable()
+			if _, err = Apply(options); err == nil || !strings.Contains(err.Error(), config.path) ||
+				!strings.Contains(err.Error(), "--agents codex,"+config.agent) {
+				t.Fatalf("changed profile outside selection = %v", err)
+			}
+			after, err := os.ReadFile(manifestPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatalf("rejected init changed the manifest: %v", err)
+			}
+			if _, err = VerifyManagedSurfaces(root); err != nil {
+				t.Fatalf("rejected init changed a managed surface: %v", err)
+			}
+			options.Agents = append(options.Agents, config.agent)
+			if _, err = Apply(options); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = VerifyManagedSurfaces(root); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestGrokMCPConfigOmitsCodexApprovalSettings(t *testing.T) {
 	config := nativeMCPConfig{agent: "grok"}
-	content, err := config.merge(nil, t.TempDir())
+	content, err := config.merge(nil, t.TempDir(), aiprofile.Profile{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +258,7 @@ func TestNativeClientCleanupPreservesConfigFileSymlink(t *testing.T) {
 				t.Fatal(err)
 			}
 			target := filepath.Join(root, "shared-config")
-			content, err := config.merge(nil, root)
+			content, err := config.merge(nil, root, aiprofile.Profile{})
 			if err != nil {
 				t.Fatal(err)
 			}

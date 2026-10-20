@@ -532,7 +532,69 @@ func TestInitWritesMCPConfigByDefault(t *testing.T) {
 	}
 }
 
-func TestInitOffersBothAIFamiliesByDefault(t *testing.T) {
+func TestInitRecordsAntigravityFamilyFromFlagAndInteractiveChoice(t *testing.T) {
+	for _, explicit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("flag=%t", explicit), func(t *testing.T) {
+			dir := t.TempDir()
+			args := append(
+				initArgsWithRunnerModesWithoutAI(dir),
+				"--agents",
+				"antigravity",
+				"--write-mcp-config=true",
+				"--shell-permission",
+				"ask",
+			)
+			input := "3\n"
+			if explicit {
+				args = append(args, "--ai", "antigravity")
+				input = ""
+			}
+			if err := initWithBetaTest(
+				false,
+				args,
+				strings.NewReader(input),
+				io.Discard,
+				io.Discard,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if got := initRecordedAIFamilies(t, dir); !slices.Equal(got, []string{"antigravity"}) {
+				t.Fatalf("recorded families = %q", got)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, ".agents", "mcp_config.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"serve", "--root", dir, "--ai", "antigravity"}
+			if got := initSnippetArgs(t, string(data)); !slices.Equal(got, want) {
+				t.Fatalf("Antigravity MCP args = %q, want %q", got, want)
+			}
+			args = append(
+				initArgsWithRunnerModesWithoutAI(dir),
+				"--agents",
+				"antigravity",
+				"--keep-recorded",
+				"--write-mcp-config=true",
+				"--shell-permission",
+				"ask",
+			)
+			if err = initWithBetaTest(
+				false,
+				args,
+				strings.NewReader(""),
+				io.Discard,
+				io.Discard,
+			); err != nil {
+				t.Fatalf("repeat init did not retain the family: %v", err)
+			}
+			if _, err = agentinit.VerifyManagedSurfaces(dir); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestInitOffersAllAIFamiliesByDefault(t *testing.T) {
 	dir := t.TempDir()
 	var result bytes.Buffer
 	var diagnostics bytes.Buffer
@@ -547,10 +609,11 @@ func TestInitOffersBothAIFamiliesByDefault(t *testing.T) {
 	}
 	for _, want := range []string{
 		"Which AI families should the managed just-mcp-work server declare?",
-		"  1) codex (default) - Codex: declared in .codex/config.toml",
-		"  2) claude (default) - Claude Code: declared in .mcp.json",
+		"  1) codex (default) - Codex: Codex",
+		"  2) claude (default) - Claude: Claude Code, Grok",
+		"  3) antigravity (default) - Antigravity: Antigravity CLI",
 		"JMW writes no MCP server configuration for Cursor, GitHub Copilot, or Windsurf",
-		"AI families [codex,claude, default]:",
+		"AI families [codex,claude,antigravity, default]:",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
 			t.Fatalf("AI family prompt lacks %q:\n%s", want, diagnostics.String())
@@ -559,11 +622,18 @@ func TestInitOffersBothAIFamiliesByDefault(t *testing.T) {
 	if strings.Contains(diagnostics.String(), "unknown") {
 		t.Fatalf("AI family prompt still offers a placeholder family:\n%s", diagnostics.String())
 	}
+	for _, path := range []string{
+		".codex/config.toml", ".mcp.json", ".grok/config.toml", ".agents/mcp_config.json",
+	} {
+		if strings.Contains(diagnostics.String(), path) {
+			t.Fatalf("AI family prompt exposes config path %q:\n%s", path, diagnostics.String())
+		}
+	}
 	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
 		families,
-		[]string{"codex", "claude"},
+		[]string{"codex", "claude", "antigravity"},
 	) {
-		t.Fatalf("default answer recorded AI families = %#v, want codex and claude", families)
+		t.Fatalf("default answer recorded AI families = %#v, want all families", families)
 	}
 	if args := initSnippetArgs(t, result.String()); !slices.Equal(
 		args,
@@ -673,7 +743,7 @@ func TestInitRepeatsAIFamilyQuestionUntilTheAnswerIsUsable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`Unsupported AI family "9"; choose any of codex, claude.`,
+		`Unsupported AI family "9"; choose any of codex, claude, antigravity.`,
 		`"codex" is named twice.`,
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
@@ -741,7 +811,7 @@ func TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized(t *testin
 		"The AI families recorded by an earlier init cannot be used; choose them again:",
 		manifestPath,
 		"no AI families are recorded",
-		"AI families [codex,claude, default]:",
+		"AI families [codex,claude,antigravity, default]:",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
 			t.Fatalf("unrecognized AI families prompt lacks %q:\n%s", want, diagnostics.String())
@@ -749,9 +819,9 @@ func TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized(t *testin
 	}
 	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
 		families,
-		[]string{"codex", "claude"},
+		[]string{"codex", "claude", "antigravity"},
 	) {
-		t.Fatalf("re-chosen AI families = %#v, want codex and claude", families)
+		t.Fatalf("re-chosen AI families = %#v, want all families", families)
 	}
 }
 
@@ -2599,13 +2669,13 @@ func TestParseServeOptionsSelectsAIProfile(t *testing.T) {
 	if err != nil || options.AIProfile.Declared() {
 		t.Fatalf("default AI profile = %#v, %v, want none", options.AIProfile, err)
 	}
-	for _, family := range []string{"codex", "claude"} {
+	for _, family := range []string{"codex", "claude", "antigravity"} {
 		options, _, err = parseServeOptions([]string{"--ai", family})
 		if err != nil || string(options.AIProfile.Family) != family {
 			t.Fatalf("--ai %s profile = %#v, %v", family, options.AIProfile, err)
 		}
 	}
-	for _, family := range []string{"", "unknown", "Codex", "gemini"} {
+	for _, family := range []string{"", "unknown", "Codex", "gemini", "grok"} {
 		if _, _, err = parseServeOptions([]string{"--ai", family}); err == nil {
 			t.Fatalf("--ai %q was accepted", family)
 		}

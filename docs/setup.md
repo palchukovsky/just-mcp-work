@@ -221,24 +221,34 @@ from the directory `serve` runs on.
 ## AI families
 
 `init` also asks which AI families the managed server should declare. The
-question lists its choices with numbers, each with the agent it is for, and the
-answer names as many as the workspace needs, by number or by name, separated
-by commas or spaces. Both `codex` and `claude` are offered in a workspace that
-has none recorded. Each family is declared in the configuration its own agent
-reads - `claude` in `.mcp.json` for Claude Code, `codex` in
-`.codex/config.toml` for Codex - so a configuration whose family was not
+question lists its choices with numbers, and the form names the clients
+below each family. These are client integration groups, not model providers:
+an editor's selected model does not change which configuration it reads.
+The answer names as many as the
+workspace needs, by number or by name, separated by commas or spaces.
+`codex`, `claude`, and `antigravity` are offered in a workspace that has none
+recorded. Each family is declared in its clients' configurations: `codex` in
+`.codex/config.toml`, `claude` in `.mcp.json` for Claude Code and
+`.grok/config.toml` for a selected Grok client, and `antigravity` in
+`.agents/mcp_config.json` for a selected Antigravity CLI client. There is no
+separate Grok family. A configuration whose family was not
 selected declares none. Cursor, GitHub Copilot, and Windsurf have no family:
 `init` writes only their instruction files, not an MCP configuration. Later
 runs offer the families stored by the previous `init`; when the recorded ones
 are not recognized, as after an upgrade
 from a release that stored a single family, `init` says so and asks again.
 Until that `init` rewrites the manifest, `serve` refuses to start on it. Pass
-`--ai codex|claude|codex,claude` to answer the question non-interactively. The
-selection is recorded in the managed manifest. Generated arguments always
-include `serve --root <dir>` and add `--ai codex|claude` when the family of
-that configuration is declared. The profile is caller-declared presentation and
-provenance; it does not change runner modes, task visibility, shell permission,
+`--ai claude,antigravity`, for example, to answer the question without a prompt.
+The selection is recorded in the managed manifest. Generated arguments always
+include `serve --root <dir>` and add `--ai codex|claude|antigravity` when that
+configuration's family is declared. The profile is caller-declared presentation
+and provenance; it does not change runner modes, task visibility, shell permission,
 or write access.
+
+If changing the families would change a recorded Grok or Antigravity MCP
+entry outside the current `--agents` selection, `init` refuses before writing
+and names the client selection needed to update it. Rerun with that selection
+to keep the native configuration and its manifest consistent.
 
 ## Shell tool permission
 

@@ -18,6 +18,7 @@ func TestParseAcceptsOnlyDeclaredFamilies(t *testing.T) {
 	}{
 		{name: "codex", value: "codex", want: profile(FamilyCodex)},
 		{name: "claude", value: "claude", want: profile(FamilyClaude)},
+		{name: "antigravity", value: "antigravity", want: profile(FamilyAntigravity)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := Parse(test.value)
@@ -27,7 +28,7 @@ func TestParseAcceptsOnlyDeclaredFamilies(t *testing.T) {
 		})
 	}
 
-	for _, value := range []string{"", "unknown", "Codex", " codex", "gemini"} {
+	for _, value := range []string{"", "unknown", "Codex", " codex", "gemini", "grok"} {
 		t.Run("reject_"+value, func(t *testing.T) {
 			if _, err := Parse(value); err == nil {
 				t.Fatalf("Parse(%q) accepted an unsupported explicit value", value)
@@ -69,6 +70,11 @@ func TestParseSelectionCanonicalizesDeclaredFamilies(t *testing.T) {
 	}{
 		{name: "one", values: []string{"claude"}, want: Selection{FamilyClaude}},
 		{
+			name:   "all families",
+			values: []string{"antigravity", "claude", "codex"},
+			want:   Selection{FamilyCodex, FamilyClaude, FamilyAntigravity},
+		},
+		{
 			name:   "declared order",
 			values: []string{"claude", "codex"},
 			want:   Selection{FamilyCodex, FamilyClaude},
@@ -108,6 +114,11 @@ func TestParseSelectionRejectsUnusableAnswers(t *testing.T) {
 			name:   "undeclarable family",
 			values: []string{"gemini"},
 			want:   `unsupported AI family "gemini"`,
+		},
+		{
+			name:   "grok uses claude",
+			values: []string{"grok"},
+			want:   `unsupported AI family "grok"`,
 		},
 		{
 			name:   "empty family",

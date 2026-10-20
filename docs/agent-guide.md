@@ -244,22 +244,31 @@ its native MCP configuration: `.grok/config.toml` for Grok and
 `.agents/mcp_config.json` for Antigravity. These files use the existing
 `--write-mcp-config` choice, preserve unrelated entries, and are checked by the
 managed manifest. A deselected client's configuration is preserved and remains
-verified. Their server entries omit `--ai`: the presentation profiles below
-remain separate from client selection.
+verified. Grok uses the `claude` presentation family; Antigravity CLI uses
+`antigravity`. Client selection remains separate from family selection.
 
 During `init`, the operator selects any number of the declarable families,
-`codex` and `claude`; both are offered in a workspace with no managed manifest.
-Each selected family is declared in the configuration its own client reads:
-`claude` in `.mcp.json`, `codex` in `.codex/config.toml`. Later runs offer the
+`codex`, `claude`, and `antigravity`; all are offered in a workspace with no
+managed manifest. The form lists client names below each family, without
+configuration paths. These are client integration groups, not model providers.
+Each selected family is declared in its clients' configurations:
+`codex` in `.codex/config.toml`, `claude` in `.mcp.json` and the selected Grok
+client's `.grok/config.toml`, and `antigravity` in the selected Antigravity
+client's `.agents/mcp_config.json`. Later runs offer the
 families in the managed manifest and ask again, as in a new workspace, when the
-recorded ones are not recognized. Pass `init --ai codex|claude|codex,claude` to
-answer the question non-interactively. Managed MCP and Codex server arguments
-always include `serve --root <dir>`, add `--ai codex|claude` when that
+recorded ones are not recognized. Pass `init --ai claude,antigravity`, for
+example, to answer the question non-interactively. Managed server arguments
+always include `serve --root <dir>`, add `--ai codex|claude|antigravity` when that
 configuration's family is declared, and omit `--ai` otherwise. They carry no
 runner selection. The AI family is caller-declared provenance, not
 authenticated identity, and selects an instruction/profile presentation only.
 The policy, not the server arguments, defines the authorized task surface an
 agent sees.
+
+Changing a family selection that changes a recorded native client's server
+arguments requires including that client in `--agents`. Otherwise `init`
+refuses before writing and names the client selection needed to update it.
+There is no `grok` family; use `--ai claude` for Grok.
 
 `init` also writes `.just-mcp-work/guide.txt`, the generated reference used by an
 agent at work, and records it with the other managed surfaces. JMW owns that
@@ -814,7 +823,7 @@ The operator sets these; an agent cannot change them at runtime.
 | Flag | Environment | Default | Effect |
 | --- | --- | --- | --- |
 | `--root` | `JMW_ROOT` | cwd | Workspace scope. |
-| `--ai` | - | None | Declared `codex` or `claude` presentation profile. |
+| `--ai` | - | None | Family: `codex`, `claude`, or `antigravity`. |
 | `--timeout` | `JMW_TIMEOUT` | `15m` | Default timeout; `0` disables it. |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` | Default synchronous wait. |
 | `--retention` | `JMW_RETENTION` | `72h` | Run-log retention. |

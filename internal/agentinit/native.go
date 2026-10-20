@@ -11,24 +11,42 @@ import (
 )
 
 type nativeMCPConfig struct {
-	agent string
-	path  string
-	kind  string
+	agent  string
+	name   string
+	path   string
+	kind   string
+	family aiprofile.Family
 }
 
 func nativeMCPConfigs() []nativeMCPConfig {
 	return []nativeMCPConfig{
-		{agent: "grok", path: ".grok/config.toml", kind: manifestKindGrokConfig},
-		{agent: "antigravity", path: ".agents/mcp_config.json", kind: manifestKindAntigravityConfig},
+		{
+			agent:  "grok",
+			name:   "Grok",
+			path:   ".grok/config.toml",
+			kind:   manifestKindGrokConfig,
+			family: aiprofile.FamilyClaude,
+		},
+		{
+			agent:  "antigravity",
+			name:   "Antigravity CLI",
+			path:   ".agents/mcp_config.json",
+			kind:   manifestKindAntigravityConfig,
+			family: aiprofile.FamilyAntigravity,
+		},
 	}
 }
 
-func (config nativeMCPConfig) merge(before []byte, root string) ([]byte, error) {
+func (config nativeMCPConfig) merge(
+	before []byte,
+	root string,
+	profile aiprofile.Profile,
+) ([]byte, error) {
 	switch config.agent {
 	case "grok":
-		return mergeTOMLMCPConfig(before, root, aiprofile.Profile{}, nil)
+		return mergeTOMLMCPConfig(before, root, profile, nil)
 	case "antigravity":
-		return mergeMCPConfig(before, root, aiprofile.Profile{})
+		return mergeMCPConfig(before, root, profile)
 	default:
 		return nil, fmt.Errorf("unsupported native MCP client %q", config.agent)
 	}
@@ -53,12 +71,16 @@ func (config nativeMCPConfig) surface(content []byte) (manifestSurface, bool, er
 	return manifestSurfaceFromContent(manifestSurface{Path: config.path, Kind: config.kind}, content)
 }
 
-func generatedNativeMCPSurface(kind, root string) (manifestSurface, error) {
+func generatedNativeMCPSurface(
+	kind string,
+	root string,
+	families aiprofile.Selection,
+) (manifestSurface, error) {
 	for _, config := range nativeMCPConfigs() {
 		if config.kind != kind {
 			continue
 		}
-		content, err := config.merge(nil, root)
+		content, err := config.merge(nil, root, families.ProfileFor(config.family))
 		if err != nil {
 			return manifestSurface{}, err
 		}
@@ -100,7 +122,7 @@ func planNativeMCPConfigs(
 		var after []byte
 		remove := false
 		if options.WriteMCPConfig {
-			after, err = config.merge(before, scope)
+			after, err = config.merge(before, scope, options.AIFamilies.ProfileFor(config.family))
 			if err == nil {
 				var surface manifestSurface
 				var found bool

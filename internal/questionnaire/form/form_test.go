@@ -294,6 +294,37 @@ func TestFormNamesChoicesByTheirLabels(t *testing.T) {
 	}
 }
 
+func TestFormShowsMembersBelowEachFamilyAndKeepsFocusOnWrappedRows(t *testing.T) {
+	questions := testQuestions()
+	questions[1].Choices[0].Label = "Codex"
+	questions[1].Choices[0].Description = "Codex"
+	questions[1].Choices[1].Label = "Claude"
+	questions[1].Choices[1].Description = "Claude Code, Grok"
+	current := newModel("init", questions[1:2])
+	current.width = 50
+	lines, _, _ := current.body(current.problems())
+	body := ansi.Strip(strings.Join(lines, "\n"))
+	if !strings.Contains(body, "[x] Codex\n     Codex") ||
+		!strings.Contains(body, "[x] Claude\n     Claude Code, Grok") {
+		t.Fatalf("family members are not below their labels:\n%s", body)
+	}
+	current.questions[0].Choices[1].Description = strings.Repeat("Claude Code, Grok, ", 5)
+	lines, _, _ = current.body(current.problems())
+	for _, line := range lines {
+		if ansi.StringWidth(line) > current.width {
+			t.Fatalf("description exceeds terminal width: %q", ansi.Strip(line))
+		}
+	}
+	current.height = 14
+	for cursor := range current.items {
+		current.cursor = cursor
+		screen := ansi.Strip(current.render())
+		if len(strings.Split(screen, "\n")) > current.height || !strings.Contains(screen, focusMark) {
+			t.Fatalf("wrapped descriptions lost cursor %d or exceeded screen:\n%s", cursor, screen)
+		}
+	}
+}
+
 func TestFormDrawsAMixedSectionAsAHeadingOverRows(t *testing.T) {
 	questions := []questionnaire.Question{
 		{
