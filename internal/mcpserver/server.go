@@ -1011,11 +1011,11 @@ func (s *Server) runTask(
 
 //nolint:lll // The schema help text is one string per field.
 type startTaskInput struct {
+	TaskTimeoutMS *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
 	ProjectPath   string   `json:"project_path" jsonschema:"workspace-relative; \".\" is the root; rel_path from list_projects"`
 	TaskID        string   `json:"task_id"`
 	Arguments     []string `json:"arguments,omitempty" jsonschema:"values"`
 	WriteScope    []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
-	TaskTimeoutMS *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
 }
 
 func (s *Server) startTask(
@@ -1277,12 +1277,12 @@ func (s *Server) shellCommandReceipt(
 }
 
 type startShellCommandInput struct {
+	TaskTimeoutMS    *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
 	Command          string   `json:"command,omitempty" jsonschema:"shell command; exclusive with block_id"`
 	BlockID          string   `json:"block_id,omitempty" jsonschema:"define_shell_block ID; exclusive with command"`
 	Arguments        []string `json:"arguments,omitempty" jsonschema:"full argv; starts with block argv"`
 	WorkingDirectory string   `json:"working_directory,omitempty" jsonschema:"directory; default ."`
 	WriteScope       []string `json:"write_scope,omitempty" jsonschema:"paths relative to worktree root"`
-	TaskTimeoutMS    *int64   `json:"task_timeout_ms,omitempty" jsonschema:"ms; omitted inherits server, 0 unlimited"`
 }
 
 func (s *Server) startShellCommand(
@@ -2308,7 +2308,7 @@ func (s *Server) runDetails(meta runstore.Meta, predicted *runstats.Stats) (*run
 	processAlive := !completed && runstore.ProcessMatches(meta.PID, meta.ProcessIdentity)
 	startedAt := meta.StartedAt
 	details := &runDetails{
-		Completed:       boolPointer(completed),
+		Completed:       new(completed),
 		WorktreeRoot:    meta.WorktreeRoot,
 		ProjectPath:     meta.ProjectPath,
 		Runner:          meta.Runner,
@@ -2319,12 +2319,12 @@ func (s *Server) runDetails(meta runstore.Meta, predicted *runstats.Stats) (*run
 		AIProfile:       meta.AIProfile,
 		PID:             meta.PID,
 		OwnerPID:        meta.OwnerPID,
-		ProcessAlive:    boolPointer(processAlive),
-		OwnedByThis:     boolPointer(owned),
+		ProcessAlive:    new(processAlive),
+		OwnedByThis:     new(owned),
 		StartedAt:       &startedAt,
 		LastOutputAt:    &lastOutput,
 		LastOutputAgeMS: age,
-		NoOutputYet:     boolPointer(logState.NoOutputYet),
+		NoOutputYet:     new(logState.NoOutputYet),
 		StdoutBytes:     logState.StdoutBytes,
 		StderrBytes:     logState.StderrBytes,
 		StdoutTruncated: meta.StdoutTruncated,
@@ -2482,8 +2482,6 @@ func maxDuration(value, minimum time.Duration) time.Duration {
 	}
 	return value
 }
-
-func boolPointer(value bool) *bool { return &value }
 
 func canonicalWorkingDirectory(value string) string {
 	if value == "" {

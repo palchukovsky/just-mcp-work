@@ -1151,8 +1151,7 @@ type preset struct {
 func (r *Runner) listPresets(ctx context.Context, projectDir string) ([]preset, error) {
 	version, err := queryCMakeVersion(ctx, r.binary, projectDir)
 	if err != nil {
-		var capabilitiesErr *unusableCMakeCapabilitiesError
-		if !errors.As(err, &capabilitiesErr) {
+		if _, ok := errors.AsType[*unusableCMakeCapabilitiesError](err); !ok {
 			return nil, fmt.Errorf("discover CMake preset support: %w", err)
 		}
 		commands := bestEffortPresetCommands(r.binary)
@@ -1221,8 +1220,7 @@ func queryCMakeVersion(
 				ctxErr,
 			)
 		}
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			details := strings.TrimSpace(string(exitErr.Stderr))
 			if details == "" {
 				return cmakeVersion{}, &unusableCMakeCapabilitiesError{
@@ -1416,8 +1414,7 @@ func (c presetCommand) list(ctx context.Context, projectDir string) ([]preset, e
 	cmd.Dir = projectDir
 	output, err := cmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			details := strings.TrimSpace(string(exitErr.Stderr))
 			if details == "" {
 				return nil, fmt.Errorf("CMake preset listing failed: %w", exitErr)

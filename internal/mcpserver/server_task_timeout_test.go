@@ -19,8 +19,8 @@ import (
 
 func TestRunToolsTaskTimeoutOverrides(t *testing.T) {
 	cases := []struct {
-		name      string
 		value     any
+		name      string
 		present   bool
 		unlimited bool
 		wantMS    int64
@@ -81,11 +81,11 @@ func TestRunToolsTaskTimeoutOverrides(t *testing.T) {
 func TestRunToolsTaskTimeoutExecution(t *testing.T) {
 	cases := []struct {
 		name      string
+		want      runstore.Status
 		serverMS  int64
 		value     int64
 		present   bool
 		unlimited bool
-		want      runstore.Status
 	}{
 		{name: "inherit", serverMS: 1, want: runstore.StatusTimeout},
 		{name: "shorten", serverMS: 5000, value: 1, present: true, want: runstore.StatusTimeout},

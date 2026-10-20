@@ -109,8 +109,7 @@ func (r *Runner) dump(ctx context.Context, projectDir string) (justDump, error) 
 	cmd.Dir = projectDir
 	output, err := cmd.Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			return justDump{}, fmt.Errorf("just dump: %s", strings.TrimSpace(string(exitErr.Stderr)))
 		}
 		return justDump{}, fmt.Errorf("start just dump: %w", runner.MarkMissingTool(r.binary, err))

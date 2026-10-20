@@ -232,7 +232,7 @@ func TestSyncShellStdoutJSON(t *testing.T) {
 			wantJSON:       `{"answer":42}`,
 			wantJSONSet:    true,
 			wantStdoutTail: `r":42}`,
-			tailBytes:      int64Pointer(6),
+			tailBytes:      new(int64(6)),
 		},
 		{
 			name:        "array",
@@ -585,10 +585,6 @@ func TestStreamTruncationFlagsReachSyncReceiptAndStatus(t *testing.T) {
 			t.Fatalf("%s JSON has false truncation flags: %s", name, encoded)
 		}
 	}
-}
-
-func int64Pointer(value int64) *int64 {
-	return &value
 }
 
 func TestSyncWaitBounds(t *testing.T) {

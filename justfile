@@ -3,8 +3,8 @@ set dotenv-path := ".github/ci-versions.env"
 set windows-shell := ["powershell.exe", "-NoLogo", "-Command"]
 
 repo_dir := justfile_directory()
-go_version := env_var_or_default("CI_GO", "1.25.11")
-golangci_lint_version := env_var_or_default("CI_GOLANGCI_LINT", "2.12.2")
+go_version := env_var_or_default("CI_GO", "1.27.2")
+golangci_lint_version := env_var_or_default("CI_GOLANGCI_LINT", "2.15.0")
 w64devkit_version := env_var("CI_W64DEVKIT")
 w64devkit_sha256 := env_var("CI_W64DEVKIT_SHA256")
 local_tool_dir := repo_dir / ".tmp" / "bin"

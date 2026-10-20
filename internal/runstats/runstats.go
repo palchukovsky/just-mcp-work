@@ -171,15 +171,15 @@ func aggregate(runs []runstore.Meta, matches func(runstore.Meta) bool) *Aggregat
 			continue
 		}
 		if durationCount == 0 {
-			result.LastDurationMS = int64Pointer(meta.DurationMS)
-			result.MinDurationMS = int64Pointer(meta.DurationMS)
-			result.MaxDurationMS = int64Pointer(meta.DurationMS)
+			result.LastDurationMS = new(meta.DurationMS)
+			result.MinDurationMS = new(meta.DurationMS)
+			result.MaxDurationMS = new(meta.DurationMS)
 		} else {
 			if meta.DurationMS < *result.MinDurationMS {
-				result.MinDurationMS = int64Pointer(meta.DurationMS)
+				result.MinDurationMS = new(meta.DurationMS)
 			}
 			if meta.DurationMS > *result.MaxDurationMS {
-				result.MaxDurationMS = int64Pointer(meta.DurationMS)
+				result.MaxDurationMS = new(meta.DurationMS)
 			}
 		}
 		durationCount++
@@ -190,10 +190,8 @@ func aggregate(runs []runstore.Meta, matches func(runstore.Meta) bool) *Aggregat
 	}
 	if durationCount > 0 {
 		average := durationSum / int64(durationCount)
-		result.AvgDurationMS = int64Pointer(average)
+		result.AvgDurationMS = new(average)
 	}
 	result.MeasuredRuns = durationCount
 	return result
 }
-
-func int64Pointer(value int64) *int64 { return &value }

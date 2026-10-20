@@ -431,8 +431,7 @@ func TestQueryCMakeVersionPreservesCancellation(t *testing.T) {
 		if !strings.Contains(queryErr.Error(), "query CMake capabilities") {
 			t.Fatalf("queryCMakeVersion error = %v, want query context", queryErr)
 		}
-		var exitErr *exec.ExitError
-		if errors.As(queryErr, &exitErr) {
+		if _, ok := errors.AsType[*exec.ExitError](queryErr); ok {
 			t.Fatalf("queryCMakeVersion error = %v, classified as process failure", queryErr)
 		}
 	case <-time.After(10 * time.Second):

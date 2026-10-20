@@ -477,8 +477,7 @@ func (r *Runner) listComposeNames(
 	argv := append(slices.Clone(base), "config", selector)
 	output, err := r.command(ctx, projectDir, argv...).Output()
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 			details := strings.TrimSpace(string(exitErr.Stderr))
 			if missingComposePlugin(details) {
 				return nil, fmt.Errorf(
