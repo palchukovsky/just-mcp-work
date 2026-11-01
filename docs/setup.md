@@ -12,7 +12,8 @@ guide. Every question below has a flag that answers it in a scripted run, and
 a later run can [keep the recorded answers](#keeping-recorded-answers) instead;
 `init --help` and `serve --help` list the agent targets and the server options.
 
-The default client selection is `claude,codex,cursor,antigravity,grok`.
+The default client selection is `claude,codex,cursor,antigravity`.
+Grok remains available when included explicitly in `--agents`.
 Grok Build uses `grok`, Antigravity CLI uses `agy`, and Cursor Agent uses
 `cursor-agent`, Cursor's compatibility alias. JMW does not use `agent` for Cursor
 because another vendor can install an executable with that name.
@@ -84,7 +85,7 @@ The machine target supports Claude Code (`~/.claude/CLAUDE.md`), Codex
 (`~/.codex/AGENTS.md`), Grok (`~/.grok/AGENTS.md`), Antigravity
 (`~/.gemini/GEMINI.md`), and Windsurf
 (`~/.codeium/windsurf/memories/global_rules.md`). The default `--agents
-claude,codex,cursor,antigravity,grok` is therefore not valid with `machine`:
+claude,codex,cursor,antigravity` is therefore not valid with `machine`:
 select only supported agents, for example `--agents claude,codex,antigravity,grok`.
 The CLI checks
 this immediately after the target is selected, before asking its later

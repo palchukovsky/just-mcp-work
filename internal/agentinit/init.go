@@ -626,7 +626,7 @@ func OfferShellPermission(scope string, agents []string) (ShellPermission, bool,
 
 // DefaultAgents returns the ordered client selection offered by init.
 func DefaultAgents() []string {
-	return []string{"claude", "codex", "cursor", "antigravity", "grok"}
+	return []string{"claude", "codex", "cursor", "antigravity"}
 }
 
 // SelectedAgents returns the agents Apply writes for: the named ones trimmed,

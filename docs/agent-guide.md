@@ -248,7 +248,8 @@ array of selections, followed by the directories discovery skips:
 }
 ```
 
-The default `init --agents` selection is `claude,codex,cursor,antigravity,grok`.
+The default `init --agents` selection is `claude,codex,cursor,antigravity`.
+Grok remains available through an explicit `--agents` selection.
 Grok instructions use `AGENT.md`, a filename Grok Build reads directly;
 Antigravity instructions use `GEMINI.md`. Cursor instructions use
 `.cursor/rules/just-mcp-work.mdc` with `alwaysApply: true`. Existing JMW-generated

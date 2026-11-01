@@ -3933,7 +3933,7 @@ func TestInitMachineTargetRejectsUnsupportedAgentsBeforeLaterQuestions(t *testin
 				t.Fatal("machine target with default agents error = nil")
 			}
 			for _, want := range []string{
-				"--agents \"claude,codex,cursor,antigravity,grok\"",
+				"--agents \"claude,codex,cursor,antigravity\"",
 				"cursor",
 				"--agents claude,codex,antigravity,windsurf,grok",
 			} {

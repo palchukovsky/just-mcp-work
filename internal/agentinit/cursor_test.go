@@ -13,6 +13,46 @@ import (
 	"testing"
 )
 
+func TestFreshInitDefaultsToCursorAndKeepsGrokExplicit(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		agents   []string
+		wantGrok bool
+	}{
+		{name: "defaults"},
+		{name: "explicit Grok", agents: []string{"cursor", "grok"}, wantGrok: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			options := nativeTestOptions(t, root, "cursor")
+			options.Agents = test.agents
+			if _, err := Apply(options); err != nil {
+				t.Fatal(err)
+			}
+			for _, path := range []string{
+				".cursor/rules/just-mcp-work.mdc",
+				".cursor/mcp.json",
+			} {
+				if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+					t.Fatalf("Cursor surface %s is missing: %v", path, err)
+				}
+			}
+			for _, path := range []string{"AGENT.md", ".grok/config.toml"} {
+				_, err := os.Stat(filepath.Join(root, path))
+				if test.wantGrok && err != nil {
+					t.Fatalf("explicit Grok surface %s is missing: %v", path, err)
+				}
+				if !test.wantGrok && !os.IsNotExist(err) {
+					t.Fatalf("default init created Grok surface %s: %v", path, err)
+				}
+			}
+			if _, err := VerifyManagedSurfaces(root); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestCursorMCPPreservesForeignJSONText(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, ".cursor", "mcp.json")
@@ -54,7 +94,7 @@ func TestCursorMCPStaysManagedWhenDeselectedAndRecovers(t *testing.T) {
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(root, ".cursor", "mcp.json")
+	path := resolvedTestPath(t, filepath.Join(root, ".cursor", "mcp.json"))
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +114,7 @@ func TestCursorMCPStaysManagedWhenDeselectedAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = VerifyManagedSurfaces(root); err == nil ||
-		!strings.Contains(err.Error(), ".cursor/mcp.json") {
+		!strings.Contains(err.Error(), path) {
 		t.Fatalf("deselected Cursor config escaped verification: %v", err)
 	}
 	options.Agents = []string{"cursor"}

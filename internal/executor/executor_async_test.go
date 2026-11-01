@@ -60,6 +60,7 @@ func TestStartObservesAndStopsWithoutARequestContext(t *testing.T) {
 	if final.Status != runstore.StatusCancelled || final.RunID != snapshot.RunID {
 		t.Fatalf("final snapshot = %#v, want cancelled", final)
 	}
+	firstStopError := run.Meta().Error
 	if stopErr := run.StopWithReason("second stop"); stopErr != nil {
 		t.Fatalf("repeated stop = %v, want nil", stopErr)
 	}
@@ -67,7 +68,9 @@ func TestStartObservesAndStopsWithoutARequestContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.Status != runstore.StatusCancelled || meta.Error != "stopped by test" {
+	stopReason, _, _ := strings.Cut(meta.Error, "\n")
+	if meta.Status != runstore.StatusCancelled || stopReason != "stopped by test" ||
+		meta.Error != firstStopError {
 		t.Fatalf("ledger entry = %#v, want the first stop reason", meta)
 	}
 	if runstore.ProcessMatches(meta.PID, meta.ProcessIdentity) {

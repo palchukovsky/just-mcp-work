@@ -10,7 +10,7 @@ import (
 )
 
 func TestDefaultAgentsReturnsIndependentOrderedSelections(t *testing.T) {
-	want := []string{"claude", "codex", "cursor", "antigravity", "grok"}
+	want := []string{"claude", "codex", "cursor", "antigravity"}
 	first := DefaultAgents()
 	if !slices.Equal(first, want) {
 		t.Fatalf("DefaultAgents() = %q, want %q", first, want)
@@ -38,7 +38,7 @@ func TestSelectedAgentsNormalizesOrDefaults(t *testing.T) {
 		agents []string
 		want   []string
 	}{
-		{name: "none named", agents: nil, want: []string{"antigravity", "claude", "codex", "cursor", "grok"}},
+		{name: "none named", agents: nil, want: []string{"antigravity", "claude", "codex", "cursor"}},
 		{
 			name:   "mixed case and duplicates",
 			agents: []string{" Codex", "claude", "CLAUDE"},
