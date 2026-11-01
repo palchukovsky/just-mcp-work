@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"github.com/palchukovsky/just-mcp-work/internal/policy"
 	"github.com/palchukovsky/just-mcp-work/internal/runner"
 	"github.com/palchukovsky/just-mcp-work/internal/workspace"
+	"go.yaml.in/yaml/v3"
 )
 
 const (
@@ -622,12 +624,17 @@ func OfferShellPermission(scope string, agents []string) (ShellPermission, bool,
 	return current, true, nil
 }
 
+// DefaultAgents returns the ordered client selection offered by init.
+func DefaultAgents() []string {
+	return []string{"claude", "codex", "cursor", "antigravity", "grok"}
+}
+
 // SelectedAgents returns the agents Apply writes for: the named ones trimmed,
 // lower-cased, deduplicated, and sorted, or the default clients when
 // none are named. A caller deciding what Apply will plan uses the same list.
 func SelectedAgents(agents []string) []string {
 	if len(agents) == 0 {
-		agents = []string{"claude", "codex", "cursor", "grok", "antigravity"}
+		agents = DefaultAgents()
 	}
 	return unique(agents)
 }
@@ -732,7 +739,7 @@ func planAgentInstructions(
 			if named.machinePath == "" {
 				return nil, nil, nil, fmt.Errorf(
 					"agent %q has no machine-wide instruction path; "+
-						"machine target supports claude, codex, grok, antigravity, and windsurf",
+						"machine target supports claude, codex, antigravity, windsurf, and grok",
 					named.name,
 				)
 			}
@@ -760,12 +767,7 @@ func planAgentInstructions(
 		if readErr != nil {
 			return nil, nil, nil, readErr
 		}
-		after, contentErr := managedContent(
-			before,
-			instructionTarget.header,
-			options.BetaTest,
-			options.PointerInstructions,
-		)
+		after, contentErr := agentInstructionContent(before, named, options)
 		if contentErr != nil {
 			return nil, nil, nil, fmt.Errorf("%s: %w", path, contentErr)
 		}
@@ -1731,11 +1733,6 @@ func agentTargets() []namedTarget {
 			machinePath: ".codex/AGENTS.md",
 		},
 		{
-			name:        "grok",
-			target:      target{path: "AGENT.md", header: "# Workspace instructions\n\n"},
-			machinePath: ".grok/AGENTS.md",
-		},
-		{
 			name:        "antigravity",
 			target:      target{path: "GEMINI.md", header: "# Workspace instructions\n\n"},
 			machinePath: ".gemini/GEMINI.md",
@@ -1743,8 +1740,9 @@ func agentTargets() []namedTarget {
 		{
 			name: "cursor",
 			target: target{
-				path:   ".cursor/rules/just-mcp-work.mdc",
-				header: "---\ndescription: Use workspace tasks through just-mcp-work\n---\n\n",
+				path: ".cursor/rules/just-mcp-work.mdc",
+				header: "---\ndescription: Use workspace tasks through just-mcp-work\n" +
+					"alwaysApply: true\n---\n\n",
 			},
 		},
 		{
@@ -1755,6 +1753,11 @@ func agentTargets() []namedTarget {
 			name:        "windsurf",
 			target:      target{path: ".windsurfrules", header: "# Workspace instructions\n\n"},
 			machinePath: ".codeium/windsurf/memories/global_rules.md",
+		},
+		{
+			name:        "grok",
+			target:      target{path: "AGENT.md", header: "# Workspace instructions\n\n"},
+			machinePath: ".grok/AGENTS.md",
 		},
 	}
 }
@@ -1782,6 +1785,60 @@ func canonicalBlock(betaTest bool, pointerInstructions bool) string {
 		block += "\n\n" + betaText
 	}
 	return block + "\n" + endMarker + "\n"
+}
+
+func agentInstructionContent(before []byte, named namedTarget, options Options) ([]byte, error) {
+	if named.name == "cursor" {
+		var err error
+		before, err = cursorRuleMetadata(before)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return managedContent(before, named.target.header, options.BetaTest, options.PointerInstructions)
+}
+
+func cursorRuleMetadata(before []byte) ([]byte, error) {
+	const requirement = "cursor rule requires top-level alwaysApply: true in its front matter"
+	if len(before) == 0 {
+		return before, nil
+	}
+	lineBreak := documentLineBreak(before)
+	legacy := withLineBreak(
+		"---\ndescription: Use workspace tasks through just-mcp-work\n---\n\n",
+		lineBreak,
+	)
+	text := string(before)
+	if strings.HasPrefix(text, legacy) {
+		header := strings.Replace(
+			legacy,
+			lineBreak+"---"+lineBreak,
+			lineBreak+"alwaysApply: true"+lineBreak+"---"+lineBreak,
+			1,
+		)
+		return []byte(header + text[len(legacy):]), nil
+	}
+	if strings.HasPrefix(text, "---"+lineBreak) {
+		metadata, _, found := strings.Cut(text[len("---"+lineBreak):], lineBreak+"---"+lineBreak)
+		if found {
+			decoder := yaml.NewDecoder(strings.NewReader("---" + lineBreak + metadata))
+			var fields map[string]any
+			if err := decoder.Decode(&fields); err != nil {
+				return nil, fmt.Errorf("%s: %w", requirement, err)
+			}
+			var extra any
+			if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", requirement, err)
+				}
+				return nil, fmt.Errorf("%s: expected a single YAML document", requirement)
+			}
+			if alwaysApply, ok := fields["alwaysApply"].(bool); ok && alwaysApply {
+				return before, nil
+			}
+		}
+	}
+	return nil, errors.New(requirement)
 }
 
 func managedContent(
@@ -2509,6 +2566,8 @@ func AIFamilyClients(family aiprofile.Family) (name string, clients string, foun
 		descriptions = append(descriptions, "Codex")
 	case aiprofile.FamilyAntigravity:
 		name = "Antigravity"
+	case aiprofile.FamilyCursor:
+		name = "Cursor"
 	default:
 		return "", "", false
 	}

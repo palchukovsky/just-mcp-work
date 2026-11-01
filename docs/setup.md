@@ -12,14 +12,25 @@ guide. Every question below has a flag that answers it in a scripted run, and
 a later run can [keep the recorded answers](#keeping-recorded-answers) instead;
 `init --help` and `serve --help` list the agent targets and the server options.
 
-The default client selection is `claude,codex,cursor,grok,antigravity`.
-Grok Build uses the `grok` executable; Antigravity CLI uses `agy`.
+The default client selection is `claude,codex,cursor,antigravity,grok`.
+Grok Build uses `grok`, Antigravity CLI uses `agy`, and Cursor Agent uses
+`cursor-agent`, Cursor's compatibility alias. JMW does not use `agent` for Cursor
+because another vendor can install an executable with that name.
+The `agent:cursor` task uses `--trust --force` for headless coding: it enables
+edits and commands without confirmation, subject to configured deny rules.
+The fixed task surface does not sandbox the agent; use `write_scope` to enforce
+JMW's outer write boundary on macOS.
 `init` writes Grok's instructions to its supported `AGENT.md` filename and
 Antigravity's instructions to `GEMINI.md`. Their native MCP configurations are
-`.grok/config.toml` and `.agents/mcp_config.json`. These configurations are
+`.grok/config.toml` and `.agents/mcp_config.json`. Cursor uses
+`.cursor/rules/just-mcp-work.mdc` with `alwaysApply: true`, and its native MCP
+configuration is `.cursor/mcp.json`. These configurations are
 managed only when their client is selected, follow `--write-mcp-config`, and
 preserve unrelated settings. Deselected clients keep their managed files,
 including manifest verification of their MCP entry.
+An existing rule with JMW's original generated header is upgraded to always
+apply. Custom front matter is preserved and must already contain a top-level
+`alwaysApply: true`; otherwise `init` refuses before writing.
 
 ## How `init` asks
 
@@ -73,8 +84,8 @@ The machine target supports Claude Code (`~/.claude/CLAUDE.md`), Codex
 (`~/.codex/AGENTS.md`), Grok (`~/.grok/AGENTS.md`), Antigravity
 (`~/.gemini/GEMINI.md`), and Windsurf
 (`~/.codeium/windsurf/memories/global_rules.md`). The default `--agents
-claude,codex,cursor,grok,antigravity` is therefore not valid with `machine`:
-select only supported agents, for example `--agents claude,codex,grok,antigravity`.
+claude,codex,cursor,antigravity,grok` is therefore not valid with `machine`:
+select only supported agents, for example `--agents claude,codex,antigravity,grok`.
 The CLI checks
 this immediately after the target is selected, before asking its later
 questions, and never silently drops an agent.
@@ -89,7 +100,7 @@ are absent or malformed. Machine files are outside the workspace: `serve`
 neither verifies nor repairs them, and notices only a release that would write
 a different block. In `--dry-run`, their diff contains only the managed block,
 never personal text around it. `.mcp.json`,
-`.codex/config.toml`, `.grok/config.toml`, `.agents/mcp_config.json`,
+`.codex/config.toml`, `.grok/config.toml`, `.agents/mcp_config.json`, `.cursor/mcp.json`,
 `.claude/settings.json`, `.just-mcp-work/`, and the runner policy remain at the
 workspace scope for every target.
 
@@ -135,10 +146,11 @@ its absolute path; without a verified guide, they contain the full reference.
 
 A file left holding nothing but JMW state is removed, which can happen to
 `.mcp.json`, `.codex/config.toml`, `.grok/config.toml`,
-`.agents/mcp_config.json`, and `.claude/settings.json`, except that a
+`.agents/mcp_config.json`, `.cursor/mcp.json`, and `.claude/settings.json`, except
+that a
 JMW-only `.mcp.json` scope anchor is kept as an empty object whenever deleting
 it would change the scope of an identical repeated `init`. For the Codex, Grok,
-Antigravity, and Claude configs, a safe in-workspace file symlink is retained
+Antigravity, Cursor, and Claude configs, a safe in-workspace file symlink is retained
 with its target as an empty configuration instead of deleting the target.
 Instruction files
 are never removed: an agent dropped from `--agents` keeps the block an earlier
@@ -226,13 +238,15 @@ below each family. These are client integration groups, not model providers:
 an editor's selected model does not change which configuration it reads.
 The answer names as many as the
 workspace needs, by number or by name, separated by commas or spaces.
-`codex`, `claude`, and `antigravity` are offered in a workspace that has none
+`codex`, `claude`, `antigravity`, and `cursor` are offered in a workspace that has
+none
 recorded. Each family is declared in its clients' configurations: `codex` in
 `.codex/config.toml`, `claude` in `.mcp.json` for Claude Code and
-`.grok/config.toml` for a selected Grok client, and `antigravity` in
-`.agents/mcp_config.json` for a selected Antigravity CLI client. There is no
+`.grok/config.toml` for a selected Grok client, `antigravity` in
+`.agents/mcp_config.json` for a selected Antigravity CLI client, and `cursor` in
+`.cursor/mcp.json` for a selected Cursor client. There is no
 separate Grok family. A configuration whose family was not
-selected declares none. Cursor, GitHub Copilot, and Windsurf have no family:
+selected declares none. GitHub Copilot and Windsurf have no family:
 `init` writes only their instruction files, not an MCP configuration. Later
 runs offer the families stored by the previous `init`; when the recorded ones
 are not recognized, as after an upgrade
@@ -240,12 +254,13 @@ from a release that stored a single family, `init` says so and asks again.
 Until that `init` rewrites the manifest, `serve` refuses to start on it. Pass
 `--ai claude,antigravity`, for example, to answer the question without a prompt.
 The selection is recorded in the managed manifest. Generated arguments always
-include `serve --root <dir>` and add `--ai codex|claude|antigravity` when that
+include `serve --root <dir>` and add `--ai codex|claude|antigravity|cursor` when
+that
 configuration's family is declared. The profile is caller-declared presentation
 and provenance; it does not change runner modes, task visibility, shell permission,
 or write access.
 
-If changing the families would change a recorded Grok or Antigravity MCP
+If changing the families would change a recorded Cursor, Grok, or Antigravity MCP
 entry outside the current `--agents` selection, `init` refuses before writing
 and names the client selection needed to update it. Rerun with that selection
 to keep the native configuration and its manifest consistent.

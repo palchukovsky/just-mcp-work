@@ -23,12 +23,13 @@ const (
 	FamilyCodex       Family = "codex"
 	FamilyClaude      Family = "claude"
 	FamilyAntigravity Family = "antigravity"
+	FamilyCursor      Family = "cursor"
 )
 
 // Declarable lists the families an operator can declare, in the order they are
 // offered and stored.
 func Declarable() []Family {
-	return []Family{FamilyCodex, FamilyClaude, FamilyAntigravity}
+	return []Family{FamilyCodex, FamilyClaude, FamilyAntigravity, FamilyCursor}
 }
 
 // Profile is caller-declared presentation provenance, not an authenticated

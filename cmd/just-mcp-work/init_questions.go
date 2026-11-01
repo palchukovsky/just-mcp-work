@@ -342,11 +342,11 @@ func aiFamiliesQuestion(scope string) (questionnaire.Question, error) {
 		Context: []string{
 			"A family describes the client integration, not the language model selected in an editor.",
 			"Each family is declared in its clients' MCP configurations. Grok uses the Claude family.",
-			"--agents selects the instruction files and native Grok/Antigravity configurations; " +
+			"--agents selects the instruction files and native Cursor/Grok/Antigravity configurations; " +
 				"selecting a family adds its profile to those configurations.",
 			"A family only changes how the server introduces itself to the agent; it " +
 				"grants no access.",
-			"JMW writes no MCP server configuration for Cursor, GitHub Copilot, or " +
+			"JMW writes no MCP server configuration for GitHub Copilot or " +
 				"Windsurf, so no family applies to them; --agents chooses their " +
 				"instruction files.",
 		},

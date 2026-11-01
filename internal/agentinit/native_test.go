@@ -81,6 +81,7 @@ func TestNativeClientProfilesFollowFamilySelection(t *testing.T) {
 	}{
 		{agent: "grok", path: ".grok/config.toml", family: aiprofile.FamilyClaude},
 		{agent: "antigravity", path: ".agents/mcp_config.json", family: aiprofile.FamilyAntigravity},
+		{agent: "cursor", path: ".cursor/mcp.json", family: aiprofile.FamilyCursor},
 	} {
 		for _, family := range aiprofile.Declarable() {
 			t.Run(client.agent+"/"+string(family), func(t *testing.T) {
@@ -300,7 +301,7 @@ func assertNativeConfigCleaned(t *testing.T, agent, path string) {
 	if err != nil || bytes.Contains(after, []byte(serverName)) {
 		t.Fatalf("cleanup lost symlink target or kept JMW entry: %q, %v", after, err)
 	}
-	if agent == "antigravity" && !json.Valid(after) {
+	if agent != "grok" && !json.Valid(after) {
 		t.Fatalf("cleanup left invalid Antigravity JSON: %q", after)
 	}
 }

@@ -186,7 +186,7 @@ nothing explains itself without a second call.
   arguments; only `go:any` forwards argv.
 - **`agent`** - `agent:codex` launches `codex exec`; `agent:claude` launches
   `claude -p`; `agent:grok` launches Grok Build (`grok --single`);
-  `agent:antigravity` launches Antigravity CLI (`agy --print`). All take
+  `agent:antigravity` launches Antigravity CLI (`agy --print`). These tasks take
   positional `prompt`, `model`, and `effort`: `prompt`
   is required and non-blank, and an empty `model` or `effort` slot omits its
   flag. Codex renders `-m <model>` and `-c model_reasoning_effort=<effort>`;
@@ -197,11 +197,22 @@ nothing explains itself without a second call.
   or `max`. Grok uses `--model` and `--reasoning-effort`, accepting `low`,
   `medium`, `high`, or `xhigh`. Antigravity uses `--model` and `--effort`,
   accepting `low`, `medium`, `high`, `xhigh`, or `max`.
-  Codex and Claude place prompts after `--`; Grok and Antigravity bind prompts
+  `agent:cursor` launches Cursor Agent through the `cursor-agent` compatibility
+  alias with `--print --output-format text --trust --force`, a required `prompt`,
+  and an optional `model` rendered as `--model <model>`. Cursor has no effort parameter.
+  The trust flag acknowledges this checkout. The force flag enables file edits
+  and command execution without confirmation while retaining configured deny
+  rules. The fixed `safe` task surface does not sandbox the agent: unrestricted
+  runs act with the operator's access, and scoped runs retain JMW's outer write
+  boundary. JMW does not resolve Cursor through the ambiguous `agent` executable.
+  Codex, Claude, and Cursor place prompts after `--`; Grok and Antigravity bind
+  prompts
   to `--single=<prompt>` and `--print=<prompt>`, preserving flag-shaped text.
   Tasks appear only for binaries found in `PATH`; listing never executes them.
   Agent runs have an empty `runner_version` because one runner covers several
-  binaries. Agents retain their own tool permissions; JMW adds no auto-approval.
+  binaries. Other coding agents retain their configured tool permissions;
+  Cursor's fixed `--force` behavior is the exception described above.
+  JMW does not automatically approve MCP servers.
 
 Two task fields are worth reading before invoking anything:
 
@@ -237,28 +248,37 @@ array of selections, followed by the directories discovery skips:
 }
 ```
 
-The default `init --agents` selection is `claude,codex,cursor,grok,antigravity`.
+The default `init --agents` selection is `claude,codex,cursor,antigravity,grok`.
 Grok instructions use `AGENT.md`, a filename Grok Build reads directly;
-Antigravity instructions use `GEMINI.md`. Selecting either client also manages
+Antigravity instructions use `GEMINI.md`. Cursor instructions use
+`.cursor/rules/just-mcp-work.mdc` with `alwaysApply: true`. Existing JMW-generated
+legacy headers are upgraded; custom front matter is preserved and must already
+declare top-level `alwaysApply: true`, or `init` refuses before writing.
+Selecting any of these clients also manages
 its native MCP configuration: `.grok/config.toml` for Grok and
-`.agents/mcp_config.json` for Antigravity. These files use the existing
+`.agents/mcp_config.json` for Antigravity, and `.cursor/mcp.json` for Cursor.
+These files use the existing
 `--write-mcp-config` choice, preserve unrelated entries, and are checked by the
 managed manifest. A deselected client's configuration is preserved and remains
 verified. Grok uses the `claude` presentation family; Antigravity CLI uses
-`antigravity`. Client selection remains separate from family selection.
+`antigravity`; Cursor uses `cursor`. Client selection remains separate from
+family selection.
 
 During `init`, the operator selects any number of the declarable families,
-`codex`, `claude`, and `antigravity`; all are offered in a workspace with no
+`codex`, `claude`, `antigravity`, and `cursor`; all are offered in a workspace
+with no
 managed manifest. The form lists client names below each family, without
 configuration paths. These are client integration groups, not model providers.
 Each selected family is declared in its clients' configurations:
 `codex` in `.codex/config.toml`, `claude` in `.mcp.json` and the selected Grok
 client's `.grok/config.toml`, and `antigravity` in the selected Antigravity
-client's `.agents/mcp_config.json`. Later runs offer the
+client's `.agents/mcp_config.json`, and `cursor` in the selected Cursor client's
+`.cursor/mcp.json`. Later runs offer the
 families in the managed manifest and ask again, as in a new workspace, when the
 recorded ones are not recognized. Pass `init --ai claude,antigravity`, for
 example, to answer the question non-interactively. Managed server arguments
-always include `serve --root <dir>`, add `--ai codex|claude|antigravity` when that
+always include `serve --root <dir>`, add `--ai codex|claude|antigravity|cursor`
+when that
 configuration's family is declared, and omit `--ai` otherwise. They carry no
 runner selection. The AI family is caller-declared provenance, not
 authenticated identity, and selects an instruction/profile presentation only.
@@ -506,7 +526,10 @@ recorded. For an accepted scope, JMW adds the process temporary directory
 (`TMPDIR` when set, otherwise `/tmp`) and the corresponding agent state
 directory: `CODEX_HOME` or `~/.codex` for `agent:codex`,
 `CLAUDE_CONFIG_DIR` or `~/.claude` for `agent:claude`, `GROK_HOME` or `~/.grok`
-for `agent:grok`, and `~/.gemini` for `agent:antigravity`. A temporary or agent
+for `agent:grok`, `~/.gemini` for `agent:antigravity`, and `CURSOR_CONFIG_DIR` or
+`~/.cursor` for `agent:cursor`. On Linux/BSD, Cursor uses `$XDG_CONFIG_HOME/cursor`
+when `XDG_CONFIG_HOME` is set and `CURSOR_CONFIG_DIR` is absent. A temporary or
+agent
 state path whose final component is a symbolic link is refused as `spawn_error`.
 The scope is also refused if either added path contains or equals a declared
 path. The receipt's effective `write_scope` has symlinks resolved and contained
@@ -514,7 +537,9 @@ paths folded, and is exactly the list enforced by the OS.
 
 Scoped Grok runs set `--sandbox off` so its nested sandbox does not conflict
 with JMW's outer write boundary, just as scoped Codex runs disable its nested
-sandbox. Antigravity retains its configured terminal sandbox setting.
+sandbox. Scoped Cursor runs use `--sandbox disabled` inside the same outer
+boundary; unrestricted runs preserve Cursor's configured sandbox setting.
+Antigravity retains its configured terminal sandbox setting.
 
 Enforcement is macOS-only. An out-of-scope write fails when attempted. On
 another OS, or when `/usr/bin/sandbox-exec` is unavailable, the launch is
@@ -823,7 +848,7 @@ The operator sets these; an agent cannot change them at runtime.
 | Flag | Environment | Default | Effect |
 | --- | --- | --- | --- |
 | `--root` | `JMW_ROOT` | cwd | Workspace scope. |
-| `--ai` | - | None | Family: `codex`, `claude`, or `antigravity`. |
+| `--ai` | - | None | Family: `codex`, `claude`, `antigravity`, or `cursor`. |
 | `--timeout` | `JMW_TIMEOUT` | `15m` | Default timeout; `0` disables it. |
 | `--sync-deadline` | `JMW_SYNC_DEADLINE` | `1m` | Default synchronous wait. |
 | `--retention` | `JMW_RETENTION` | `72h` | Run-log retention. |

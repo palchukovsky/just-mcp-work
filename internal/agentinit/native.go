@@ -21,11 +21,11 @@ type nativeMCPConfig struct {
 func nativeMCPConfigs() []nativeMCPConfig {
 	return []nativeMCPConfig{
 		{
-			agent:  "grok",
-			name:   "Grok",
-			path:   ".grok/config.toml",
-			kind:   manifestKindGrokConfig,
-			family: aiprofile.FamilyClaude,
+			agent:  "cursor",
+			name:   "Cursor",
+			path:   ".cursor/mcp.json",
+			kind:   manifestKindCursorConfig,
+			family: aiprofile.FamilyCursor,
 		},
 		{
 			agent:  "antigravity",
@@ -33,6 +33,13 @@ func nativeMCPConfigs() []nativeMCPConfig {
 			path:   ".agents/mcp_config.json",
 			kind:   manifestKindAntigravityConfig,
 			family: aiprofile.FamilyAntigravity,
+		},
+		{
+			agent:  "grok",
+			name:   "Grok",
+			path:   ".grok/config.toml",
+			kind:   manifestKindGrokConfig,
+			family: aiprofile.FamilyClaude,
 		},
 	}
 }
@@ -45,7 +52,7 @@ func (config nativeMCPConfig) merge(
 	switch config.agent {
 	case "grok":
 		return mergeTOMLMCPConfig(before, root, profile, nil)
-	case "antigravity":
+	case "antigravity", "cursor":
 		return mergeMCPConfig(before, root, profile)
 	default:
 		return nil, fmt.Errorf("unsupported native MCP client %q", config.agent)
@@ -56,7 +63,7 @@ func (config nativeMCPConfig) remove(before []byte) ([]byte, bool, error) {
 	switch config.agent {
 	case "grok":
 		return removeCodexConfig(before)
-	case "antigravity":
+	case "antigravity", "cursor":
 		after, remove, err := removeMCPConfig(before)
 		if remove {
 			after = emptyJSONObject(after)

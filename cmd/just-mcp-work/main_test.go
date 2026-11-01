@@ -612,8 +612,9 @@ func TestInitOffersAllAIFamiliesByDefault(t *testing.T) {
 		"  1) codex (default) - Codex: Codex",
 		"  2) claude (default) - Claude: Claude Code, Grok",
 		"  3) antigravity (default) - Antigravity: Antigravity CLI",
-		"JMW writes no MCP server configuration for Cursor, GitHub Copilot, or Windsurf",
-		"AI families [codex,claude,antigravity, default]:",
+		"  4) cursor (default) - Cursor: Cursor",
+		"JMW writes no MCP server configuration for GitHub Copilot or Windsurf",
+		"AI families [codex,claude,antigravity,cursor, default]:",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
 			t.Fatalf("AI family prompt lacks %q:\n%s", want, diagnostics.String())
@@ -631,7 +632,7 @@ func TestInitOffersAllAIFamiliesByDefault(t *testing.T) {
 	}
 	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
 		families,
-		[]string{"codex", "claude", "antigravity"},
+		[]string{"codex", "claude", "antigravity", "cursor"},
 	) {
 		t.Fatalf("default answer recorded AI families = %#v, want all families", families)
 	}
@@ -743,7 +744,7 @@ func TestInitRepeatsAIFamilyQuestionUntilTheAnswerIsUsable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
-		`Unsupported AI family "9"; choose any of codex, claude, antigravity.`,
+		`Unsupported AI family "9"; choose any of codex, claude, antigravity, cursor.`,
 		`"codex" is named twice.`,
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
@@ -811,7 +812,7 @@ func TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized(t *testin
 		"The AI families recorded by an earlier init cannot be used; choose them again:",
 		manifestPath,
 		"no AI families are recorded",
-		"AI families [codex,claude,antigravity, default]:",
+		"AI families [codex,claude,antigravity,cursor, default]:",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {
 			t.Fatalf("unrecognized AI families prompt lacks %q:\n%s", want, diagnostics.String())
@@ -819,7 +820,7 @@ func TestInitChoosesAIFamiliesAgainWhenTheRecordedOnesAreNotRecognized(t *testin
 	}
 	if families := initRecordedAIFamilies(t, dir); !slices.Equal(
 		families,
-		[]string{"codex", "claude", "antigravity"},
+		[]string{"codex", "claude", "antigravity", "cursor"},
 	) {
 		t.Fatalf("re-chosen AI families = %#v, want all families", families)
 	}
@@ -2669,7 +2670,7 @@ func TestParseServeOptionsSelectsAIProfile(t *testing.T) {
 	if err != nil || options.AIProfile.Declared() {
 		t.Fatalf("default AI profile = %#v, %v, want none", options.AIProfile, err)
 	}
-	for _, family := range []string{"codex", "claude", "antigravity"} {
+	for _, family := range []string{"codex", "claude", "antigravity", "cursor"} {
 		options, _, err = parseServeOptions([]string{"--ai", family})
 		if err != nil || string(options.AIProfile.Family) != family {
 			t.Fatalf("--ai %s profile = %#v, %v", family, options.AIProfile, err)
@@ -3932,9 +3933,9 @@ func TestInitMachineTargetRejectsUnsupportedAgentsBeforeLaterQuestions(t *testin
 				t.Fatal("machine target with default agents error = nil")
 			}
 			for _, want := range []string{
-				"--agents \"claude,codex,cursor,grok,antigravity\"",
+				"--agents \"claude,codex,cursor,antigravity,grok\"",
 				"cursor",
-				"--agents claude,codex,grok,antigravity,windsurf",
+				"--agents claude,codex,antigravity,windsurf,grok",
 			} {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("early machine-agent error does not contain %q: %v", want, err)

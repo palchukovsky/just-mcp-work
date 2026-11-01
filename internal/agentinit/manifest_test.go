@@ -93,6 +93,7 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 		{path: ".windsurfrules", kind: manifestKindAgentInstructions},
 		{path: mcpConfig, kind: manifestKindMCPConfig},
 		{path: codexConfig, kind: manifestKindCodexConfig},
+		{path: ".cursor/mcp.json", kind: manifestKindCursorConfig},
 		{path: claudeSettings, kind: manifestKindClaudeSettings},
 		{path: guideFile, kind: manifestKindAgentGuide},
 	}
@@ -209,6 +210,7 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 		{path: mcpConfig, kind: manifestKindMCPConfig},
 		{path: codexConfig, kind: manifestKindCodexConfig},
 		{path: guideFile, kind: manifestKindAgentGuide},
+		{path: ".cursor/mcp.json", kind: manifestKindCursorConfig},
 		{path: "CLAUDE.md", kind: manifestKindAgentInstructions},
 		{path: ".cursor/rules/just-mcp-work.mdc", kind: manifestKindAgentInstructions},
 		{path: ".github/copilot-instructions.md", kind: manifestKindAgentInstructions},
@@ -1078,7 +1080,7 @@ func expectedSurfaceHash(t *testing.T, dir string, surface manifestSurface) stri
 		fragment = data
 	case manifestKindCodexConfig:
 		fragment = blockFragmentForTest(t, data, codexBlockRange)
-	case manifestKindMCPConfig:
+	case manifestKindMCPConfig, manifestKindCursorConfig:
 		var document struct {
 			MCPServers map[string]json.RawMessage `json:"mcpServers"`
 		}

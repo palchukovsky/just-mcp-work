@@ -33,6 +33,7 @@ const (
 	manifestKindClaudeSettings    = "claude-settings"
 	manifestKindGrokConfig        = "grok-config"
 	manifestKindAntigravityConfig = "antigravity-config"
+	manifestKindCursorConfig      = "cursor-config"
 )
 
 //nolint:govet // Keep manifest metadata before surfaces in the stable JSON document.
@@ -1238,7 +1239,7 @@ func generatedManifestSurface(
 			recorded.Kind,
 			[]byte(promptText+"\n"),
 		), nil
-	case manifestKindGrokConfig, manifestKindAntigravityConfig:
+	case manifestKindGrokConfig, manifestKindAntigravityConfig, manifestKindCursorConfig:
 		return generatedNativeMCPSurface(recorded.Kind, root, families)
 	case manifestKindCodexConfig:
 		content, err := mergeCodexConfig(
@@ -1308,7 +1309,7 @@ func manifestSurfaceFromContent(
 		fragment, found = content, true
 	case manifestKindCodexConfig, manifestKindGrokConfig:
 		fragment, found, err = managedBlockFragment(content, codexBlockRange)
-	case manifestKindMCPConfig, manifestKindAntigravityConfig:
+	case manifestKindMCPConfig, manifestKindAntigravityConfig, manifestKindCursorConfig:
 		fragment, found, err = mcpManagedFragment(content)
 	case manifestKindClaudeSettings:
 		fragment, found, err = claudeManagedFragment(content)

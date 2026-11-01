@@ -391,7 +391,7 @@ func resolveWorkspaceState(
 func runnerCatalog() (*runner.Catalog, error) {
 	catalog, err := runner.NewCatalog(
 		justrunner.Registration(""),
-		agentrunner.Registration("", "", "", ""),
+		agentrunner.Registration("", "", "", "", ""),
 		cmakerunner.Registration(""),
 		dockerrunner.Registration(""),
 		gorunner.Registration(""),
@@ -516,7 +516,7 @@ func validateInstructionsAgents(
 	var unsupported []string
 	for _, agent := range splitCSV(agentsValue) {
 		switch agent {
-		case "claude", "codex", "grok", "antigravity", "windsurf":
+		case "claude", "codex", "antigravity", "windsurf", "grok":
 		default:
 			unsupported = append(unsupported, agent)
 		}
@@ -527,7 +527,7 @@ func validateInstructionsAgents(
 	return fmt.Errorf(
 		"instructions target machine cannot be used with --agents %q: selected agents "+
 			"without a machine-wide instruction path: %s; re-run with "+
-			"--agents claude,codex,grok,antigravity,windsurf",
+			"--agents claude,codex,antigravity,windsurf,grok",
 		agentsValue,
 		strings.Join(unsupported, ","),
 	)
@@ -545,8 +545,8 @@ func initCommandWithIO(
 	dir := flags.String("dir", ".", "workspace directory")
 	agents := flags.String(
 		"agents",
-		"claude,codex,cursor,grok,antigravity",
-		"comma-separated agent targets: claude,codex,cursor,grok,antigravity,copilot,windsurf",
+		strings.Join(agentinit.DefaultAgents(), ","),
+		"comma-separated agent targets: claude,codex,cursor,antigravity,copilot,windsurf,grok",
 	)
 	dryRun := flags.Bool("dry-run", false, "print planned diffs without writing files")
 	keepRecorded := flags.Bool(

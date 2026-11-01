@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -50,11 +51,29 @@ type Runner struct {
 
 // Registration returns the reviewed registration for CLI coding agents.
 // Empty binary values use the respective default command names.
-func Registration(codexBinary, claudeBinary, grokBinary, antigravityBinary string) runner.Registration {
-	return registration(taskSpecs(codexBinary, claudeBinary, grokBinary, antigravityBinary))
+func Registration(
+	codexBinary string,
+	claudeBinary string,
+	grokBinary string,
+	antigravityBinary string,
+	cursorBinary string,
+) runner.Registration {
+	return registration(taskSpecs(
+		codexBinary,
+		claudeBinary,
+		grokBinary,
+		antigravityBinary,
+		cursorBinary,
+	))
 }
 
-func taskSpecs(codexBinary, claudeBinary, grokBinary, antigravityBinary string) []taskSpec {
+func taskSpecs(
+	codexBinary string,
+	claudeBinary string,
+	grokBinary string,
+	antigravityBinary string,
+	cursorBinary string,
+) []taskSpec {
 	if codexBinary == "" {
 		codexBinary = "codex"
 	}
@@ -66,6 +85,9 @@ func taskSpecs(codexBinary, claudeBinary, grokBinary, antigravityBinary string) 
 	}
 	if antigravityBinary == "" {
 		antigravityBinary = "agy"
+	}
+	if cursorBinary == "" {
+		cursorBinary = "cursor-agent"
 	}
 	empty := ""
 	// These are CLI-wide vocabularies; individual models may support fewer levels.
@@ -102,6 +124,58 @@ func taskSpecs(codexBinary, claudeBinary, grokBinary, antigravityBinary string) 
 			},
 		},
 		{
+			id:          "antigravity",
+			binary:      antigravityBinary,
+			stateDir:    ".gemini",
+			name:        "antigravity",
+			description: "Run Antigravity CLI (agy) with a prompt in this checkout.",
+			argv:        []string{"--output-format", "text"},
+			params: []taskParam{
+				{
+					Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"},
+					argv:  []string{"--print=<prompt>"},
+				},
+				{
+					Param: runner.Param{
+						Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model",
+					},
+					argv: []string{"--model", "<model>"},
+				},
+				{
+					Param: runner.Param{
+						Name:    "effort",
+						Kind:    runner.ParamSingular,
+						Default: &empty,
+						Doc:     "optional reasoning effort",
+					},
+					argv:          []string{"--effort", "<effort>"},
+					allowedValues: claudeEfforts,
+				},
+			},
+		},
+		{
+			id:               "cursor",
+			binary:           cursorBinary,
+			stateDir:         ".cursor",
+			stateDirEnv:      "CURSOR_CONFIG_DIR",
+			name:             "cursor",
+			description:      "Run Cursor Agent with a prompt in this checkout.",
+			argv:             []string{"--print", "--output-format", "text", "--trust", "--force"},
+			scopedArgvPrefix: []string{"--sandbox", "disabled"},
+			params: []taskParam{
+				{
+					Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"},
+					argv:  []string{"--", "<prompt>"},
+				},
+				{
+					Param: runner.Param{
+						Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model",
+					},
+					argv: []string{"--model", "<model>"},
+				},
+			},
+		},
+		{
 			id:               "grok",
 			binary:           grokBinary,
 			stateDir:         ".grok",
@@ -133,49 +207,21 @@ func taskSpecs(codexBinary, claudeBinary, grokBinary, antigravityBinary string) 
 				},
 			},
 		},
-		{
-			id:          "antigravity",
-			binary:      antigravityBinary,
-			stateDir:    ".gemini",
-			name:        "antigravity",
-			description: "Run Antigravity CLI (agy) with a prompt in this checkout.",
-			argv:        []string{"--output-format", "text"},
-			params: []taskParam{
-				{
-					Param: runner.Param{Name: "prompt", Kind: runner.ParamSingular, Doc: "task prompt"},
-					argv:  []string{"--print=<prompt>"},
-				},
-				{
-					Param: runner.Param{
-						Name: "model", Kind: runner.ParamSingular, Default: &empty, Doc: "optional model",
-					},
-					argv: []string{"--model", "<model>"},
-				},
-				{
-					Param: runner.Param{
-						Name:    "effort",
-						Kind:    runner.ParamSingular,
-						Default: &empty,
-						Doc:     "optional reasoning effort",
-					},
-					argv:          []string{"--effort", "<effort>"},
-					allowedValues: claudeEfforts,
-				},
-			},
-		},
 	}
 }
 
 func registration(specs []taskSpec) runner.Registration {
 	permissions := runner.ReviewedPermissions(
 		"AI agent",
-		"Launches Codex, Claude Code, Grok Build, or Antigravity CLI with a prompt.",
+		"Launches Codex, Claude Code, Antigravity CLI, Cursor Agent, or Grok Build with a prompt.",
 		runner.ModeSafe,
 		runner.PermissionChoice{
 			Mode:        runner.ModeSafe,
 			Label:       "Enabled (safe default)",
 			Description: "Expose only the fixed coding-agent prompt tasks; no extra CLI flags are accepted.",
-			Warning:     "The launched coding agent can act with your permissions in this checkout; JMW does not sandbox it.",
+			Warning: "The launched coding agent can act with your permissions in this checkout; " +
+				"JMW does not sandbox it. Cursor uses --trust --force to apply edits and " +
+				"commands without confirmation; Cursor deny rules and JMW write_scope still apply.",
 		},
 		runner.PermissionChoice{
 			Mode:        runner.ModeDisabled,
@@ -284,6 +330,14 @@ func (r *Runner) TaskWriteScope(task runner.Task) ([]string, error) {
 	}
 	if override := os.Getenv(spec.stateDirEnv); override != "" {
 		return []string{override}, nil
+	}
+	if spec.id == "cursor" {
+		switch runtime.GOOS {
+		case "linux", "freebsd", "openbsd", "netbsd", "dragonfly":
+			if configHome := os.Getenv("XDG_CONFIG_HOME"); configHome != "" {
+				return []string{filepath.Join(configHome, "cursor")}, nil
+			}
+		}
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {

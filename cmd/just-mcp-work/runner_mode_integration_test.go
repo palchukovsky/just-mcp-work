@@ -284,6 +284,48 @@ func TestServeRetiredRunnerModeNamesThePolicyAtTheScope(t *testing.T) {
 	}
 }
 
+func TestInitCursorNativeConfigStaysAtWorkspaceScope(t *testing.T) {
+	for _, target := range []string{"workspace", "project"} {
+		t.Run(target, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			project := filepath.Join(root, "project")
+			if err = os.Mkdir(project, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(root, ".mcp.json"), []byte("{}\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			args := append(initArgsWithRunnerModesWithoutAI(project),
+				"--agents", "cursor", "--ai", "cursor", "--shell-permission", "ask",
+				"--write-mcp-config=true", "--instructions-target", target)
+			if err = initWithBetaTest(false, args, strings.NewReader(""),
+				io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"serve", "--root", root, "--ai", "cursor"}
+			got := readJSONManagedServeArgs(t, filepath.Join(root, ".cursor", "mcp.json"))
+			if !slices.Equal(got, want) {
+				t.Fatalf("Cursor managed args = %q, want %q", got, want)
+			}
+			instructionRoot := root
+			if target == "project" {
+				instructionRoot = project
+			}
+			path := filepath.Join(instructionRoot, ".cursor", "rules", "just-mcp-work.mdc")
+			data, err := os.ReadFile(path)
+			if err != nil || !strings.Contains(string(data), "\nalwaysApply: true\n") {
+				t.Fatalf("Cursor rule = %q, %v", data, err)
+			}
+			if _, err = os.Stat(filepath.Join(project, ".cursor", "mcp.json")); !os.IsNotExist(err) {
+				t.Fatalf("Cursor native config escaped workspace scope: %v", err)
+			}
+		})
+	}
+}
+
 func readJSONManagedServeArgs(t *testing.T, path string) []string {
 	t.Helper()
 	// #nosec G304 -- path is created in this test's temporary directory.

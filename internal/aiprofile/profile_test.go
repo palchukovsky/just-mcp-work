@@ -19,6 +19,7 @@ func TestParseAcceptsOnlyDeclaredFamilies(t *testing.T) {
 		{name: "codex", value: "codex", want: profile(FamilyCodex)},
 		{name: "claude", value: "claude", want: profile(FamilyClaude)},
 		{name: "antigravity", value: "antigravity", want: profile(FamilyAntigravity)},
+		{name: "cursor", value: "cursor", want: profile(FamilyCursor)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			got, err := Parse(test.value)

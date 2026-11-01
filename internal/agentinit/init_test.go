@@ -733,7 +733,7 @@ func TestApplyBetaTestPreservesOperatorTextOutsideManagedBlocks(t *testing.T) {
 		{
 			agent:  "cursor",
 			path:   ".cursor/rules/just-mcp-work.mdc",
-			header: "---\ndescription: Use workspace tasks through just-mcp-work\n---\n\n",
+			header: "---\ndescription: Use workspace tasks through just-mcp-work\nalwaysApply: true\n---\n\n",
 		},
 	}
 	want := make(map[string][]byte, len(targets))
@@ -5771,7 +5771,7 @@ func TestApplyMachineRefusesAgentsWithoutMachinePath(t *testing.T) {
 				[]string{agent},
 			))
 			if err == nil || !strings.Contains(err.Error(), agent) ||
-				!strings.Contains(err.Error(), "claude, codex, grok, antigravity, and windsurf") {
+				!strings.Contains(err.Error(), "claude, codex, antigravity, windsurf, and grok") {
 				t.Fatalf("machine %s error = %v", agent, err)
 			}
 		})

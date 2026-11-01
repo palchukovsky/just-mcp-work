@@ -9,6 +9,29 @@ import (
 	"testing"
 )
 
+func TestDefaultAgentsReturnsIndependentOrderedSelections(t *testing.T) {
+	want := []string{"claude", "codex", "cursor", "antigravity", "grok"}
+	first := DefaultAgents()
+	if !slices.Equal(first, want) {
+		t.Fatalf("DefaultAgents() = %q, want %q", first, want)
+	}
+	first[0] = "modified"
+	if next := DefaultAgents(); !slices.Equal(next, want) {
+		t.Fatalf("changing returned defaults changed the next selection: %q", next)
+	}
+}
+
+func TestClientCatalogsKeepGrokLast(t *testing.T) {
+	targets := agentTargets()
+	if last := targets[len(targets)-1].name; last != "grok" {
+		t.Fatalf("last instruction client = %q, want grok", last)
+	}
+	configs := nativeMCPConfigs()
+	if last := configs[len(configs)-1].agent; last != "grok" {
+		t.Fatalf("last native MCP client = %q, want grok", last)
+	}
+}
+
 func TestSelectedAgentsNormalizesOrDefaults(t *testing.T) {
 	for _, testCase := range []struct {
 		name   string

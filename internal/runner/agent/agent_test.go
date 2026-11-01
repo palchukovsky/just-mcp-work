@@ -18,7 +18,7 @@ import (
 )
 
 func TestRegistrationDeclaresExactReviewedPermissionPrompt(t *testing.T) {
-	catalog, err := runner.NewCatalog(Registration("", "", "", ""))
+	catalog, err := runner.NewCatalog(Registration("", "", "", "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,9 +27,11 @@ func TestRegistrationDeclaresExactReviewedPermissionPrompt(t *testing.T) {
 		t.Fatalf("permission requests = %#v", requests)
 	}
 	request := requests[0]
+	wantSummary := "Launches Codex, Claude Code, Antigravity CLI, Cursor Agent, " +
+		"or Grok Build with a prompt."
 	if request.Name != "agent" || !request.Reviewed || request.Default != runner.ModeSafe ||
 		request.Title != "AI agent" ||
-		request.Summary != "Launches Codex, Claude Code, Grok Build, or Antigravity CLI with a prompt." {
+		request.Summary != wantSummary {
 		t.Fatalf("agent permission request = %#v", request)
 	}
 	want := []runner.PermissionChoice{
@@ -37,7 +39,9 @@ func TestRegistrationDeclaresExactReviewedPermissionPrompt(t *testing.T) {
 			Mode:        runner.ModeSafe,
 			Label:       "Enabled (safe default)",
 			Description: "Expose only the fixed coding-agent prompt tasks; no extra CLI flags are accepted.",
-			Warning:     "The launched coding agent can act with your permissions in this checkout; JMW does not sandbox it.",
+			Warning: "The launched coding agent can act with your permissions in this checkout; " +
+				"JMW does not sandbox it. Cursor uses --trust --force to apply edits and " +
+				"commands without confirmation; Cursor deny rules and JMW write_scope still apply.",
 		},
 		{
 			Mode:        runner.ModeDisabled,
@@ -51,7 +55,7 @@ func TestRegistrationDeclaresExactReviewedPermissionPrompt(t *testing.T) {
 }
 
 func TestRegistrationRejectsAllMode(t *testing.T) {
-	catalog, err := runner.NewCatalog(Registration("", "", "", ""))
+	catalog, err := runner.NewCatalog(Registration("", "", "", "", ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,13 +65,14 @@ func TestRegistrationRejectsAllMode(t *testing.T) {
 }
 
 func TestRunnerDoesNotImplementVersionProvider(t *testing.T) {
-	if _, implemented := any(newRunner(taskSpecs("", "", "", ""))).(runner.VersionProvider); implemented {
+	r := newRunner(taskSpecs("", "", "", "", ""))
+	if _, implemented := any(r).(runner.VersionProvider); implemented {
 		t.Fatal("agent runner must not implement VersionProvider")
 	}
 }
 
 func TestDetectAcceptsGitDirectoryAndRegularFileOnly(t *testing.T) {
-	r := newRunner(taskSpecs("", "", "", ""))
+	r := newRunner(taskSpecs("", "", "", "", ""))
 
 	directory := t.TempDir()
 	if err := os.Mkdir(filepath.Join(directory, gitPath), 0o700); err != nil {
@@ -96,7 +101,10 @@ func TestListTasksIncludesAvailableBinariesAndWarnsForMissingOnesWithoutRedetect
 		if err != nil {
 			t.Fatalf("ListTasks: %v", err)
 		}
-		if got, want := taskIDs(tasks), []string{"agent:codex", "agent:claude", "agent:grok", "agent:antigravity"}; !reflect.DeepEqual(got, want) {
+		want := []string{
+			"agent:codex", "agent:claude", "agent:antigravity", "agent:cursor", "agent:grok",
+		}
+		if got := taskIDs(tasks); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task IDs = %#v, want %#v", got, want)
 		}
 		empty := ""
@@ -126,7 +134,8 @@ func TestListTasksIncludesAvailableBinariesAndWarnsForMissingOnesWithoutRedetect
 
 	t.Run("one missing", func(t *testing.T) {
 		tasks, err := resolvedAgentRunner(t, "go", "jmw-absent-claude-fixture").ListTasks(context.Background(), dir)
-		if got, want := taskIDs(tasks), []string{"agent:codex", "agent:grok"}; !reflect.DeepEqual(got, want) {
+		want := []string{"agent:codex", "agent:cursor", "agent:grok"}
+		if got := taskIDs(tasks); !reflect.DeepEqual(got, want) {
 			t.Fatalf("task IDs = %#v, want %#v", got, want)
 		}
 		assertMissingToolWarning(t, err)
@@ -150,7 +159,7 @@ func TestListTasksLooksUpEachBinaryWithoutExecutingIt(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		binary += ".exe"
 	}
-	r := newRunner(taskSpecs(binary, binary, binary, binary))
+	r := newRunner(taskSpecs(binary, binary, binary, binary, binary))
 
 	tasks, err := r.ListTasks(context.Background(), dir)
 	if len(tasks) != 0 {
@@ -166,7 +175,10 @@ func TestListTasksLooksUpEachBinaryWithoutExecutingIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTasks after install: %v", err)
 	}
-	if got, want := taskIDs(tasks), []string{"agent:codex", "agent:claude", "agent:grok", "agent:antigravity"}; !reflect.DeepEqual(got, want) {
+	want := []string{
+		"agent:codex", "agent:claude", "agent:antigravity", "agent:cursor", "agent:grok",
+	}
+	if got := taskIDs(tasks); !reflect.DeepEqual(got, want) {
 		t.Fatalf("task IDs after install = %#v, want %#v", got, want)
 	}
 	if _, err := os.Stat(binary + ".ran"); !errors.Is(err, os.ErrNotExist) {
@@ -175,10 +187,16 @@ func TestListTasksLooksUpEachBinaryWithoutExecutingIt(t *testing.T) {
 }
 
 func TestListTasksDiscoversNewClientsWithoutCodexOrClaude(t *testing.T) {
-	r := newRunner(taskSpecs("jmw-absent-codex", "jmw-absent-claude", os.Args[0], os.Args[0]))
+	r := newRunner(taskSpecs(
+		"jmw-absent-codex",
+		"jmw-absent-claude",
+		os.Args[0],
+		os.Args[0],
+		os.Args[0],
+	))
 	tasks, err := r.ListTasks(context.Background(), t.TempDir())
 	assertMissingToolWarning(t, err)
-	want := []string{"agent:grok", "agent:antigravity"}
+	want := []string{"agent:antigravity", "agent:cursor", "agent:grok"}
 	if got := taskIDs(tasks); !reflect.DeepEqual(got, want) {
 		t.Fatalf("new client discovery = %q, want %q", got, want)
 	}
@@ -199,7 +217,7 @@ func TestListTasksDiscoversNewClientsWithoutCodexOrClaude(t *testing.T) {
 func TestBuildCommandUsesExactArgv(t *testing.T) {
 	dir := t.TempDir()
 	writeGitFile(t, dir)
-	r := newRunner(taskSpecs("", "", "", ""))
+	r := newRunner(taskSpecs("", "", "", "", ""))
 
 	for _, test := range []struct {
 		name string
@@ -243,7 +261,7 @@ func TestBuildCommandUsesExactArgv(t *testing.T) {
 func TestBuildScopedCommandUsesScopedPrefixFromTaskTable(t *testing.T) {
 	dir := t.TempDir()
 	writeGitFile(t, dir)
-	r := newRunner(taskSpecs("", "", "", ""))
+	r := newRunner(taskSpecs("", "", "", "", ""))
 
 	codex := taskByID(t, r, "agent:codex")
 	scopedCodex, err := r.BuildScopedCommand(
@@ -287,7 +305,7 @@ func TestTaskWriteScopeUsesCLIStateDirectoryRule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := newRunner(taskSpecs(os.Args[0], os.Args[0], os.Args[0], os.Args[0]))
+	r := newRunner(taskSpecs(os.Args[0], os.Args[0], os.Args[0], os.Args[0], os.Args[0]))
 	for _, test := range []struct {
 		name  string
 		id    string
@@ -358,7 +376,7 @@ func TestNewAgentsKeepTheirStateInsideTheWriteScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := newRunner(taskSpecs("", "", "", ""))
+	r := newRunner(taskSpecs("", "", "", "", ""))
 	t.Setenv("GROK_HOME", "")
 	for id, relative := range map[string]string{
 		"agent:grok":        ".grok",
@@ -379,7 +397,7 @@ func TestNewAgentsKeepTheirStateInsideTheWriteScope(t *testing.T) {
 func TestGrokScopedCommandDisablesTheNestedSandbox(t *testing.T) {
 	dir := t.TempDir()
 	writeGitFile(t, dir)
-	r := newRunner(taskSpecs("", "", "", ""))
+	r := newRunner(taskSpecs("", "", "", "", ""))
 	cmd, err := r.BuildScopedCommand(context.Background(), dir,
 		taskByID(t, r, "agent:grok"), []string{"prompt"})
 	if err != nil {
@@ -424,7 +442,7 @@ func TestCommandRenderingComesFromTaskTable(t *testing.T) {
 }
 
 func TestValidateTaskInputRejectsInvalidInputs(t *testing.T) {
-	r := newRunner(taskSpecs("", "", "", ""))
+	r := newRunner(taskSpecs("", "", "", "", ""))
 	codex := taskByID(t, r, "agent:codex")
 	claude := taskByID(t, r, "agent:claude")
 
@@ -475,7 +493,7 @@ func TestValidateTaskInputRejectsInvalidInputs(t *testing.T) {
 }
 
 func TestInvalidTaskTablesAreRejectedAtResolve(t *testing.T) {
-	valid := taskSpecs("codex", "claude", "grok", "agy")
+	valid := taskSpecs("codex", "claude", "grok", "agy", "cursor-agent")
 	missingRenderer := cloneTaskSpecs(valid)
 	missingRenderer[0].params[1].argv = nil
 	missingStateDir := cloneTaskSpecs(valid)
@@ -505,7 +523,8 @@ func TestInvalidTaskTablesAreRejectedAtResolve(t *testing.T) {
 
 func resolvedAgentRunner(t *testing.T, codexBinary, claudeBinary string) *Runner {
 	t.Helper()
-	catalog, err := runner.NewCatalog(registration(taskSpecs(codexBinary, claudeBinary, codexBinary, claudeBinary)))
+	specs := taskSpecs(codexBinary, claudeBinary, codexBinary, claudeBinary, codexBinary)
+	catalog, err := runner.NewCatalog(registration(specs))
 	if err != nil {
 		t.Fatal(err)
 	}
