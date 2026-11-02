@@ -25,7 +25,8 @@ JMW's outer write boundary on macOS.
 Antigravity's instructions to `GEMINI.md`. Their native MCP configurations are
 `.grok/config.toml` and `.agents/mcp_config.json`. Cursor uses
 `.cursor/rules/just-mcp-work.mdc` with `alwaysApply: true`, and its native MCP
-configuration is `.cursor/mcp.json`. These configurations are
+configuration is `.cursor/mcp.json`. Cursor CLI's workspace tool grants are
+managed `allow` entries in `.cursor/cli.json`. These configurations are
 managed only when their client is selected, follow `--write-mcp-config`, and
 preserve unrelated settings. Deselected clients keep their managed files,
 including manifest verification of their MCP entry.
@@ -102,8 +103,8 @@ neither verifies nor repairs them, and notices only a release that would write
 a different block. In `--dry-run`, their diff contains only the managed block,
 never personal text around it. `.mcp.json`,
 `.codex/config.toml`, `.grok/config.toml`, `.agents/mcp_config.json`, `.cursor/mcp.json`,
-`.claude/settings.json`, `.just-mcp-work/`, and the runner policy remain at the
-workspace scope for every target.
+`.cursor/cli.json`, `.claude/settings.json`, `.just-mcp-work/`, and the runner
+policy remain at the workspace scope for every target.
 
 ## How much the instruction block says
 
@@ -131,6 +132,12 @@ that is not selected. Its recorded surface remains in the manifest so
 `serve` continues verifying it and a later run that reselects the agent can
 clean an old destination. `.claude/settings.json` is touched only when
 `claude` is one of the selected agents, and then follows the permission answer.
+Cursor CLI's `.cursor/cli.json` is read and edited only when `cursor` is
+selected. It follows `--write-mcp-config`: true replaces JMW entries in
+`permissions.allow`; false removes them. Other entries, keys and formatting
+are preserved outside that
+list. The `deny` list is never edited or included in the managed hash, including
+JMW deny entries: Cursor CLI gives those restrictions precedence over `allow`.
 `.mcp.json` and `.codex/config.toml` follow `--write-mcp-config` rather than
 `--agents`: they are rewritten when it is true and stripped of their JMW
 entries when it is false, whether or not `codex` was selected. Two selected
@@ -147,7 +154,8 @@ its absolute path; without a verified guide, they contain the full reference.
 
 A file left holding nothing but JMW state is removed, which can happen to
 `.mcp.json`, `.codex/config.toml`, `.grok/config.toml`,
-`.agents/mcp_config.json`, `.cursor/mcp.json`, and `.claude/settings.json`, except
+`.agents/mcp_config.json`, `.cursor/mcp.json`, `.cursor/cli.json`, and
+`.claude/settings.json`, except
 that a
 JMW-only `.mcp.json` scope anchor is kept as an empty object whenever deleting
 it would change the scope of an identical repeated `init`. For the Codex, Grok,
@@ -271,11 +279,17 @@ to keep the native configuration and its manifest consistent.
 `init` also asks whether the shell tools may run without a client confirmation.
 `ask` is the answer offered in a workspace that has none recorded; a later
 `init` offers the recorded one instead. The answer goes to
-`.claude/settings.json` and the managed block in `.codex/config.toml` when they
-are managed. Pass `--shell-permission allow|ask` to answer it up front in a
-scripted run. Changing this answer with a narrower `--agents` selection is
-blocked only by recorded Claude settings outside that selection, not by machine
-instruction files whose bytes do not depend on the shell permission.
+`.claude/settings.json`, the managed block in `.codex/config.toml`, and
+`permissions.allow` in `.cursor/cli.json` when they are managed. Cursor CLI
+entries use `Mcp(just-mcp-work:<tool>)`. With `allow`, the three shell tools
+are in Cursor CLI's allow list; with `ask`, they are absent, so Cursor CLI
+prompts. The twelve task tools are always allowed. Cursor CLI's `deny` list
+is never touched.
+Pass `--shell-permission allow|ask` to answer it up front in a scripted run.
+Changing this answer with a narrower `--agents` selection requires selecting
+`claude` for recorded Claude settings and `cursor` for recorded Cursor CLI
+permissions outside that selection. Machine instruction files do not block the
+change because their bytes do not depend on the shell permission.
 
 ## Beta-test mode
 

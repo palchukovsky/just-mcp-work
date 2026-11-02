@@ -676,6 +676,14 @@ func planWorkspaceConfiguration(
 	}
 	edits = append(edits, nativeEdits...)
 	surfaces = append(surfaces, nativeSurfaces...)
+	if _, cursorSelected := selected["cursor"]; cursorSelected {
+		cursorEdit, cursorSurface, cursorErr := planCursorPermissions(scope, options)
+		if cursorErr != nil {
+			return nil, nil, cursorErr
+		}
+		edits = appendEdit(edits, cursorEdit)
+		surfaces = appendManifestSurface(surfaces, cursorSurface)
+	}
 	// The Claude settings file belongs to the claude agent, so an invocation that
 	// does not select claude plans nothing for it, whatever ClaudePermissions says.
 	if _, claudeSelected := selected["claude"]; claudeSelected {
@@ -2040,27 +2048,45 @@ func decodeJSONObject(data []byte, name string) (jsonSpan, error) {
 	return span, nil
 }
 
-// mergeClaudeSettings replaces the managed permission entries. Every entry of
-// this MCP server is dropped from every permission list first, including tools
-// and wildcards this version does not know, and the current entries are then
-// appended to the allow and ask lists. Foreign entries, unrelated settings, and
-// the file's own formatting are preserved byte for byte.
+type permissionFile struct {
+	owns          func(string) bool
+	path          string
+	keys          []string
+	sweepAllLists bool
+}
+
+func claudePermissionFile() permissionFile {
+	keys := claudePermissionListKeys()
+	return permissionFile{
+		path:          claudeSettings,
+		keys:          keys[:],
+		owns:          isManagedClaudeTool,
+		sweepAllLists: true,
+	}
+}
+
+// mergeClaudeSettings replaces this server's entries in all permission lists
+// with the current allow and ask entries, preserving foreign text.
 func mergeClaudeSettings(before []byte, shell ShellPermission) ([]byte, error) {
-	data := emptyJSONObject(before)
-	root, err := decodeJSONObject(data, claudeSettings)
+	refill, err := claudeRefillLists(shell)
 	if err != nil {
 		return nil, err
 	}
-	if validateErr := validateClaudePermissions(data); validateErr != nil {
+	return claudePermissionFile().merge(before, refill)
+}
+
+func (file permissionFile) merge(before []byte, refill []permissionList) ([]byte, error) {
+	data := emptyJSONObject(before)
+	root, err := decodeJSONObject(data, file.path)
+	if err != nil {
+		return nil, err
+	}
+	if validateErr := file.validate(data); validateErr != nil {
 		return nil, validateErr
 	}
 	members, err := jsonObjectMembers(data, root)
 	if err != nil {
-		return nil, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
-	}
-	refill, err := claudeRefillLists(shell)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode existing %s: %w", file.path, err)
 	}
 	permissions, found := jsonFindMember(members, "permissions")
 	if !found || isJSONNull(data, permissions.value) {
@@ -2070,7 +2096,7 @@ func mergeClaudeSettings(before []byte, shell ShellPermission) ([]byte, error) {
 		}
 		settings, setErr := jsonSetMember(data, root, "permissions", lists)
 		if setErr != nil {
-			return nil, fmt.Errorf("update %s: %w", claudeSettings, setErr)
+			return nil, fmt.Errorf("update %s: %w", file.path, setErr)
 		}
 		return settings, nil
 	}
@@ -2080,28 +2106,32 @@ func mergeClaudeSettings(before []byte, shell ShellPermission) ([]byte, error) {
 	owning := make([]string, 0, len(refill))
 	for _, list := range refill {
 		owning = append(owning, list.key)
-		data, err = appendClaudeTools(data, list.key, list.tools)
+		data, err = file.appendTools(data, list.key, list.tools)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return dropManagedClaudeTools(data, owning)
+	return file.dropManaged(data, owning)
 }
 
 func removeManagedClaudeSettings(before []byte) ([]byte, bool, error) {
+	return claudePermissionFile().remove(before)
+}
+
+func (file permissionFile) remove(before []byte) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(before)) == 0 {
 		return before, false, nil
 	}
-	root, err := decodeJSONObject(before, claudeSettings)
+	root, err := decodeJSONObject(before, file.path)
 	if err != nil {
 		return nil, false, err
 	}
-	if validateErr := validateClaudePermissions(before); validateErr != nil {
+	if validateErr := file.validate(before); validateErr != nil {
 		return nil, false, validateErr
 	}
 	members, err := jsonObjectMembers(before, root)
 	if err != nil {
-		return nil, false, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+		return nil, false, fmt.Errorf("decode existing %s: %w", file.path, err)
 	}
 	permissions, found := jsonFindMember(members, "permissions")
 	if !found || isJSONNull(before, permissions.value) {
@@ -2110,14 +2140,14 @@ func removeManagedClaudeSettings(before []byte) ([]byte, bool, error) {
 	if before[permissions.value.start] != '{' {
 		return nil, false, fmt.Errorf(
 			"permissions in %s is not an object; fix that entry and run init again",
-			claudeSettings,
+			file.path,
 		)
 	}
-	toolOnly, err := claudeSettingsAreToolOnly(before, members, permissions.value)
+	toolOnly, err := file.toolOnly(before, members, permissions.value)
 	if err != nil {
 		return nil, false, err
 	}
-	cleaned, err := dropManagedClaudeTools(before, nil)
+	cleaned, err := file.dropManaged(before, nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2130,7 +2160,7 @@ func removeManagedClaudeSettings(before []byte) ([]byte, bool, error) {
 	return cleaned, false, nil
 }
 
-func claudeSettingsAreToolOnly(
+func (file permissionFile) toolOnly(
 	data []byte,
 	rootMembers []jsonMember,
 	permissions jsonSpan,
@@ -2140,12 +2170,12 @@ func claudeSettingsAreToolOnly(
 	}
 	members, err := jsonObjectMembers(data, permissions)
 	if err != nil {
-		return false, fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+		return false, fmt.Errorf("decode existing %s: %w", file.path, err)
 	}
 	foundManaged := false
-	keys := claudePermissionListKeys()
+	keys := file.keys
 	for _, member := range members {
-		if !slices.Contains(keys[:], member.key) {
+		if !slices.Contains(keys, member.key) {
 			return false, nil
 		}
 		if data[member.value.start] != '[' {
@@ -2153,15 +2183,15 @@ func claudeSettingsAreToolOnly(
 		}
 		elements, elementsErr := jsonArrayElements(data, member.value)
 		if elementsErr != nil {
-			return false, fmt.Errorf("decode existing %s: %w", claudeSettings, elementsErr)
+			return false, fmt.Errorf("decode existing %s: %w", file.path, elementsErr)
 		}
 		for _, element := range elements {
 			var value any
 			if decodeErr := json.Unmarshal(data[element.start:element.end], &value); decodeErr != nil {
-				return false, fmt.Errorf("decode existing %s: %w", claudeSettings, decodeErr)
+				return false, fmt.Errorf("decode existing %s: %w", file.path, decodeErr)
 			}
 			entry, isString := value.(string)
-			if !isString || !isManagedClaudeTool(entry) {
+			if !isString || !file.owns(entry) {
 				return false, nil
 			}
 			foundManaged = true
@@ -2170,8 +2200,8 @@ func claudeSettingsAreToolOnly(
 	return foundManaged, nil
 }
 
-// claudeRefillList is one permission list populated by the current choice.
-type claudeRefillList struct {
+// permissionList is one permission list populated by the current choice.
+type permissionList struct {
 	key   string
 	tools []string
 }
@@ -2184,7 +2214,7 @@ func claudePermissionListKeys() [2]string {
 
 // claudeRefillLists reports only the permission lists populated by the current
 // choice. An omitted list remains eligible for the sweep and is never created.
-func claudeRefillLists(shell ShellPermission) ([]claudeRefillList, error) {
+func claudeRefillLists(shell ShellPermission) ([]permissionList, error) {
 	managed, err := ClaudeManagedTools(shell)
 	if err != nil {
 		return nil, err
@@ -2194,23 +2224,23 @@ func claudeRefillLists(shell ShellPermission) ([]claudeRefillList, error) {
 		"ask":   managed.Ask,
 	}
 	keys := claudePermissionListKeys()
-	lists := make([]claudeRefillList, 0, len(keys))
+	lists := make([]permissionList, 0, len(keys))
 	for _, key := range keys {
 		if tools := toolsByKey[key]; len(tools) > 0 {
-			lists = append(lists, claudeRefillList{key: key, tools: tools})
+			lists = append(lists, permissionList{key: key, tools: tools})
 		}
 	}
 	return lists, nil
 }
 
-// validateClaudePermissions rejects a settings file whose permission lists this
+// validate rejects a settings file whose permission lists this
 // server cannot edit, before any byte of it is changed.
-func validateClaudePermissions(data []byte) error {
+func (file permissionFile) validate(data []byte) error {
 	var settings struct {
 		Permissions any `json:"permissions"`
 	}
 	if err := json.Unmarshal(data, &settings); err != nil {
-		return fmt.Errorf("decode existing %s: %w", claudeSettings, err)
+		return fmt.Errorf("decode existing %s: %w", file.path, err)
 	}
 	if settings.Permissions == nil {
 		return nil
@@ -2219,10 +2249,10 @@ func validateClaudePermissions(data []byte) error {
 	if !isObject {
 		return fmt.Errorf(
 			"permissions in %s is not an object; fix that entry and run init again",
-			claudeSettings,
+			file.path,
 		)
 	}
-	keys := claudePermissionListKeys()
+	keys := file.keys
 	for _, key := range keys {
 		value, exists := permissions[key]
 		if !exists || value == nil {
@@ -2232,51 +2262,52 @@ func validateClaudePermissions(data []byte) error {
 			return fmt.Errorf(
 				"permissions.%s in %s is not a list; fix that entry and run init again",
 				key,
-				claudeSettings,
+				file.path,
 			)
 		}
 	}
 	return nil
 }
 
-// claudePermissionsSpan locates the permissions object of the settings file.
-func claudePermissionsSpan(data []byte) (jsonSpan, error) {
+// span locates the permissions object of the settings file.
+func (file permissionFile) span(data []byte) (jsonSpan, error) {
 	root, err := jsonDocumentSpan(data)
 	if err != nil {
-		return jsonSpan{}, fmt.Errorf("read %s: %w", claudeSettings, err)
+		return jsonSpan{}, fmt.Errorf("read %s: %w", file.path, err)
 	}
 	members, err := jsonObjectMembers(data, root)
 	if err != nil {
-		return jsonSpan{}, fmt.Errorf("read %s: %w", claudeSettings, err)
+		return jsonSpan{}, fmt.Errorf("read %s: %w", file.path, err)
 	}
 	permissions, found := jsonFindMember(members, "permissions")
 	if !found {
-		return jsonSpan{}, fmt.Errorf("permissions in %s is missing", claudeSettings)
+		return jsonSpan{}, fmt.Errorf("permissions in %s is missing", file.path)
 	}
 	return permissions.value, nil
 }
 
-// dropManagedClaudeTools removes every entry of this server from every
-// permission list except the ones already rewritten, keeping the foreign
+// dropManaged removes this server's entries from eligible permission lists
+// except the ones already rewritten, keeping the foreign
 // entries of those lists untouched.
-func dropManagedClaudeTools(data []byte, rewritten []string) ([]byte, error) {
-	permissions, err := claudePermissionsSpan(data)
+func (file permissionFile) dropManaged(data []byte, rewritten []string) ([]byte, error) {
+	permissions, err := file.span(data)
 	if err != nil {
 		return nil, err
 	}
 	members, err := jsonObjectMembers(data, permissions)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", claudeSettings, err)
+		return nil, fmt.Errorf("read %s: %w", file.path, err)
 	}
 	keys := make([]string, 0, len(members))
 	for _, member := range members {
-		if data[member.value.start] == '[' && !slices.Contains(rewritten, member.key) {
+		if (file.sweepAllLists || slices.Contains(file.keys, member.key)) &&
+			data[member.value.start] == '[' && !slices.Contains(rewritten, member.key) {
 			keys = append(keys, member.key)
 		}
 	}
 	// Every edit shifts the spans that follow it, so each list is located again.
 	for _, key := range keys {
-		data, err = editClaudeList(data, key, nil)
+		data, err = file.editList(data, key, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -2284,52 +2315,52 @@ func dropManagedClaudeTools(data []byte, rewritten []string) ([]byte, error) {
 	return data, nil
 }
 
-// appendClaudeTools appends the managed tools to a permission list, writing the
+// appendTools appends the managed tools to a permission list, writing the
 // list anew when the settings file has no list to append to. A null value is an
-// unset list, the same way validateClaudePermissions accepts it.
-func appendClaudeTools(data []byte, key string, tools []string) ([]byte, error) {
-	permissions, err := claudePermissionsSpan(data)
+// unset list, the same way validate accepts it.
+func (file permissionFile) appendTools(data []byte, key string, tools []string) ([]byte, error) {
+	permissions, err := file.span(data)
 	if err != nil {
 		return nil, err
 	}
 	members, err := jsonObjectMembers(data, permissions)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", claudeSettings, err)
+		return nil, fmt.Errorf("read %s: %w", file.path, err)
 	}
 	if member, found := jsonFindMember(members, key); !found || isJSONNull(data, member.value) {
 		settings, setErr := jsonSetMember(data, permissions, key, tools)
 		if setErr != nil {
-			return nil, fmt.Errorf("update %s: %w", claudeSettings, setErr)
+			return nil, fmt.Errorf("update %s: %w", file.path, setErr)
 		}
 		return settings, nil
 	}
-	return editClaudeList(data, key, tools)
+	return file.editList(data, key, tools)
 }
 
-// editClaudeList rewrites one permission list in place.
-func editClaudeList(data []byte, key string, add []string) ([]byte, error) {
-	permissions, err := claudePermissionsSpan(data)
+// editList rewrites one permission list in place.
+func (file permissionFile) editList(data []byte, key string, add []string) ([]byte, error) {
+	permissions, err := file.span(data)
 	if err != nil {
 		return nil, err
 	}
 	members, err := jsonObjectMembers(data, permissions)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", claudeSettings, err)
+		return nil, fmt.Errorf("read %s: %w", file.path, err)
 	}
 	member, found := jsonFindMember(members, key)
 	if !found {
-		return nil, fmt.Errorf("permissions.%s in %s is missing", key, claudeSettings)
+		return nil, fmt.Errorf("permissions.%s in %s is missing", key, file.path)
 	}
 	if data[member.value.start] != '[' {
 		return nil, fmt.Errorf(
 			"permissions.%s in %s is not a list; fix that entry and run init again",
 			key,
-			claudeSettings,
+			file.path,
 		)
 	}
-	edited, err := jsonRewriteStringList(data, member.value, isManagedClaudeTool, add)
+	edited, err := jsonRewriteStringList(data, member.value, file.owns, add)
 	if err != nil {
-		return nil, fmt.Errorf("update permissions.%s in %s: %w", key, claudeSettings, err)
+		return nil, fmt.Errorf("update permissions.%s in %s: %w", key, file.path, err)
 	}
 	return edited, nil
 }
@@ -2426,22 +2457,30 @@ func mergeTOMLMCPConfig(
 	return validateMergedCodexConfig(text + block + lineBreak)
 }
 
+func managedToolNames(rules []string) []string {
+	tools := make([]string, 0, len(rules))
+	for _, rule := range rules {
+		tools = append(tools, strings.TrimPrefix(rule, ClaudeToolPrefix))
+	}
+	return tools
+}
+
 func codexApprovalLines(shellPermission ShellPermission) ([]string, error) {
 	managedTools, err := ClaudeManagedTools(shellPermission)
 	if err != nil {
 		return nil, err
 	}
 	approvalLines := []string{`default_tools_approval_mode = "prompt"`}
-	for _, rule := range managedTools.Allow {
+	for _, tool := range managedToolNames(managedTools.Allow) {
 		approvalLines = append(
 			approvalLines,
-			`tools.`+strings.TrimPrefix(rule, ClaudeToolPrefix)+`.approval_mode = "approve"`,
+			`tools.`+tool+`.approval_mode = "approve"`,
 		)
 	}
-	for _, rule := range managedTools.Ask {
+	for _, tool := range managedToolNames(managedTools.Ask) {
 		approvalLines = append(
 			approvalLines,
-			`tools.`+strings.TrimPrefix(rule, ClaudeToolPrefix)+`.approval_mode = "prompt"`,
+			`tools.`+tool+`.approval_mode = "prompt"`,
 		)
 	}
 	sort.Strings(approvalLines[1:])

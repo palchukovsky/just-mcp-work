@@ -120,6 +120,60 @@ func defaultRunnerInput() *strings.Reader {
 	return strings.NewReader(strings.Repeat("\n", 10))
 }
 
+func TestInitCursorPermissions(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		shell     string
+		malformed bool
+		count     int
+	}{
+		{name: "allow", shell: "allow", count: 15},
+		{name: "ask", shell: "ask", count: 12},
+		{name: "malformed", shell: "allow", malformed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, ".cursor", "cli.json")
+			if test.malformed {
+				if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(`{"permissions":42}`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			args := append(
+				initArgsWithRunnerModes(root),
+				"--agents",
+				"cursor",
+				"--write-mcp-config=true",
+				"--shell-permission",
+				test.shell,
+			)
+			err := initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard)
+			if test.malformed {
+				if err == nil || !strings.Contains(err.Error(), ".cursor/cli.json") {
+					t.Fatalf("CLI did not refuse malformed Cursor permissions: %v", err)
+				}
+				if _, statErr := os.Stat(filepath.Join(root, ".just-mcp-work.json")); !os.IsNotExist(statErr) {
+					t.Fatalf("refused CLI init wrote policy: %v", statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("CLI did not write Cursor permissions: %v", err)
+			}
+			if got := bytes.Count(data, []byte("Mcp(just-mcp-work:")); got != test.count {
+				t.Fatalf("CLI Cursor grants = %d, want %d", got, test.count)
+			}
+		})
+	}
+}
+
 func initArgsWithRunnerModes(dir string) []string {
 	return append(initArgsWithRunnerModesWithoutAI(dir), "--ai", "codex")
 }
@@ -3759,8 +3813,10 @@ func TestInitCodexOnlyShellPermissionRoundTripKeepsRecordedAllow(t *testing.T) {
 	}
 	for _, want := range []string{
 		"May your AI agents run shell commands through JMW without asking you?",
-		"Run without asking: the Claude Code allow list and the Codex approve mode",
-		"Ask every time: the Claude Code ask list and the Codex prompt mode",
+		"Run without asking: the Claude Code allow list, the Codex approve mode " +
+			"and the Cursor CLI allow list",
+		"Ask every time: the Claude Code ask list and the Codex prompt mode; " +
+			"absent from the Cursor CLI allow list, so Cursor CLI asks",
 		"allow (current)",
 	} {
 		if !strings.Contains(diagnostics.String(), want) {

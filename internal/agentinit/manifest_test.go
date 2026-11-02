@@ -94,6 +94,7 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 		{path: mcpConfig, kind: manifestKindMCPConfig},
 		{path: codexConfig, kind: manifestKindCodexConfig},
 		{path: ".cursor/mcp.json", kind: manifestKindCursorConfig},
+		{path: cursorPermissions, kind: manifestKindCursorPermissions},
 		{path: claudeSettings, kind: manifestKindClaudeSettings},
 		{path: guideFile, kind: manifestKindAgentGuide},
 	}
@@ -216,6 +217,7 @@ func TestApplyNarrowedSelectionReplacesManifestSurfaceSet(t *testing.T) {
 		{path: ".github/copilot-instructions.md", kind: manifestKindAgentInstructions},
 		{path: ".windsurfrules", kind: manifestKindAgentInstructions},
 		{path: claudeSettings, kind: manifestKindClaudeSettings},
+		{path: cursorPermissions, kind: manifestKindCursorPermissions},
 	}
 	assertManifestSurfaces(t, manifest.Surfaces, want)
 	if _, verifyErr := VerifyManagedSurfaces(dir); verifyErr != nil {
@@ -632,8 +634,8 @@ func TestApplyRejectsShellPermissionChangeAfterNarrowCarryForward(t *testing.T) 
 		RunnerModes:        modes,
 	})
 	wantError := "cannot change shell permission with --agents codex: managed permission " +
-		"files outside the selection: " + claudeSettings +
-		"; re-run with --agents claude,codex"
+		"files outside the selection: " + claudeSettings + ", " + cursorPermissions +
+		"; re-run with --agents claude,codex,cursor"
 	if err == nil || err.Error() != wantError {
 		t.Fatalf("third Apply() error = %v, want %q", err, wantError)
 	}
@@ -1095,6 +1097,8 @@ func expectedSurfaceHash(t *testing.T, dir string, surface manifestSurface) stri
 		if err != nil {
 			t.Fatal(err)
 		}
+	case manifestKindCursorPermissions:
+		fragment = cursorPermissionsFragmentForTest(t, data)
 	case manifestKindClaudeSettings:
 		var document struct {
 			Permissions map[string][]string `json:"permissions"`

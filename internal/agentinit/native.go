@@ -6,9 +6,100 @@ package agentinit
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/palchukovsky/just-mcp-work/internal/aiprofile"
 )
+
+const cursorPermissions = ".cursor/cli.json"
+
+func cursorPermissionFile() permissionFile {
+	return permissionFile{
+		path: cursorPermissions,
+		keys: []string{"allow"},
+		owns: func(entry string) bool {
+			return strings.HasPrefix(strings.TrimSpace(entry), "Mcp("+serverName+":")
+		},
+	}
+}
+
+func cursorPermissionLists(shell ShellPermission) ([]permissionList, error) {
+	managed, err := ClaudeManagedTools(shell)
+	if err != nil {
+		return nil, err
+	}
+	tools := make([]string, 0, len(managed.Allow))
+	for _, tool := range managedToolNames(managed.Allow) {
+		tools = append(tools, "Mcp("+serverName+":"+tool+")")
+	}
+	return []permissionList{{key: "allow", tools: tools}}, nil
+}
+
+func generatedCursorPermissions(shell ShellPermission) (manifestSurface, error) {
+	lists, err := cursorPermissionLists(shell)
+	if err != nil {
+		return manifestSurface{}, err
+	}
+	fragment, err := marshalManagedPermissionFragment(
+		map[string][]string{"allow": lists[0].tools},
+		cursorPermissions,
+	)
+	if err != nil {
+		return manifestSurface{}, err
+	}
+	return newManifestSurface(cursorPermissions, manifestKindCursorPermissions, fragment), nil
+}
+
+func planCursorPermissions(scope string, options Options) (*plannedEdit, *manifestSurface, error) {
+	path, err := findScopedConfig(scope, scopedConfig{
+		relative: cursorPermissions,
+		name:     "Cursor permissions",
+		lower:    "Cursor permissions",
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	before, exists, err := readOptionalFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	file := cursorPermissionFile()
+	data := emptyJSONObject(before)
+	if err = file.validate(data); err != nil {
+		return nil, nil, err
+	}
+	if _, _, err = file.managedFragment(data); err != nil {
+		return nil, nil, fmt.Errorf("%w; fix that entry and run init again", err)
+	}
+	var after []byte
+	var surface *manifestSurface
+	remove := false
+	if options.WriteMCPConfig {
+		lists, listErr := cursorPermissionLists(options.ShellPermission)
+		if listErr != nil {
+			return nil, nil, listErr
+		}
+		after, err = file.merge(before, lists)
+		if err == nil {
+			var managed manifestSurface
+			managed, err = file.manifestSurface(after, manifestKindCursorPermissions)
+			surface = &managed
+		}
+	} else {
+		after, remove, err = file.remove(before)
+		if remove {
+			after = emptyJSONObject(after)
+		}
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	remove, err = preserveScopedFileSymlink(scope, cursorPermissions, remove)
+	if err != nil {
+		return nil, nil, err
+	}
+	return newEdit(cursorPermissions, path, before, after, 0o600, exists, remove), surface, nil
+}
 
 type nativeMCPConfig struct {
 	agent  string

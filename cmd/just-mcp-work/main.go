@@ -576,7 +576,8 @@ func initCommandWithIO(
 	shellPermission := flags.String(
 		"shell-permission",
 		"",
-		"shell tool handling in Claude permission lists and Codex approval modes: "+
+		"shell tool handling in Claude permission lists, Codex approval modes "+
+			"and Cursor CLI's allow list: "+
 			"allow or ask; empty asks on the console",
 	)
 	instructionsTargetFlag := flags.String(

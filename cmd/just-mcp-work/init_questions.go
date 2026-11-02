@@ -543,19 +543,21 @@ func shellPermissionQuestion(
 		Context: []string{
 			"run_shell_command and start_shell_command run any command line with your " +
 				"user's permissions, and define_shell_block prepares one for them.",
-			"The answer sets how Claude Code's permission lists and Codex's approval " +
-				"modes treat these tools, wherever JMW manages them.",
+			"The answer sets how Claude Code's permission lists, Codex's approval " +
+				"modes and Cursor CLI's allow list treat these tools, wherever JMW manages them.",
 		},
 		Choices: []questionnaire.Choice{
 			{
-				Value:       string(agentinit.ShellPermissionAllow),
-				Label:       "Run without asking",
-				Description: "the Claude Code allow list and the Codex approve mode",
+				Value: string(agentinit.ShellPermissionAllow),
+				Label: "Run without asking",
+				Description: "the Claude Code allow list, the Codex approve mode " +
+					"and the Cursor CLI allow list",
 			},
 			{
-				Value:       string(agentinit.ShellPermissionAsk),
-				Label:       "Ask every time",
-				Description: "the Claude Code ask list and the Codex prompt mode",
+				Value: string(agentinit.ShellPermissionAsk),
+				Label: "Ask every time",
+				Description: "the Claude Code ask list and the Codex prompt mode; " +
+					"absent from the Cursor CLI allow list, so Cursor CLI asks",
 			},
 		},
 		Defaults: []string{string(agentinit.ShellPermissionAsk)},

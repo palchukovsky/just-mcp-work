@@ -258,12 +258,29 @@ declare top-level `alwaysApply: true`, or `init` refuses before writing.
 Selecting any of these clients also manages
 its native MCP configuration: `.grok/config.toml` for Grok and
 `.agents/mcp_config.json` for Antigravity, and `.cursor/mcp.json` for Cursor.
+For Cursor CLI, `init` also manages `permissions.allow` in the workspace's
+`.cursor/cli.json`, independently of Claude selection or its permissions answer.
 These files use the existing
 `--write-mcp-config` choice, preserve unrelated entries, and are checked by the
 managed manifest. A deselected client's configuration is preserved and remains
 verified. Grok uses the `claude` presentation family; Antigravity CLI uses
 `antigravity`; Cursor uses `cursor`. Client selection remains separate from
 family selection.
+
+With `--write-mcp-config=false` and Cursor selected, `init` removes its
+`Mcp(just-mcp-work:...)` allow entries and deletes `.cursor/cli.json` if only
+JMW state remains. Foreign content keeps the file. With Cursor deselected,
+`init` neither reads nor writes it and carries its manifest surface unchanged.
+The `deny` list and unknown keys are never edited or hashed; this preserves
+user restrictions, which Cursor CLI gives precedence over `allow`. Formatting
+and foreign entries outside the rewritten `allow` list are preserved.
+
+`--shell-permission allow` includes the three shell tools in Cursor CLI's allow
+list; `ask` leaves them absent so Cursor CLI asks. The twelve task tools remain
+allowed in both modes. The same answer controls managed Claude lists and Codex
+approvals. Changing it with a narrower `--agents` requires including `cursor`
+for recorded Cursor CLI permissions and `claude` for recorded Claude settings
+outside the selection; a refusal names the required clients before any write.
 
 During `init`, the operator selects any number of the declarable families,
 `codex`, `claude`, `antigravity`, and `cursor`; all are offered in a workspace
@@ -321,8 +338,10 @@ content and removal action; target-specific headers therefore cannot silently
 replace each other.
 
 In block files, JMW owns the text between its managed markers. In JSON files,
-it owns the `just-mcp-work` server entry and every JMW-prefixed permission entry
-it generates; foreign servers and permission entries remain local content.
+it owns the `just-mcp-work` server entry and the JMW-prefixed permission entries
+in its managed lists; foreign servers and permission entries remain local
+content. In Cursor CLI's `.cursor/cli.json` only `allow` entries are managed;
+`deny` is always user content.
 
 `init --runner-mode <name>=<mode>` remains repeatable for answering runner
 questions non-interactively. `serve --runner-mode` is retired: it is parsed

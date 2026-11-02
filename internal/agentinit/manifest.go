@@ -34,6 +34,7 @@ const (
 	manifestKindGrokConfig        = "grok-config"
 	manifestKindAntigravityConfig = "antigravity-config"
 	manifestKindCursorConfig      = "cursor-config"
+	manifestKindCursorPermissions = "cursor-permissions"
 )
 
 //nolint:govet // Keep manifest metadata before surfaces in the stable JSON document.
@@ -117,18 +118,26 @@ func planManifest(
 	if err != nil {
 		return nil, nil, err
 	}
+	permissionAgents := []struct {
+		kind  string
+		agent string
+	}{
+		{kind: manifestKindClaudeSettings, agent: "claude"},
+		{kind: manifestKindCursorPermissions, agent: "cursor"},
+	}
 	var edits []plannedEdit
 	var notes []string
 	recordedShellPermission := ""
 	for _, surface := range surfaces {
 		if surface.Kind == manifestKindClaudeSettings ||
-			surface.Kind == manifestKindCodexConfig {
+			surface.Kind == manifestKindCodexConfig ||
+			surface.Kind == manifestKindCursorPermissions {
 			recordedShellPermission = string(shellPermission)
 			break
 		}
 	}
 	if beforeExists {
-		// The carried claude surface and the two mode-change refusals below all
+		// The carried permission surfaces and the two mode-change refusals below all
 		// read the recorded document, so a document this binary cannot decode
 		// stops init instead of silently planning without them.
 		recorded, decodeErr := decodeManagedManifest(path, before)
@@ -247,16 +256,19 @@ func planManifest(
 					)
 				}
 			}
-			if _, claudeSelected := selected["claude"]; !claudeSelected {
-				var carriedClaudeSurface *manifestSurface
+			for _, config := range permissionAgents {
+				if _, isSelected := selected[config.agent]; isSelected {
+					continue
+				}
+				var carriedSurface *manifestSurface
 				for index := range recorded.Surfaces {
-					if recorded.Surfaces[index].Kind == manifestKindClaudeSettings {
-						carriedClaudeSurface = &recorded.Surfaces[index]
+					if recorded.Surfaces[index].Kind == config.kind {
+						carriedSurface = &recorded.Surfaces[index]
 						break
 					}
 				}
-				if carriedClaudeSurface != nil {
-					surfaces = append(surfaces, *carriedClaudeSurface)
+				if carriedSurface != nil {
+					surfaces = append(surfaces, *carriedSurface)
 					if recordedShellPermission == "" {
 						recordedShellPermission = recorded.ShellPermission
 						if recordedShellPermission == "" {
@@ -273,14 +285,17 @@ func planManifest(
 				existingShellPermission != ShellPermission(recordedShellPermission) {
 				var missingPaths []string
 				missingAgents := make(map[string]struct{})
-				if _, claudeSelected := selected["claude"]; !claudeSelected {
+				for _, config := range permissionAgents {
+					if _, isSelected := selected[config.agent]; isSelected {
+						continue
+					}
 					for _, recordedSurface := range recorded.Surfaces {
-						if recordedSurface.Kind != manifestKindClaudeSettings ||
+						if recordedSurface.Kind != config.kind ||
 							slices.Contains(missingPaths, recordedSurface.Path) {
 							continue
 						}
 						missingPaths = append(missingPaths, recordedSurface.Path)
-						missingAgents["claude"] = struct{}{}
+						missingAgents[config.agent] = struct{}{}
 					}
 				}
 				if len(missingPaths) > 0 {
@@ -673,17 +688,25 @@ func mcpManifestSurface(after []byte) (manifestSurface, error) {
 }
 
 func claudeManifestSurface(after []byte) (manifestSurface, error) {
-	fragment, _, err := claudeManagedFragment(after)
+	return claudePermissionFile().manifestSurface(after, manifestKindClaudeSettings)
+}
+
+func (file permissionFile) manifestSurface(after []byte, kind string) (manifestSurface, error) {
+	fragment, _, err := file.managedFragment(after)
 	if err != nil {
 		return manifestSurface{}, err
 	}
-	return newManifestSurface(claudeSettings, manifestKindClaudeSettings, fragment), nil
+	return newManifestSurface(file.path, kind, fragment), nil
 }
 
 func managedClaudeEntries(entries []string) []string {
+	return claudePermissionFile().managedEntries(entries)
+}
+
+func (file permissionFile) managedEntries(entries []string) []string {
 	managed := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		if isManagedClaudeTool(entry) {
+		if file.owns(entry) {
 			managed = append(managed, entry)
 		}
 	}
@@ -762,31 +785,38 @@ func mcpManagedFragment(content []byte) ([]byte, bool, error) {
 }
 
 func claudeManagedFragment(content []byte) ([]byte, bool, error) {
+	return claudePermissionFile().managedFragment(content)
+}
+
+func (file permissionFile) managedFragment(content []byte) ([]byte, bool, error) {
 	var document struct {
 		Permissions map[string]json.RawMessage `json:"permissions"`
 	}
 	if err := json.Unmarshal(content, &document); err != nil {
-		return nil, false, fmt.Errorf("decode managed permissions in %s: %w", claudeSettings, err)
+		return nil, false, fmt.Errorf("decode managed permissions in %s: %w", file.path, err)
 	}
 	managed := make(map[string][]string)
 	count := 0
 	for name, raw := range document.Permissions {
+		if !file.sweepAllLists && !slices.Contains(file.keys, name) {
+			continue
+		}
 		var value any
 		if err := json.Unmarshal(raw, &value); err != nil {
 			return nil, false, fmt.Errorf(
 				"decode permissions.%s in %s: %w",
 				name,
-				claudeSettings,
+				file.path,
 				err,
 			)
 		}
 		values, isList := value.([]any)
 		if !isList {
-			if value != nil && (name == "allow" || name == "ask") {
+			if value != nil && slices.Contains(file.keys, name) {
 				return nil, false, fmt.Errorf(
 					"permissions.%s in %s is not a list",
 					name,
-					claudeSettings,
+					file.path,
 				)
 			}
 			continue
@@ -798,30 +828,37 @@ func claudeManagedFragment(content []byte) ([]byte, bool, error) {
 				return nil, false, fmt.Errorf(
 					"permissions.%s in %s contains a non-string entry",
 					name,
-					claudeSettings,
+					file.path,
 				)
 			}
 			entries = append(entries, entry)
 		}
-		entries = managedClaudeEntries(entries)
+		entries = file.managedEntries(entries)
 		if len(entries) == 0 {
 			continue
 		}
 		managed[name] = entries
 		count += len(entries)
 	}
-	fragment, err := marshalClaudeManagedFragment(managed)
+	fragment, err := marshalManagedPermissionFragment(managed, file.path)
 	if err != nil {
 		return nil, count > 0,
-			fmt.Errorf("encode managed permissions in %s: %w", claudeSettings, err)
+			fmt.Errorf("encode managed permissions in %s: %w", file.path, err)
 	}
 	return fragment, count > 0, nil
 }
 
 func marshalClaudeManagedFragment(permissions map[string][]string) ([]byte, error) {
+	return marshalManagedPermissionFragment(permissions, "Claude")
+}
+
+func marshalManagedPermissionFragment(
+	permissions map[string][]string,
+	name string,
+) ([]byte, error) {
 	fragment, err := json.Marshal(permissions)
 	if err != nil {
-		return nil, fmt.Errorf("marshal managed Claude entries: %w", err)
+		return nil, fmt.Errorf("marshal managed %s entries: %w", name, err)
 	}
 	return fragment, nil
 }
@@ -1270,6 +1307,8 @@ func generatedManifestSurface(
 			return manifestSurface{}, fmt.Errorf("generated managed server entry is missing")
 		}
 		return newManifestSurface(recorded.Path, recorded.Kind, fragment), nil
+	case manifestKindCursorPermissions:
+		return generatedCursorPermissions(shellPermission)
 	case manifestKindClaudeSettings:
 		permissions, err := ClaudeManagedTools(shellPermission)
 		if err != nil {
@@ -1313,6 +1352,8 @@ func manifestSurfaceFromContent(
 		fragment, found, err = mcpManagedFragment(content)
 	case manifestKindClaudeSettings:
 		fragment, found, err = claudeManagedFragment(content)
+	case manifestKindCursorPermissions:
+		fragment, found, err = cursorPermissionFile().managedFragment(content)
 	default:
 		return manifestSurface{}, false, fmt.Errorf(
 			"unknown managed surface kind %q",
