@@ -99,8 +99,9 @@ func TestCursorPermissionsFreshSelection(t *testing.T) {
 			if len(allow) != test.count || !slices.Equal(allow, want) {
 				t.Fatalf("Cursor allow = %q, want exactly %d roster entries %q", allow, test.count, want)
 			}
-			if bytes.Contains(data, []byte(`"deny"`)) || bytes.Contains(data, []byte(`"ask"`)) {
-				t.Fatalf("fresh Cursor permissions created another list: %s", data)
+			// Cursor CLI refuses a project config whose permissions lack deny.
+			if !bytes.Contains(data, []byte(`"deny": []`)) || bytes.Contains(data, []byte(`"ask"`)) {
+				t.Fatalf("fresh Cursor permissions lack an empty deny or created ask: %s", data)
 			}
 			info, err := os.Stat(filepath.Join(root, cursorPermissions))
 			if err != nil {
@@ -117,6 +118,52 @@ func TestCursorPermissionsFreshSelection(t *testing.T) {
 				t.Fatalf("verify fresh Cursor permissions: %v", err)
 			}
 		})
+	}
+}
+
+func TestCursorPermissionsFreshCleanupDeletesFile(t *testing.T) {
+	root := t.TempDir()
+	options := nativeTestOptions(t, root, "cursor")
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	options.WriteMCPConfig = false
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	// The empty deny init created is not user content.
+	if _, err := os.Stat(filepath.Join(root, cursorPermissions)); !os.IsNotExist(err) {
+		t.Fatalf("cleanup kept Cursor permissions init created from nothing: %v", err)
+	}
+}
+
+func TestCursorPermissionsRepairMissingDeny(t *testing.T) {
+	fresh := t.TempDir()
+	options := nativeTestOptions(t, fresh, "cursor")
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Replace(string(cursorPermissionsContent(t, fresh)), "{\n",
+		"{\n  \"version\": 1,\n", 1)
+	// An earlier build wrote the same file without deny.
+	earlier := strings.Replace(want, ",\n    \"deny\": []", "", 1)
+	if earlier == want {
+		t.Fatalf("fresh Cursor permissions have no empty deny to drop: %s", want)
+	}
+	root := t.TempDir()
+	writeCursorPermissions(t, root, []byte(earlier))
+	options.Dir = root
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	if after := string(cursorPermissionsContent(t, root)); after != want {
+		t.Fatalf("rerun did not add only an empty deny: got %q, want %q", after, want)
+	}
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("verify repaired Cursor permissions: %v", err)
+	}
+	if result, err := Apply(options); err != nil || len(result.Paths) != 0 {
+		t.Fatalf("repaired Cursor permissions changed again: %+v, %v", result, err)
 	}
 }
 
@@ -261,10 +308,7 @@ func TestCursorPermissionsPreserveForeignTextAndDeny(t *testing.T) {
 			t.Fatal(err)
 		}
 		after := cursorPermissionsContent(t, root)
-		if !bytes.HasPrefix(after, []byte(prefix)) || !bytes.HasSuffix(after, []byte(suffix)) ||
-			!bytes.Contains(after, []byte(foreign)) {
-			t.Fatalf("Cursor init changed text outside managed allow entries: %q", after)
-		}
+		assertCursorTextAround(t, after, prefix+"[ "+foreign, suffix)
 		if bytes.Contains(after, []byte("old_tool")) ||
 			bytes.Contains(after, []byte("Mcp(just-mcp-work:*)")) {
 			t.Fatalf("Cursor init kept stale managed allow entries: %s", after)
@@ -287,6 +331,24 @@ func TestCursorPermissionsPreserveForeignTextAndDeny(t *testing.T) {
 		if _, err := VerifyManagedSurfaces(root); err != nil {
 			t.Fatalf("foreign Cursor content entered the manifest hash: %v", err)
 		}
+	}
+	options.WriteMCPConfig = false
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	after := cursorPermissionsContent(t, root)
+	assertCursorTextAround(t, after, prefix+"[ "+foreign, suffix)
+	if bytes.Contains(after, []byte("Mcp(just-mcp-work:run_task)")) {
+		t.Fatalf("Cursor cleanup kept managed allow entries: %q", after)
+	}
+}
+
+// assertCursorTextAround requires the bytes before and after the managed allow
+// entries, the deny list among them, to be exactly the operator's.
+func assertCursorTextAround(t *testing.T, after []byte, prefix, suffix string) {
+	t.Helper()
+	if !bytes.HasPrefix(after, []byte(prefix)) || !bytes.HasSuffix(after, []byte(suffix)) {
+		t.Fatalf("Cursor init changed text outside managed allow entries: %q", after)
 	}
 }
 

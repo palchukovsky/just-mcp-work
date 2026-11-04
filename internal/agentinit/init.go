@@ -2090,9 +2090,13 @@ func decodeJSONObject(data []byte, name string) (jsonSpan, error) {
 }
 
 type permissionFile struct {
-	owns          func(string) bool
-	path          string
-	keys          []string
+	owns func(string) bool
+	path string
+	keys []string
+	// emptyLists are lists the client requires to exist: a merge creates each
+	// one empty when it is absent or null and never edits it otherwise. An
+	// empty one carries no permission, so cleanup does not count it as content.
+	emptyLists    []string
 	sweepAllLists bool
 }
 
@@ -2135,6 +2139,9 @@ func (file permissionFile) merge(before []byte, refill []permissionList) ([]byte
 		for _, list := range refill {
 			lists[list.key] = list.tools
 		}
+		for _, key := range file.emptyLists {
+			lists[key] = []string{}
+		}
 		settings, setErr := jsonSetMember(data, root, "permissions", lists)
 		if setErr != nil {
 			return nil, fmt.Errorf("update %s: %w", file.path, setErr)
@@ -2152,7 +2159,35 @@ func (file permissionFile) merge(before []byte, refill []permissionList) ([]byte
 			return nil, err
 		}
 	}
-	return file.dropManaged(data, owning)
+	data, err = file.dropManaged(data, owning)
+	if err != nil {
+		return nil, err
+	}
+	return file.createEmptyLists(data)
+}
+
+// createEmptyLists adds each required list that is absent or null as an empty
+// list, leaving an existing one untouched.
+func (file permissionFile) createEmptyLists(data []byte) ([]byte, error) {
+	var err error
+	for _, key := range file.emptyLists {
+		permissions, spanErr := file.span(data)
+		if spanErr != nil {
+			return nil, spanErr
+		}
+		lists, membersErr := jsonObjectMembers(data, permissions)
+		if membersErr != nil {
+			return nil, fmt.Errorf("read %s: %w", file.path, membersErr)
+		}
+		if list, found := jsonFindMember(lists, key); found && !isJSONNull(data, list.value) {
+			continue
+		}
+		data, err = jsonSetMember(data, permissions, key, []string{})
+		if err != nil {
+			return nil, fmt.Errorf("update %s: %w", file.path, err)
+		}
+	}
+	return data, nil
 }
 
 func removeManagedClaudeSettings(before []byte) ([]byte, bool, error) {
@@ -2216,15 +2251,18 @@ func (file permissionFile) toolOnly(
 	foundManaged := false
 	keys := file.keys
 	for _, member := range members {
-		if !slices.Contains(keys, member.key) {
-			return false, nil
-		}
 		if data[member.value.start] != '[' {
 			return false, nil
 		}
 		elements, elementsErr := jsonArrayElements(data, member.value)
 		if elementsErr != nil {
 			return false, fmt.Errorf("decode existing %s: %w", file.path, elementsErr)
+		}
+		if len(elements) == 0 && slices.Contains(file.emptyLists, member.key) {
+			continue
+		}
+		if !slices.Contains(keys, member.key) {
+			return false, nil
 		}
 		for _, element := range elements {
 			var value any

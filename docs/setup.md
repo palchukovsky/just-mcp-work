@@ -136,8 +136,10 @@ Cursor CLI's `.cursor/cli.json` is read and edited only when `cursor` is
 selected. It follows `--write-mcp-config`: true replaces JMW entries in
 `permissions.allow`; false removes them. Other entries, keys and formatting
 are preserved outside that
-list. The `deny` list is never edited or included in the managed hash, including
-JMW deny entries: Cursor CLI gives those restrictions precedence over `allow`.
+list. Cursor CLI requires a `deny` list, so a write creates it empty when it is
+absent; otherwise `deny` is never edited or included in the managed hash,
+including JMW deny entries: Cursor CLI gives those restrictions precedence over
+`allow`. An empty `deny` does not keep the file on cleanup.
 `.mcp.json` and `.codex/config.toml` follow `--write-mcp-config` rather than
 `--agents`: they are rewritten when it is true and stripped of their JMW
 entries when it is false, whether or not `codex` was selected. Two selected
@@ -284,7 +286,7 @@ to keep the native configuration and its manifest consistent.
 entries use `Mcp(just-mcp-work:<tool>)`. With `allow`, the three shell tools
 are in Cursor CLI's allow list; with `ask`, they are absent, so Cursor CLI
 prompts. The twelve task tools are always allowed. Cursor CLI's `deny` list
-is never touched.
+is only created empty when absent, never otherwise touched.
 Pass `--shell-permission allow|ask` to answer it up front in a scripted run.
 Changing this answer with a narrower `--agents` selection requires selecting
 `claude` for recorded Claude settings and `cursor` for recorded Cursor CLI

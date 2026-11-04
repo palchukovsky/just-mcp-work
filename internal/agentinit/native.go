@@ -17,6 +17,8 @@ func cursorPermissionFile() permissionFile {
 	return permissionFile{
 		path: cursorPermissions,
 		keys: []string{"allow"},
+		// Cursor CLI refuses a project config whose permissions lack deny.
+		emptyLists: []string{"deny"},
 		owns: func(entry string) bool {
 			return strings.HasPrefix(strings.TrimSpace(entry), "Mcp("+serverName+":")
 		},

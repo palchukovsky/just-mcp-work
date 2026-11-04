@@ -294,10 +294,13 @@ fails startup verification; choose the name through `init` instead.
 
 With `--write-mcp-config=false` and Cursor selected, `init` removes its
 `Mcp(just-mcp-work:...)` allow entries and deletes `.cursor/cli.json` if only
-JMW state remains. Foreign content keeps the file. With Cursor deselected,
+JMW state remains; an empty `deny` list is not foreign content. Foreign
+content keeps the file. With Cursor deselected,
 `init` neither reads nor writes it and carries its manifest surface unchanged.
-The `deny` list and unknown keys are never edited or hashed; this preserves
-user restrictions, which Cursor CLI gives precedence over `allow`. Formatting
+Cursor CLI refuses a config without a `deny` list, so a write creates it empty
+when absent. Otherwise the `deny` list and unknown keys are never edited or
+hashed; this preserves user restrictions, which Cursor CLI gives precedence
+over `allow`. Formatting
 and foreign entries outside the rewritten `allow` list are preserved.
 
 `--shell-permission allow` includes the three shell tools in Cursor CLI's allow
@@ -366,7 +369,7 @@ In block files, JMW owns the text between its managed markers. In JSON files,
 it owns the `just-mcp-work` server entry and the JMW-prefixed permission entries
 in its managed lists; foreign servers and permission entries remain local
 content. In Cursor CLI's `.cursor/cli.json` only `allow` entries are managed;
-`deny` is always user content.
+`deny` entries are always user content.
 
 `init --runner-mode <name>=<mode>` remains repeatable for answering runner
 questions non-interactively. `serve --runner-mode` is retired: it is parsed
