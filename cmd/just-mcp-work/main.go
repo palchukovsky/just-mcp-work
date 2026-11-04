@@ -549,6 +549,12 @@ func initCommandWithIO(
 		"comma-separated agent targets: claude,codex,cursor,antigravity,copilot,windsurf,grok",
 	)
 	dryRun := flags.Bool("dry-run", false, "print planned diffs without writing files")
+	antigravityServerName := flags.String(
+		"antigravity-server-name",
+		"",
+		"native Antigravity MCP server name; omitted preserves the recorded name, "+
+			"or uses just-mcp-work for a new workspace",
+	)
 	keepRecorded := flags.Bool(
 		"keep-recorded",
 		false,
@@ -623,7 +629,7 @@ func initCommandWithIO(
 		_, _ = fmt.Fprintln(
 			flags.Output(),
 			"Usage: just-mcp-work init [--dir <dir>] [--agents <names>] [--dry-run] "+
-				"[--keep-recorded] "+
+				"[--keep-recorded] [--antigravity-server-name <name>] "+
 				"[--beta-test[=true|false]] "+
 				"[--claude-permissions ask|yes|no] [--shell-permission allow|ask] "+
 				"[--instructions-target project|workspace|machine] "+
@@ -643,6 +649,16 @@ func initCommandWithIO(
 	}
 	if flags.NArg() != 0 {
 		return errors.New("init accepts no positional arguments")
+	}
+	if flagWasSet(flags, "antigravity-server-name") && *antigravityServerName == "" {
+		return errors.New("--antigravity-server-name must not be empty")
+	}
+	selectedAgents := splitCSV(*agents)
+	if _, err := agentinit.SelectedAgentSet(
+		agentinit.SelectedAgents(selectedAgents),
+		*antigravityServerName,
+	); err != nil {
+		return fmt.Errorf("validate init flags: %w", err)
 	}
 	permissions, parsedShellPermission, err := parseInitPermissions(
 		*claudePermissions,
@@ -670,7 +686,6 @@ func initCommandWithIO(
 	if err != nil {
 		return err
 	}
-	selectedAgents := splitCSV(*agents)
 	if instructionsTarget != "" {
 		if validateErr := validateInstructionsAgents(
 			instructionsTarget,
@@ -826,18 +841,19 @@ func initCommandWithIO(
 	}
 	result, err := agentinit.Apply(
 		agentinit.Options{
-			Dir:                 *dir,
-			Agents:              selectedAgents,
-			BetaTest:            *betaTest,
-			PointerInstructions: pointerInstructions,
-			DryRun:              *dryRun,
-			WriteMCPConfig:      *writeMCPConfig,
-			InstructionsTarget:  instructionsTarget,
-			AIFamilies:          families,
-			RunnerModes:         canonicalModes,
-			Exclude:             excluded,
-			ClaudePermissions:   permissions,
-			ShellPermission:     parsedShellPermission,
+			Dir:                   *dir,
+			Agents:                selectedAgents,
+			BetaTest:              *betaTest,
+			PointerInstructions:   pointerInstructions,
+			DryRun:                *dryRun,
+			WriteMCPConfig:        *writeMCPConfig,
+			AntigravityServerName: *antigravityServerName,
+			InstructionsTarget:    instructionsTarget,
+			AIFamilies:            families,
+			RunnerModes:           canonicalModes,
+			Exclude:               excluded,
+			ClaudePermissions:     permissions,
+			ShellPermission:       parsedShellPermission,
 		},
 	)
 	if err != nil {

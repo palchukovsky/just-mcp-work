@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	manifestSchemaVersion = 1
+	manifestSchemaVersion = 2
 	manifestFile          = ".just-mcp-work/managed.json"
 	guideFile             = ".just-mcp-work/guide.txt"
 	retiredGuideFile      = ".just-mcp-work/guide.md"
@@ -55,8 +55,15 @@ type managedManifest struct {
 	ShellPermission string `json:"shell_permission,omitempty"`
 	// An absent AgentInstructions means workspace: every release before this
 	// field wrote agent instructions to the workspace scope by construction.
-	AgentInstructions *agentInstructions `json:"agent_instructions,omitempty"`
-	Surfaces          []manifestSurface  `json:"surfaces"`
+	AgentInstructions     *agentInstructions `json:"agent_instructions,omitempty"`
+	AntigravityServerName *string            `json:"antigravity_server_name,omitempty"`
+	Surfaces              []manifestSurface  `json:"surfaces"`
+}
+
+// Version 1 predates recorded native identity; version 2 requires it even
+// after the corresponding MCP surface has been intentionally removed.
+func supportedManifestSchema(schema int) bool {
+	return schema == 1 || schema == manifestSchemaVersion
 }
 
 //nolint:govet // Field order follows the stable on-disk schema.
@@ -71,9 +78,10 @@ type agentInstructions struct {
 }
 
 type manifestSurface struct {
-	Path   string `json:"path"`
-	Kind   string `json:"kind"`
-	SHA256 string `json:"sha256"`
+	Path       string `json:"path"`
+	Kind       string `json:"kind"`
+	SHA256     string `json:"sha256"`
+	ServerName string `json:"server_name,omitempty"`
 }
 
 // ManagedSurfaces reports the modes verified from a workspace's managed manifest.
@@ -96,6 +104,7 @@ func planManifest(
 	families aiprofile.Selection,
 	selected map[string]struct{},
 	instructionsTarget InstructionsTarget,
+	antigravityServerName string,
 ) ([]plannedEdit, []string, error) {
 	path, err := findScopedConfig(
 		scope,
@@ -108,10 +117,7 @@ func planManifest(
 	// path that resolves onto a surface this init already plans to write would
 	// have that surface read as a manifest. Report the collision before reading
 	// it, exactly as the complete plan reports one.
-	pending := make([]plannedEdit, 0, len(planned)+1)
-	pending = append(pending, planned...)
-	pending = append(pending, plannedEdit{surface: manifestFile, collisionPath: path})
-	if collisionErr := validatePlannedEditPaths(pending); collisionErr != nil {
+	if collisionErr := validateManifestPath(planned, path); collisionErr != nil {
 		return nil, nil, collisionErr
 	}
 	before, beforeExists, err := readOptionalFile(path)
@@ -144,12 +150,20 @@ func planManifest(
 		if decodeErr != nil {
 			return nil, nil, decodeErr
 		}
-		if recorded.SchemaVersion == manifestSchemaVersion {
+		if supportedManifestSchema(recorded.SchemaVersion) {
 			for _, surface := range recorded.Surfaces {
 				for _, config := range nativeMCPConfigs() {
 					if _, isSelected := selected[config.agent]; !isSelected &&
 						surface.Kind == config.kind {
-						expected, generationErr := generatedNativeMCPSurface(config.kind, scope, families)
+						if config.agent == "antigravity" &&
+							nativeSurfaceServerName(surface) != antigravityServerName {
+							return nil, nil, fmt.Errorf(
+								"cannot rename Antigravity server outside --agents; select antigravity",
+							)
+						}
+						expected, generationErr := generatedNativeMCPSurface(
+							config.kind, scope, families, nativeSurfaceServerName(surface),
+						)
 						if generationErr != nil {
 							return nil, nil, generationErr
 						}
@@ -160,6 +174,9 @@ func planManifest(
 								config.path,
 								strings.Join(append(selectedInstructionAgentNames(selected), config.agent), ","),
 							)
+						}
+						if config.agent == "antigravity" {
+							surface.ServerName = antigravityServerName
 						}
 						surfaces = append(surfaces, surface)
 					}
@@ -335,12 +352,13 @@ func planManifest(
 	}
 	after, err := json.MarshalIndent(
 		managedManifest{
-			SchemaVersion:       manifestSchemaVersion,
-			Release:             version.Current().Display(),
-			BetaTest:            betaTest,
-			InstructionsPointer: pointerInstructions,
-			AIFamilies:          families,
-			ShellPermission:     recordedShellPermission,
+			SchemaVersion:         manifestSchemaVersion,
+			Release:               version.Current().Display(),
+			BetaTest:              betaTest,
+			InstructionsPointer:   pointerInstructions,
+			AIFamilies:            families,
+			AntigravityServerName: &antigravityServerName,
+			ShellPermission:       recordedShellPermission,
 			AgentInstructions: &agentInstructions{
 				Target: string(instructionsTarget),
 				Agents: selectedInstructionAgentNames(selected),
@@ -360,6 +378,13 @@ func planManifest(
 		newEdit(manifestFile, path, before, after, 0o644, beforeExists, false),
 	)
 	return edits, notes, nil
+}
+
+func validateManifestPath(planned []plannedEdit, path string) error {
+	pending := make([]plannedEdit, 0, len(planned)+1)
+	pending = append(pending, planned...)
+	pending = append(pending, plannedEdit{surface: manifestFile, collisionPath: path})
+	return validatePlannedEditPaths(pending)
 }
 
 func recordedInstructionsTarget(manifest managedManifest) (InstructionsTarget, error) {
@@ -590,6 +615,9 @@ func decodeManagedManifest(path string, data []byte) (managedManifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return managedManifest{}, fmt.Errorf("decode managed manifest %s: %w", path, err)
 	}
+	if _, err := recordedAntigravityIdentity(manifest); err != nil {
+		return managedManifest{}, fmt.Errorf("managed manifest %s: %w", path, err)
+	}
 	return manifest, nil
 }
 
@@ -763,19 +791,26 @@ func managedBlockFragment(
 }
 
 func mcpManagedFragment(content []byte) ([]byte, bool, error) {
+	return namedMCPManagedFragment(content, serverName)
+}
+
+func namedMCPManagedFragment(content []byte, name string) ([]byte, bool, error) {
 	var document struct {
 		MCPServers map[string]json.RawMessage `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(content, &document); err != nil {
 		return nil, false, fmt.Errorf("decode managed %s entry: %w", mcpConfig, err)
 	}
-	raw, found := document.MCPServers[serverName]
+	raw, found := document.MCPServers[name]
 	if !found {
 		return nil, false, nil
 	}
 	var entry any
 	if err := json.Unmarshal(raw, &entry); err != nil {
 		return nil, true, fmt.Errorf("decode managed server entry in %s: %w", mcpConfig, err)
+	}
+	if name != serverName {
+		entry = map[string]any{name: entry}
 	}
 	fragment, err := json.Marshal(entry)
 	if err != nil {
@@ -887,7 +922,7 @@ func ReadRecordedBetaTest(root string) (bool, bool, error) {
 			decodeErr,
 		)
 	}
-	if manifest.SchemaVersion != manifestSchemaVersion {
+	if !supportedManifestSchema(manifest.SchemaVersion) {
 		return false, false, fmt.Errorf(
 			"%w in managed manifest %s: unsupported schema version %d",
 			ErrUnrecognizedBetaTest,
@@ -914,7 +949,7 @@ func ReadRecordedInstructionsPointer(root string) (bool, bool, error) {
 
 	var manifest managedManifest
 	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
-		manifest.SchemaVersion != manifestSchemaVersion {
+		!supportedManifestSchema(manifest.SchemaVersion) {
 		//nolint:nilerr // Unknown mode is handled by planning an explicit or full choice.
 		return false, false, nil
 	}
@@ -937,7 +972,7 @@ func ReadRecordedShellPermission(root string) (ShellPermission, bool, error) {
 
 	var manifest managedManifest
 	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
-		manifest.SchemaVersion != manifestSchemaVersion || manifest.ShellPermission == "" {
+		!supportedManifestSchema(manifest.SchemaVersion) || manifest.ShellPermission == "" {
 		//nolint:nilerr // No recorded choice is asked about; planManifest refuses an undecodable one.
 		return "", false, nil
 	}
@@ -967,7 +1002,7 @@ func ReadRecordedInstructionsTarget(root string) (InstructionsTarget, bool, erro
 
 	var manifest managedManifest
 	if decodeErr := json.Unmarshal(data, &manifest); decodeErr != nil ||
-		manifest.SchemaVersion != manifestSchemaVersion {
+		!supportedManifestSchema(manifest.SchemaVersion) {
 		//nolint:nilerr // No recorded choice is offered when the manifest is not usable.
 		return "", false, nil
 	}
@@ -1003,7 +1038,7 @@ func ReadRecordedAIFamilies(root string) (aiprofile.Selection, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
-	if manifest.SchemaVersion != manifestSchemaVersion {
+	if !supportedManifestSchema(manifest.SchemaVersion) {
 		return nil, false, fmt.Errorf(
 			"managed manifest %s has unsupported schema version %d",
 			manifestPath,
@@ -1052,7 +1087,10 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			managedManifestRecovery(root),
 		)
 	}
-	if manifest.SchemaVersion != manifestSchemaVersion {
+	if _, identityErr := recordedAntigravityIdentity(manifest); identityErr != nil {
+		return ManagedSurfaces{}, fmt.Errorf("managed manifest %s: %w", manifestPath, identityErr)
+	}
+	if !supportedManifestSchema(manifest.SchemaVersion) {
 		description := fmt.Sprintf("has unsupported schema version %d", manifest.SchemaVersion)
 		if manifest.SchemaVersion > manifestSchemaVersion {
 			description = fmt.Sprintf("is too new (schema version %d)", manifest.SchemaVersion)
@@ -1277,7 +1315,9 @@ func generatedManifestSurface(
 			[]byte(promptText+"\n"),
 		), nil
 	case manifestKindGrokConfig, manifestKindAntigravityConfig, manifestKindCursorConfig:
-		return generatedNativeMCPSurface(recorded.Kind, root, families)
+		return generatedNativeMCPSurface(
+			recorded.Kind, root, families, nativeSurfaceServerName(recorded),
+		)
 	case manifestKindCodexConfig:
 		content, err := mergeCodexConfig(
 			nil,
@@ -1348,7 +1388,9 @@ func manifestSurfaceFromContent(
 		fragment, found = content, true
 	case manifestKindCodexConfig, manifestKindGrokConfig:
 		fragment, found, err = managedBlockFragment(content, codexBlockRange)
-	case manifestKindMCPConfig, manifestKindAntigravityConfig, manifestKindCursorConfig:
+	case manifestKindAntigravityConfig:
+		fragment, found, err = namedMCPManagedFragment(content, nativeSurfaceServerName(recorded))
+	case manifestKindMCPConfig, manifestKindCursorConfig:
 		fragment, found, err = mcpManagedFragment(content)
 	case manifestKindClaudeSettings:
 		fragment, found, err = claudeManagedFragment(content)
@@ -1363,7 +1405,9 @@ func manifestSurfaceFromContent(
 	if err != nil || !found {
 		return manifestSurface{}, found, err
 	}
-	return newManifestSurface(recorded.Path, recorded.Kind, fragment), true, nil
+	surface := newManifestSurface(recorded.Path, recorded.Kind, fragment)
+	surface.ServerName = recorded.ServerName
+	return surface, true, nil
 }
 
 func managedManifestRecovery(root string) string {

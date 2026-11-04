@@ -76,8 +76,8 @@ func TestApplyWritesManifestForEveryManagedSurfaceAndIsIdempotent(t *testing.T) 
 	if manifest.SchemaVersion != manifestSchemaVersion {
 		t.Fatalf("schema version = %d, want %d", manifest.SchemaVersion, manifestSchemaVersion)
 	}
-	if manifestSchemaVersion != 1 {
-		t.Fatalf("manifest schema version = %d, want unchanged version 1", manifestSchemaVersion)
+	if manifestSchemaVersion != 2 {
+		t.Fatalf("manifest schema version = %d, want identity-aware version 2", manifestSchemaVersion)
 	}
 	if manifest.Release != version.Current().Display() {
 		t.Fatalf("release = %q, want %q", manifest.Release, version.Current().Display())
@@ -1427,11 +1427,12 @@ func TestReadRecordedAIFamiliesDoesNotRecognizeTheSingleFamilyManifest(t *testin
 	root := applyVerificationWorkspace(t)
 	manifest, _ := readManagedManifest(t, root)
 	singleFamilyDocument := map[string]any{
-		"schema_version":   manifest.SchemaVersion,
-		"release":          manifest.Release,
-		"ai_family":        "unknown",
-		"shell_permission": manifest.ShellPermission,
-		"surfaces":         manifest.Surfaces,
+		"antigravity_server_name": manifest.AntigravityServerName,
+		"schema_version":          manifest.SchemaVersion,
+		"release":                 manifest.Release,
+		"ai_family":               "unknown",
+		"shell_permission":        manifest.ShellPermission,
+		"surfaces":                manifest.Surfaces,
 	}
 	writeJSONFile(t, filepath.Join(root, manifestFile), singleFamilyDocument)
 
@@ -1461,8 +1462,8 @@ func TestReadRecordedAIFamiliesSeparatesUnrecognizedListsFromUnusableManifests(t
 		{name: "malformed", content: []byte("{not json"), want: "decode managed manifest"},
 		{
 			name:    "unsupported schema",
-			content: []byte(`{"schema_version": 2, "ai_families": ["codex"]}`),
-			want:    "unsupported schema version 2",
+			content: []byte(`{"schema_version": 3, "ai_families": ["codex"]}`),
+			want:    "unsupported schema version 3",
 		},
 		{
 			name:         "null list",
@@ -1842,10 +1843,11 @@ func TestVerifyManagedSurfacesTreatsManifestWithoutBetaTestAsPlain(t *testing.T)
 	root := applyVerificationWorkspace(t)
 	manifest, _ := readManagedManifest(t, root)
 	legacyDocument := map[string]any{
-		"schema_version": manifest.SchemaVersion,
-		"release":        manifest.Release,
-		"ai_families":    manifest.AIFamilies,
-		"surfaces":       manifest.Surfaces,
+		"antigravity_server_name": manifest.AntigravityServerName,
+		"schema_version":          manifest.SchemaVersion,
+		"release":                 manifest.Release,
+		"ai_families":             manifest.AIFamilies,
+		"surfaces":                manifest.Surfaces,
 	}
 	writeJSONFile(t, filepath.Join(root, manifestFile), legacyDocument)
 
@@ -1914,11 +1916,12 @@ func TestVerifyManagedSurfacesTreatsManifestWithoutShellPermissionAsAsk(t *testi
 	root := applyVerificationWorkspace(t)
 	manifest, _ := readManagedManifest(t, root)
 	legacyDocument := map[string]any{
-		"schema_version": manifest.SchemaVersion,
-		"release":        manifest.Release,
-		"beta_test":      manifest.BetaTest,
-		"ai_families":    manifest.AIFamilies,
-		"surfaces":       manifest.Surfaces,
+		"antigravity_server_name": manifest.AntigravityServerName,
+		"schema_version":          manifest.SchemaVersion,
+		"release":                 manifest.Release,
+		"beta_test":               manifest.BetaTest,
+		"ai_families":             manifest.AIFamilies,
+		"surfaces":                manifest.Surfaces,
 	}
 	writeJSONFile(t, filepath.Join(root, manifestFile), legacyDocument)
 
@@ -2586,7 +2589,7 @@ func TestVerifyManagedSurfacesRejectsUnreadableAndTooNewManifest(t *testing.T) {
 		{
 			name: "unknown schema",
 			manifest: []byte(
-				"{\"schema_version\":2,\"release\":\"future\",\"surfaces\":[]}",
+				"{\"schema_version\":3,\"release\":\"future\",\"surfaces\":[]}",
 			),
 			wantText: "is too new",
 		},
@@ -2840,7 +2843,7 @@ func TestReadRecordedInstructionsTarget(t *testing.T) {
 	t.Run("unusable manifest has no choice", func(t *testing.T) {
 		for _, content := range [][]byte{
 			[]byte("{not json"),
-			[]byte(`{"schema_version":2,"agent_instructions":{"target":"project"}}`),
+			[]byte(`{"schema_version":3,"agent_instructions":{"target":"project"}}`),
 		} {
 			root := t.TempDir()
 			writeTestFile(t, filepath.Join(root, manifestFile), content)

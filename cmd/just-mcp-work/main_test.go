@@ -2204,12 +2204,24 @@ func TestInitAsksAgainWhenRecordedBetaModeCannotBeRead(t *testing.T) {
 			}
 			after := []byte(strings.Replace(
 				string(before),
-				`"schema_version": 1`,
 				`"schema_version": 2`,
+				`"schema_version": 3`,
 				1,
 			))
 			if name == "malformed" {
 				after = []byte("{not json")
+			} else {
+				// This tests the pre-identity unknown-schema contract. Identity-aware
+				// documents with unsupported schemas must instead refuse adoption.
+				var document map[string]any
+				if err = json.Unmarshal(after, &document); err != nil {
+					t.Fatal(err)
+				}
+				delete(document, "antigravity_server_name")
+				after, err = json.Marshal(document)
+				if err != nil {
+					t.Fatal(err)
+				}
 			}
 			if bytes.Equal(after, before) {
 				t.Fatal("manifest rewrite did not change the document")

@@ -267,6 +267,31 @@ verified. Grok uses the `claude` presentation family; Antigravity CLI uses
 `antigravity`; Cursor uses `cursor`. Client selection remains separate from
 family selection.
 
+Use `init --agents antigravity --antigravity-server-name <name>` to select the
+Antigravity native MCP entry name. Names contain 1-128 ASCII letters, digits,
+`-`, `_`, or `.`, and start with a letter or digit. Without this flag, a new
+workspace uses `just-mcp-work`; later runs preserve the recorded name, including
+with `--keep-recorded` and after `--write-mcp-config=false`. Each workspace or
+worktree can receive its own explicit name. JMW does not derive names from paths.
+The name is independent of the model provider and AI family: use
+`--ai antigravity` for Antigravity, including when it hosts Anthropic models.
+Claude, Codex, Grok and Cursor names and permission references remain canonical.
+The generated instructions refer to JMW as a product and do not bind a server key.
+
+Changing the name migrates the recorded Antigravity entry only when its content
+still matches its recorded digest. A missing or edited old entry must first be
+repaired by rerunning `init` with its recorded name. After intentional removal,
+`init` can re-add the recorded name or select a free new name when writing MCP
+configuration. An occupied destination is
+rejected before any write; unowned entries are never adopted or removed for a
+rename. Unrelated servers, authentication and client settings are preserved.
+Removing MCP configuration removes only the recorded entry; deselecting
+Antigravity preserves its entry and verification. Renaming requires Antigravity
+in `--agents` and cannot be combined with removal. Missing or contradictory
+recorded identity is an error. Pre-identity manifests describe only the
+canonical entry and remain supported. Manually renaming a generated key still
+fails startup verification; choose the name through `init` instead.
+
 With `--write-mcp-config=false` and Cursor selected, `init` removes its
 `Mcp(just-mcp-work:...)` allow entries and deletes `.cursor/cli.json` if only
 JMW state remains. Foreign content keeps the file. With Cursor deselected,
@@ -763,6 +788,16 @@ or output the user asked to see. Use a normal shell or a read tool for those.
 delegated build that pours a full log into its own context defeats the purpose.
 
 ## Failure modes
+
+If `init` or `serve` reports missing, invalid or contradictory recorded
+Antigravity identity, rerunning `init` alone cannot repair it. Restore known-good
+identity metadata in `.just-mcp-work/managed.json` from a backup, or repair only
+the identity metadata using known-good values. Keep `schema_version`,
+`antigravity_server_name` and any Antigravity surface's `server_name` consistent;
+new manifests use schema 2 and retain the name after MCP removal. Do not downgrade
+the schema or guess a name to bypass the refusal. Preserve unrelated configuration
+and recorded answers, then rerun `init`. Genuine pre-identity schema 1 manifests
+have neither name field and retain their canonical meaning.
 
 An `init` in the recovery commands below asks whether the workspace takes part
 in the JMW beta test unless `--beta-test` answers it. It offers the mode a

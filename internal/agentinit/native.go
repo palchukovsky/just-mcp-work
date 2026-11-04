@@ -107,12 +107,14 @@ type nativeMCPConfig struct {
 	path   string
 	kind   string
 	family aiprofile.Family
+	server string
 }
 
 func nativeMCPConfigs() []nativeMCPConfig {
 	return []nativeMCPConfig{
 		{
 			agent:  "cursor",
+			server: serverName,
 			name:   "Cursor",
 			path:   ".cursor/mcp.json",
 			kind:   manifestKindCursorConfig,
@@ -120,6 +122,7 @@ func nativeMCPConfigs() []nativeMCPConfig {
 		},
 		{
 			agent:  "antigravity",
+			server: serverName,
 			name:   "Antigravity CLI",
 			path:   ".agents/mcp_config.json",
 			kind:   manifestKindAntigravityConfig,
@@ -127,6 +130,7 @@ func nativeMCPConfigs() []nativeMCPConfig {
 		},
 		{
 			agent:  "grok",
+			server: serverName,
 			name:   "Grok",
 			path:   ".grok/config.toml",
 			kind:   manifestKindGrokConfig,
@@ -144,7 +148,7 @@ func (config nativeMCPConfig) merge(
 	case "grok":
 		return mergeTOMLMCPConfig(before, root, profile, nil)
 	case "antigravity", "cursor":
-		return mergeMCPConfig(before, root, profile)
+		return mergeNamedMCPConfig(before, root, profile, config.server)
 	default:
 		return nil, fmt.Errorf("unsupported native MCP client %q", config.agent)
 	}
@@ -155,7 +159,7 @@ func (config nativeMCPConfig) remove(before []byte) ([]byte, bool, error) {
 	case "grok":
 		return removeCodexConfig(before)
 	case "antigravity", "cursor":
-		after, remove, err := removeMCPConfig(before)
+		after, remove, err := removeNamedMCPConfig(before, config.server)
 		if remove {
 			after = emptyJSONObject(after)
 		}
@@ -166,17 +170,25 @@ func (config nativeMCPConfig) remove(before []byte) ([]byte, bool, error) {
 }
 
 func (config nativeMCPConfig) surface(content []byte) (manifestSurface, bool, error) {
-	return manifestSurfaceFromContent(manifestSurface{Path: config.path, Kind: config.kind}, content)
+	recorded := manifestSurface{Path: config.path, Kind: config.kind}
+	if config.agent == "antigravity" {
+		recorded.ServerName = config.server
+	}
+	return manifestSurfaceFromContent(recorded, content)
 }
 
 func generatedNativeMCPSurface(
 	kind string,
 	root string,
 	families aiprofile.Selection,
+	antigravityServerName string,
 ) (manifestSurface, error) {
 	for _, config := range nativeMCPConfigs() {
 		if config.kind != kind {
 			continue
+		}
+		if config.agent == "antigravity" {
+			config.server = antigravityServerName
 		}
 		content, err := config.merge(nil, root, families.ProfileFor(config.family))
 		if err != nil {
@@ -217,6 +229,14 @@ func planNativeMCPConfigs(
 		if err != nil {
 			return nil, nil, err
 		}
+		original := before
+		if config.agent == "antigravity" {
+			before, err = planAntigravityIdentity(scope, before, options)
+			if err != nil {
+				return nil, nil, fmt.Errorf("plan %s: %w", config.path, err)
+			}
+			config.server = options.AntigravityServerName
+		}
 		var after []byte
 		remove := false
 		if options.WriteMCPConfig {
@@ -242,7 +262,7 @@ func planNativeMCPConfigs(
 		if err != nil {
 			return nil, nil, err
 		}
-		edits = append(edits, *newEdit(config.path, path, before, after, 0o600, exists, remove))
+		edits = append(edits, *newEdit(config.path, path, original, after, 0o600, exists, remove))
 	}
 	return edits, surfaces, nil
 }

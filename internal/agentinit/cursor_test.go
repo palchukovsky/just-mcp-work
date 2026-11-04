@@ -137,6 +137,7 @@ func TestCursorPermissionsManifestRecordsShellWithoutCodex(t *testing.T) {
 		testAIFamilies(),
 		map[string]struct{}{"cursor": {}},
 		InstructionsTargetWorkspace,
+		serverName,
 	)
 	if err != nil {
 		t.Fatal(err)

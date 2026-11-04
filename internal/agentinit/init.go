@@ -415,6 +415,9 @@ type Options struct {
 	PointerInstructions bool
 	DryRun              bool
 	WriteMCPConfig      bool
+	// AntigravityServerName selects the native entry. Empty preserves the recorded
+	// identity, or uses just-mcp-work for a new workspace.
+	AntigravityServerName string
 	// InstructionsTarget selects the directory family that receives agent
 	// instruction files. An empty value is invalid.
 	InstructionsTarget InstructionsTarget
@@ -501,12 +504,9 @@ func Apply(options Options) (Result, error) {
 		return Result{}, err
 	}
 	agents := SelectedAgents(options.Agents)
-	selected := make(map[string]struct{}, len(agents))
-	for _, agent := range agents {
-		if _, ok := agentTarget(agent); !ok {
-			return Result{}, fmt.Errorf("unsupported agent %q", agent)
-		}
-		selected[agent] = struct{}{}
+	selected, err := SelectedAgentSet(agents, options.AntigravityServerName)
+	if err != nil {
+		return Result{}, err
 	}
 	resolvedShellPermission, shellPermissionErr := resolveShellPermission(scope, agents, options)
 	if shellPermissionErr != nil {
@@ -525,6 +525,13 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
+	identity, identityErr := resolveAntigravityIdentity(
+		scope, options.AntigravityServerName, agentEdits,
+	)
+	if identityErr != nil {
+		return Result{}, identityErr
+	}
+	options.AntigravityServerName = identity
 	edits := append([]plannedEdit(nil), agentEdits...)
 	workspaceEdits, workspaceSurfaces, err := planWorkspaceConfiguration(
 		scope,
@@ -548,6 +555,7 @@ func Apply(options Options) (Result, error) {
 		options.AIFamilies,
 		selected,
 		options.InstructionsTarget,
+		options.AntigravityServerName,
 	)
 	if err != nil {
 		return Result{}, err
@@ -569,6 +577,26 @@ func Apply(options Options) (Result, error) {
 		return Result{}, err
 	}
 	return result, nil
+}
+
+// SelectedAgentSet validates agent targets and an optional Antigravity identity.
+func SelectedAgentSet(agents []string, antigravityServerName string) (map[string]struct{}, error) {
+	selected := make(map[string]struct{}, len(agents))
+	for _, agent := range agents {
+		if _, ok := agentTarget(agent); !ok {
+			return nil, fmt.Errorf("unsupported agent %q", agent)
+		}
+		selected[agent] = struct{}{}
+	}
+	if _, ok := selected["antigravity"]; !ok && antigravityServerName != "" {
+		return nil, fmt.Errorf("--antigravity-server-name requires --agents antigravity")
+	}
+	if antigravityServerName != "" {
+		if err := ValidateAntigravityServerName(antigravityServerName); err != nil {
+			return nil, err
+		}
+	}
+	return selected, nil
 }
 
 func resolveShellPermission(
@@ -1946,6 +1974,15 @@ func mergeMCPConfig(
 	scopeRoot string,
 	profile aiprofile.Profile,
 ) ([]byte, error) {
+	return mergeNamedMCPConfig(before, scopeRoot, profile, serverName)
+}
+
+func mergeNamedMCPConfig(
+	before []byte,
+	scopeRoot string,
+	profile aiprofile.Profile,
+	name string,
+) ([]byte, error) {
 	entry, err := managedServerEntry(scopeRoot, profile)
 	if err != nil {
 		return nil, err
@@ -1961,7 +1998,7 @@ func mergeMCPConfig(
 	}
 	servers, found := jsonFindMember(members, "mcpServers")
 	if !found || isJSONNull(data, servers.value) {
-		merged, setErr := jsonSetMember(data, root, "mcpServers", map[string]any{serverName: entry})
+		merged, setErr := jsonSetMember(data, root, "mcpServers", map[string]any{name: entry})
 		if setErr != nil {
 			return nil, fmt.Errorf("update %s: %w", mcpConfig, setErr)
 		}
@@ -1974,7 +2011,7 @@ func mergeMCPConfig(
 			mcpConfig,
 		)
 	}
-	merged, err := jsonSetMember(data, servers.value, serverName, entry)
+	merged, err := jsonSetMember(data, servers.value, name, entry)
 	if err != nil {
 		return nil, fmt.Errorf("update %s: %w", mcpConfig, err)
 	}
@@ -1982,6 +2019,10 @@ func mergeMCPConfig(
 }
 
 func removeMCPConfig(before []byte) ([]byte, bool, error) {
+	return removeNamedMCPConfig(before, serverName)
+}
+
+func removeNamedMCPConfig(before []byte, name string) ([]byte, bool, error) {
 	if len(bytes.TrimSpace(before)) == 0 {
 		return before, false, nil
 	}
@@ -2007,13 +2048,13 @@ func removeMCPConfig(before []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("decode existing %s: %w", mcpConfig, err)
 	}
-	if _, found := jsonFindMember(serverMembers, serverName); !found {
+	if _, found := jsonFindMember(serverMembers, name); !found {
 		return before, false, nil
 	}
 	if len(members) == 1 && len(serverMembers) == 1 {
 		return nil, true, nil
 	}
-	after, err := jsonRemoveMember(before, servers.value, serverName)
+	after, err := jsonRemoveMember(before, servers.value, name)
 	if err != nil {
 		return nil, false, fmt.Errorf("update %s: %w", mcpConfig, err)
 	}
