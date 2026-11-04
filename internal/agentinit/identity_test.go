@@ -30,22 +30,12 @@ func identityDocument(t *testing.T, root string) map[string]json.RawMessage {
 
 func readIdentityFile(t *testing.T, root, path string) []byte {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
+	return readTestFile(t, filepath.Join(root, path))
 }
 
 func writeIdentityFile(t *testing.T, root, path string, data []byte) {
 	t.Helper()
-	full := filepath.Join(root, path)
-	if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(full, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(root, path), data)
 }
 
 func TestAntigravityIdentityRootsProfilesAndIdempotence(t *testing.T) {
@@ -136,7 +126,10 @@ func TestAntigravityIdentityWorktreeUsesItsOwnRoot(t *testing.T) {
 func TestAntigravityIdentityMigrationPreservesUnownedState(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
-	foreign := []byte(`{"auth":{"token":"test-only"},"mcpServers":{"other":{"command":"other","env":{"X":"Y"}}}}`)
+	foreign := []byte(
+		`{"auth":{"token":"test-only"},` +
+			`"mcpServers":{"other":{"command":"other","env":{"X":"Y"}}}}`,
+	)
 	writeIdentityFile(t, root, identityConfig, foreign)
 	options := nativeTestOptions(t, root, "antigravity")
 	if _, err := Apply(options); err != nil {
@@ -146,9 +139,6 @@ func TestAntigravityIdentityMigrationPreservesUnownedState(t *testing.T) {
 	manifest, _ := readManagedManifest(t, root)
 	manifest.SchemaVersion = 1
 	manifest.AntigravityServerName = nil
-	for index := range manifest.Surfaces {
-		manifest.Surfaces[index].ServerName = ""
-	}
 	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
 	if _, err := VerifyManagedSurfaces(root); err != nil {
 		t.Fatalf("legacy canonical manifest rejected: %v", err)
@@ -175,10 +165,14 @@ func TestAntigravityIdentityMigrationPreservesUnownedState(t *testing.T) {
 
 func TestAntigravityIdentityRefusesCollisionsAndInvalidNamesBeforeWrites(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	for _, name := range []string{"taken", "bad/name", "bad name", "_prefix", strings.Repeat("a", 129)} {
+	names := []string{"taken", "bad/name", "bad name", "_prefix", strings.Repeat("a", 129)}
+	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			root := t.TempDir()
-			before := []byte(`{"mcpServers":{"taken":{"command":"foreign"},"just-mcp-work":{"command":"unowned"}}}`)
+			before := []byte(
+				`{"mcpServers":{"taken":{"command":"foreign"},` +
+					`"just-mcp-work":{"command":"unowned"}}}`,
+			)
 			writeIdentityFile(t, root, identityConfig, before)
 			options := nativeTestOptions(t, root, "antigravity")
 			options.AntigravityServerName = name
@@ -219,16 +213,15 @@ func TestAntigravityIdentityDigestBindsName(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := readIdentityFile(t, root, identityConfig)
-	writeIdentityFile(t, root, identityConfig,
-		bytes.ReplaceAll(data, []byte("jmw-scoped"), []byte("jmw-imposter")))
+	writeIdentityFile(
+		t,
+		root,
+		identityConfig,
+		bytes.ReplaceAll(data, []byte("jmw-scoped"), []byte("jmw-imposter")),
+	)
 	manifest, _ := readManagedManifest(t, root)
 	name := "jmw-imposter"
 	manifest.AntigravityServerName = &name
-	for index := range manifest.Surfaces {
-		if manifest.Surfaces[index].Kind == manifestKindAntigravityConfig {
-			manifest.Surfaces[index].ServerName = name
-		}
-	}
 	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
 	if _, err := VerifyManagedSurfaces(root); err == nil {
 		t.Fatal("recorded digest did not bind the selected identity")
@@ -267,7 +260,8 @@ func TestAntigravityIdentityRejectsUnsafeMigration(t *testing.T) {
 
 func TestAntigravityIdentityTamperRepairRemovalAndDeselection(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	for _, mutation := range []string{"key", "args", "entry", "file", "recorded", "surface", "conflict"} {
+	mutations := []string{"key", "args", "entry", "file", "recorded", "edited name"}
+	for _, mutation := range mutations {
 		t.Run(mutation, func(t *testing.T) {
 			root := t.TempDir()
 			options := nativeTestOptions(t, root, "antigravity")
@@ -279,11 +273,19 @@ func TestAntigravityIdentityTamperRepairRemovalAndDeselection(t *testing.T) {
 			manifest, _ := readManagedManifest(t, root)
 			switch mutation {
 			case "key":
-				writeIdentityFile(t, root, identityConfig,
-					bytes.ReplaceAll(original, []byte("jmw-scoped"), []byte("renamed")))
+				writeIdentityFile(
+					t,
+					root,
+					identityConfig,
+					bytes.ReplaceAll(original, []byte("jmw-scoped"), []byte("renamed")),
+				)
 			case "args":
-				writeIdentityFile(t, root, identityConfig,
-					bytes.ReplaceAll(original, []byte("antigravity"), []byte("claude")))
+				writeIdentityFile(
+					t,
+					root,
+					identityConfig,
+					bytes.ReplaceAll(original, []byte("antigravity"), []byte("claude")),
+				)
 			case "entry":
 				writeIdentityFile(t, root, identityConfig, []byte(`{"mcpServers":{}}`))
 			case "file":
@@ -292,11 +294,7 @@ func TestAntigravityIdentityTamperRepairRemovalAndDeselection(t *testing.T) {
 				}
 			case "recorded":
 				manifest.AntigravityServerName = nil
-			case "surface":
-				for index := range manifest.Surfaces {
-					manifest.Surfaces[index].ServerName = ""
-				}
-			case "conflict":
+			case "edited name":
 				name := "different"
 				manifest.AntigravityServerName = &name
 			}
@@ -306,15 +304,39 @@ func TestAntigravityIdentityTamperRepairRemovalAndDeselection(t *testing.T) {
 			}
 			options.AntigravityServerName = ""
 			_, err := Apply(options)
-			invalidMetadata := slices.Contains([]string{"recorded", "surface", "conflict"}, mutation)
-			if invalidMetadata {
-				if err == nil {
-					t.Fatal("missing or contradictory recorded identity silently replaced")
-				}
-				return
+			switch mutation {
+			case "recorded":
+				assertRecordedSurfaceIdentityNotRepaired(t, options, err)
+			case "edited name":
+				assertEditedIdentityApplied(t, root, err)
+			default:
+				assertIdentityRepairLifecycle(t, root, options, err)
 			}
-			assertIdentityRepairLifecycle(t, root, options, err)
 		})
+	}
+}
+
+func assertRecordedSurfaceIdentityNotRepaired(t *testing.T, options Options, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("missing recorded identity of a recorded surface silently replaced")
+	}
+	options.AntigravityServerName = "jmw-scoped"
+	if _, err = Apply(options); err == nil {
+		t.Fatal("explicit name repaired the identity of a recorded surface")
+	}
+}
+
+// assertEditedIdentityApplied pins the single recorded name: init takes an
+// edited one and keeps the previous entry as content it no longer owns.
+func assertEditedIdentityApplied(t *testing.T, root string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("edited recorded name was not applied: %v", err)
+	}
+	servers := identityDocument(t, root)
+	if servers["different"] == nil || servers["jmw-scoped"] == nil {
+		t.Fatalf("edited name lost an entry: %s", servers)
 	}
 }
 
@@ -398,12 +420,11 @@ func TestAntigravityIdentityFormatSurvivesRemoval(t *testing.T) {
 				writeJSONFile(t, filepath.Join(root, manifestFile), document)
 				broken := readIdentityFile(t, root, manifestFile)
 				before := readIdentityFile(t, root, identityConfig)
-				_, err := VerifyManagedSurfaces(root)
-				assertIdentityRecoveryError(t, err)
+				_, verifyErr := VerifyManagedSurfaces(root)
 				options.WriteMCPConfig = true
 				options.AntigravityServerName = ""
-				_, err = Apply(options)
-				assertIdentityRecoveryError(t, err)
+				_, err := Apply(options)
+				assertRemovedIdentityRefusal(t, test.field == "schema_version", verifyErr, err)
 				if !bytes.Equal(before, readIdentityFile(t, root, identityConfig)) ||
 					!bytes.Equal(broken, readIdentityFile(t, root, manifestFile)) {
 					t.Fatal("invalid removed identity changed client state or recorded answers")
@@ -420,48 +441,160 @@ func TestAntigravityIdentityFormatSurvivesRemoval(t *testing.T) {
 	}
 }
 
+// assertRemovedIdentityRefusal checks serve and init refuse damaged identity
+// metadata. A damaged schema is named as the cause, before the identity is
+// judged, and init will not replace a document recording a name.
+func assertRemovedIdentityRefusal(t *testing.T, damagedSchema bool, verifyErr, initErr error) {
+	t.Helper()
+	if !damagedSchema {
+		assertIdentityRecoveryError(t, verifyErr)
+		assertIdentityRecoveryError(t, initErr)
+		return
+	}
+	for _, refusal := range []error{verifyErr, initErr} {
+		if refusal == nil || !strings.Contains(refusal.Error(), "schema") ||
+			!strings.Contains(refusal.Error(), "Antigravity server identity") {
+			t.Fatalf("damaged identity schema was not refused as one: %v", refusal)
+		}
+	}
+	for _, recovery := range []string{"backup", "release that wrote it"} {
+		if strings.Contains(verifyErr.Error(), recovery) !=
+			strings.Contains(initErr.Error(), recovery) {
+			t.Fatalf("serve and init recover differently: %v; %v", verifyErr, initErr)
+		}
+	}
+}
+
 func assertIdentityRecoveryError(t *testing.T, err error) {
 	t.Helper()
 	if err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("invalid identity metadata was not explicitly refused: %v", err)
 	}
-	for _, want := range []string{"known-good", "preserve unrelated", "then rerun init"} {
+	for _, want := range []string{"--antigravity-server-name", "known-good", "then rerun init"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("identity error lacks actionable recovery %q: %v", want, err)
 		}
 	}
 }
 
-func TestAntigravityIdentityRequiresSurfaceNameAndUpgradesLegacyCarry(t *testing.T) {
+func TestAntigravityIdentityUpgradesLegacyCarry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
 	options := nativeTestOptions(t, root, "antigravity")
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
-	manifest, backup := readManagedManifest(t, root)
-	for index := range manifest.Surfaces {
-		if manifest.Surfaces[index].Kind == manifestKindAntigravityConfig {
-			manifest.Surfaces[index].ServerName = ""
-		}
-	}
-	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
-	_, err := VerifyManagedSurfaces(root)
-	assertIdentityRecoveryError(t, err)
-	_, err = Apply(options)
-	assertIdentityRecoveryError(t, err)
+	manifest, _ := readManagedManifest(t, root)
 	manifest.SchemaVersion = 1
 	manifest.AntigravityServerName = nil
 	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
-	if _, err = VerifyManagedSurfaces(root); err != nil {
+	if _, err := VerifyManagedSurfaces(root); err != nil {
 		t.Fatalf("genuine pre-identity canonical manifest rejected: %v", err)
 	}
 	options.Agents = []string{"codex"}
-	if _, err = Apply(options); err != nil {
+	if _, err := Apply(options); err != nil {
 		t.Fatalf("legacy deselected identity upgrade failed: %v", err)
 	}
-	if _, err = VerifyManagedSurfaces(root); err != nil {
-		t.Fatalf("legacy carry lost identity metadata: %v; original %s", err, backup)
+	upgraded, data := readManagedManifest(t, root)
+	if upgraded.SchemaVersion != manifestSchemaVersion ||
+		upgraded.AntigravityServerName == nil ||
+		*upgraded.AntigravityServerName != serverName {
+		t.Fatalf("legacy carry did not record the canonical identity: %s", data)
+	}
+	if _, err := VerifyManagedSurfaces(root); err != nil {
+		t.Fatalf("legacy carry lost identity metadata: %v", err)
+	}
+}
+
+func TestAntigravityIdentityTooNewManifest(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	options := nativeTestOptions(t, root, "antigravity")
+	options.AntigravityServerName = "jmw-scoped"
+	if _, err := Apply(options); err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := readManagedManifest(t, root)
+	manifest.SchemaVersion = manifestSchemaVersion + 1
+	writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+	before := readIdentityFile(t, root, manifestFile)
+	if _, err := VerifyManagedSurfaces(root); err == nil ||
+		!strings.Contains(err.Error(), "is too new") ||
+		!strings.Contains(err.Error(), "release that wrote it") {
+		t.Fatalf("newer identity manifest not reported as too new: %v", err)
+	}
+	options.AntigravityServerName = ""
+	if _, err := Apply(options); err == nil ||
+		!strings.Contains(err.Error(), "is too new") ||
+		!strings.Contains(err.Error(), "release that wrote it") {
+		t.Fatalf("init on a newer identity manifest not refused as too new: %v", err)
+	}
+	if !bytes.Equal(before, readIdentityFile(t, root, manifestFile)) {
+		t.Fatal("refused newer manifest was rewritten")
+	}
+}
+
+func TestAntigravityIdentityRepairWithoutRecordedSurface(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, write := range []bool{true, false} {
+		t.Run(fmt.Sprint(write), func(t *testing.T) {
+			root := t.TempDir()
+			options := nativeTestOptions(t, root, "antigravity")
+			options.AntigravityServerName = "jmw-lost"
+			if _, err := Apply(options); err != nil {
+				t.Fatal(err)
+			}
+			options.WriteMCPConfig = false
+			if _, err := Apply(options); err != nil {
+				t.Fatal(err)
+			}
+			manifest, _ := readManagedManifest(t, root)
+			manifest.AntigravityServerName = nil
+			writeJSONFile(t, filepath.Join(root, manifestFile), manifest)
+			options.AntigravityServerName = ""
+			options.WriteMCPConfig = write
+			_, err := Apply(options)
+			assertIdentityRecoveryError(t, err)
+
+			for _, occupied := range []string{"jmw-found", serverName} {
+				assertRepairRefusesOccupied(t, root, options, occupied)
+			}
+
+			options.AntigravityServerName = "jmw-repaired"
+			if _, err = Apply(options); err != nil {
+				t.Fatalf("explicit identity repair failed: %v", err)
+			}
+			repaired, data := readManagedManifest(t, root)
+			if repaired.AntigravityServerName == nil ||
+				*repaired.AntigravityServerName != "jmw-repaired" {
+				t.Fatalf("identity repair recorded another name: %s", data)
+			}
+			if write && identityDocument(t, root)["jmw-repaired"] == nil {
+				t.Fatal("identity repair did not write the selected entry")
+			}
+			if _, err = VerifyManagedSurfaces(root); err != nil {
+				t.Fatalf("repaired identity does not verify: %v", err)
+			}
+		})
+	}
+}
+
+// assertRepairRefusesOccupied checks an identity repair never adopts an existing
+// entry, the canonical one included: with the identity lost, nothing shows init
+// ever owned it.
+func assertRepairRefusesOccupied(t *testing.T, root string, options Options, name string) {
+	t.Helper()
+	occupied := []byte(`{"mcpServers":{"` + name + `":{"command":"foreign"}}}`)
+	writeIdentityFile(t, root, identityConfig, occupied)
+	options.AntigravityServerName = name
+	if _, err := Apply(options); err == nil || !strings.Contains(err.Error(), "not managed") {
+		t.Fatalf("identity repair adopted occupied %q: %v", name, err)
+	}
+	if !bytes.Equal(occupied, readIdentityFile(t, root, identityConfig)) {
+		t.Fatal("refused identity repair changed client state")
+	}
+	if err := os.Remove(filepath.Join(root, identityConfig)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -470,7 +603,10 @@ func TestAntigravityIdentityTransitionsAfterRemoval(t *testing.T) {
 	for _, write := range []bool{true, false} {
 		t.Run(fmt.Sprint(write), func(t *testing.T) {
 			root := t.TempDir()
-			foreign := []byte(`{"auth":{"token":"test-only"},"mcpServers":{"just-mcp-work":{"command":"foreign"}}}`)
+			foreign := []byte(
+				`{"auth":{"token":"test-only"},` +
+					`"mcpServers":{"just-mcp-work":{"command":"foreign"}}}`,
+			)
 			writeIdentityFile(t, root, identityConfig, foreign)
 			options := nativeTestOptions(t, root, "antigravity")
 			options.AntigravityServerName = "jmw-A"

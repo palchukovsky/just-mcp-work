@@ -525,19 +525,23 @@ func Apply(options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	identity, identityErr := resolveAntigravityIdentity(
-		scope, options.AntigravityServerName, agentEdits,
+	recorded, previousAntigravityName, antigravityName, err := resolveAntigravityIdentity(
+		scope,
+		agentEdits,
+		options.AntigravityServerName,
 	)
-	if identityErr != nil {
-		return Result{}, identityErr
+	if err != nil {
+		return Result{}, err
 	}
-	options.AntigravityServerName = identity
+	options.AntigravityServerName = antigravityName
 	edits := append([]plannedEdit(nil), agentEdits...)
 	workspaceEdits, workspaceSurfaces, err := planWorkspaceConfiguration(
 		scope,
 		preserveMCPAnchor,
 		selected,
 		options,
+		recorded,
+		previousAntigravityName,
 	)
 	if err != nil {
 		return Result{}, err
@@ -683,6 +687,8 @@ func planWorkspaceConfiguration(
 	preserveMCPAnchor bool,
 	selected map[string]struct{},
 	options Options,
+	recorded managedManifest,
+	previousAntigravityName string,
 ) ([]plannedEdit, []manifestSurface, error) {
 	edits := make([]plannedEdit, 0, 4)
 	surfaces := make([]manifestSurface, 0, 4)
@@ -698,7 +704,13 @@ func planWorkspaceConfiguration(
 	}
 	edits = appendEdit(edits, codexEdit)
 	surfaces = appendManifestSurface(surfaces, codexSurface)
-	nativeEdits, nativeSurfaces, err := planNativeMCPConfigs(scope, selected, options)
+	nativeEdits, nativeSurfaces, err := planNativeMCPConfigs(
+		scope,
+		selected,
+		options,
+		recorded,
+		previousAntigravityName,
+	)
 	if err != nil {
 		return nil, nil, err
 	}

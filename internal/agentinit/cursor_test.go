@@ -18,22 +18,12 @@ import (
 
 func cursorPermissionsContent(t *testing.T, root string) []byte {
 	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, cursorPermissions))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return data
+	return readTestFile(t, filepath.Join(root, cursorPermissions))
 }
 
 func writeCursorPermissions(t *testing.T, root string, data []byte) {
 	t.Helper()
-	path := filepath.Join(root, cursorPermissions)
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
+	writeTestFile(t, filepath.Join(root, cursorPermissions), data)
 }
 
 func cursorAllowEntries(t *testing.T, content []byte) []string {
@@ -143,8 +133,12 @@ func TestCursorPermissionsRepairMissingDeny(t *testing.T) {
 	if _, err := Apply(options); err != nil {
 		t.Fatal(err)
 	}
-	want := strings.Replace(string(cursorPermissionsContent(t, fresh)), "{\n",
-		"{\n  \"version\": 1,\n", 1)
+	want := strings.Replace(
+		string(cursorPermissionsContent(t, fresh)),
+		"{\n",
+		"{\n  \"version\": 1,\n",
+		1,
+	)
 	// An earlier build wrote the same file without deny.
 	earlier := strings.Replace(want, ",\n    \"deny\": []", "", 1)
 	if earlier == want {
@@ -251,12 +245,9 @@ func TestCursorPermissionsCarryAndShellRefusal(t *testing.T) {
 	if !bytes.Equal(before, cursorPermissionsContent(t, root)) {
 		t.Fatal("carried Cursor permissions changed")
 	}
-	codexBefore, err := os.ReadFile(filepath.Join(root, codexConfig))
-	if err != nil {
-		t.Fatal(err)
-	}
+	codexBefore := readTestFile(t, filepath.Join(root, codexConfig))
 	options.ShellPermission = ShellPermissionAsk
-	_, err = Apply(options)
+	_, err := Apply(options)
 	if err == nil || !strings.Contains(err.Error(), cursorPermissions) ||
 		!strings.Contains(err.Error(), "re-run with --agents codex,cursor") {
 		t.Fatalf("excluded Cursor shell change was not refused with its path and agent: %v", err)
@@ -505,6 +496,9 @@ func TestCursorPermissionsMalformedRefusesBeforeWrites(t *testing.T) {
 					!strings.Contains(err.Error(), "fix that entry and run init again") {
 					t.Fatalf("malformed Cursor permissions were not refused with repair guidance: %v", err)
 				}
+				if before == `{"permissions":1}` && !strings.Contains(err.Error(), "is not an object") {
+					t.Fatalf("malformed Cursor permissions shape was not named: %v", err)
+				}
 				if string(cursorPermissionsContent(t, root)) != before {
 					t.Fatal("malformed Cursor permissions were changed")
 				}
@@ -558,8 +552,10 @@ func TestCursorPermissionsVerifyEditedAllow(t *testing.T) {
 		t.Fatal("test did not remove its managed allow entry")
 	}
 	writeCursorPermissions(t, root, after)
+	// Verification names the file by its OS path.
 	if _, err := VerifyManagedSurfaces(root); err == nil ||
-		!strings.Contains(err.Error(), cursorPermissions) || !strings.Contains(err.Error(), "edited") {
+		!strings.Contains(err.Error(), filepath.FromSlash(cursorPermissions)) ||
+		!strings.Contains(err.Error(), "edited") {
 		t.Fatalf("edited Cursor allow entry escaped verification: %v", err)
 	}
 }

@@ -52,11 +52,16 @@ func TestInitRejectsAntigravityIdentityBeforeQuestions(t *testing.T) {
 func TestInitAntigravityServerNamePersistsRecordedChoices(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()
-	args := append(initArgsWithRunnerModesWithoutAI(root),
-		"--agents", "antigravity", "--ai", "antigravity",
-		"--write-mcp-config=true", "--shell-permission", "ask",
-		"--antigravity-server-name", "jmw-workspace-explicit")
-	if err := initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+	args := append(
+		initArgsWithRunnerModesWithoutAI(root),
+		"--agents=antigravity",
+		"--ai=antigravity",
+		"--write-mcp-config=true",
+		"--shell-permission=ask",
+		"--antigravity-server-name=jmw-workspace-explicit",
+	)
+	err := initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard)
+	if err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(root, ".agents", "mcp_config.json")
@@ -65,9 +70,14 @@ func TestInitAntigravityServerNamePersistsRecordedChoices(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantAnswers := readRecordedInitAnswers(t, root)
-	args = append(initArgsWithRunnerModesWithoutAI(root),
-		"--agents", "antigravity", "--keep-recorded", "--write-mcp-config=true")
-	if err = initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard); err != nil {
+	args = append(
+		initArgsWithRunnerModesWithoutAI(root),
+		"--agents=antigravity",
+		"--keep-recorded",
+		"--write-mcp-config=true",
+	)
+	err = initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard)
+	if err != nil {
 		t.Fatalf("recorded scoped rerun failed: %v", err)
 	}
 	after, err := os.ReadFile(path)
@@ -92,9 +102,104 @@ func TestInitAntigravityServerNamePersistsRecordedChoices(t *testing.T) {
 	if _, err = agentinit.VerifyManagedSurfaces(root); err != nil {
 		t.Fatal(err)
 	}
-	if err = initCommandWithIO([]string{"--antigravity-server-name="},
-		strings.NewReader(""), io.Discard, io.Discard); err == nil ||
-		!strings.Contains(err.Error(), "must not be empty") {
+	err = initCommandWithIO(
+		[]string{"--antigravity-server-name="},
+		strings.NewReader(""),
+		io.Discard,
+		io.Discard,
+	)
+	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
 		t.Fatalf("explicit empty identity accepted: %v", err)
+	}
+}
+
+func TestInitRepairsLostAntigravityIdentityWithExplicitName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	args := append(
+		initArgsWithRunnerModesWithoutAI(root),
+		"--agents=antigravity",
+		"--ai=antigravity",
+		"--write-mcp-config=false",
+		"--shell-permission=ask",
+		"--antigravity-server-name=jmw-lost",
+	)
+	err := initWithBetaTest(false, args, strings.NewReader(""), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(root, ".just-mcp-work", "managed.json")
+	document := readManifestDocument(t, manifestPath)
+	delete(document, "antigravity_server_name")
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// #nosec G703 -- manifestPath is inside this test's temporary directory.
+	if err = os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rerun := append(
+		initArgsWithRunnerModesWithoutAI(root),
+		"--agents=antigravity",
+		"--keep-recorded",
+		"--write-mcp-config=true",
+		"--shell-permission=ask",
+	)
+	err = initWithBetaTest(false, rerun, strings.NewReader(""), io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "--antigravity-server-name") {
+		t.Fatalf("lost identity not refused with its repair: %v", err)
+	}
+	rerun = append(rerun, "--antigravity-server-name=jmw-repaired")
+	err = initWithBetaTest(false, rerun, strings.NewReader(""), io.Discard, io.Discard)
+	if err != nil {
+		t.Fatalf("explicit identity repair failed: %v", err)
+	}
+	assertRepairedIdentity(t, root, document, "jmw-repaired")
+}
+
+func readManifestDocument(t *testing.T, path string) map[string]json.RawMessage {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err = json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	return document
+}
+
+// assertRepairedIdentity checks a repair recorded and wrote name and kept the
+// recorded answers. The shell answer is recorded only once a managed shell
+// surface is written, so it is not compared.
+func assertRepairedIdentity(
+	t *testing.T,
+	root string,
+	before map[string]json.RawMessage,
+	name string,
+) {
+	t.Helper()
+	repaired := readManifestDocument(t, filepath.Join(root, ".just-mcp-work", "managed.json"))
+	if string(repaired["antigravity_server_name"]) != `"`+name+`"` {
+		t.Fatalf("identity repair recorded %s", repaired["antigravity_server_name"])
+	}
+	for _, answer := range []string{"beta_test", "ai_families"} {
+		if !bytes.Equal(repaired[answer], before[answer]) {
+			t.Fatalf(
+				"identity repair changed recorded %s: %s, want %s",
+				answer,
+				repaired[answer],
+				before[answer],
+			)
+		}
+	}
+	config, err := os.ReadFile(filepath.Join(root, ".agents", "mcp_config.json"))
+	if err != nil || !bytes.Contains(config, []byte(`"`+name+`"`)) {
+		t.Fatalf("identity repair did not write the selected entry: %v, %s", err, config)
+	}
+	if _, err = agentinit.VerifyManagedSurfaces(root); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -42,10 +42,11 @@ func generatedCursorPermissions(shell ShellPermission) (manifestSurface, error) 
 	if err != nil {
 		return manifestSurface{}, err
 	}
-	fragment, err := marshalManagedPermissionFragment(
-		map[string][]string{"allow": lists[0].tools},
-		cursorPermissions,
-	)
+	managed := make(map[string][]string, len(lists))
+	for _, list := range lists {
+		managed[list.key] = list.tools
+	}
+	fragment, err := marshalManagedPermissionFragment(managed)
 	if err != nil {
 		return manifestSurface{}, err
 	}
@@ -67,6 +68,7 @@ func planCursorPermissions(scope string, options Options) (*plannedEdit, *manife
 	}
 	file := cursorPermissionFile()
 	data := emptyJSONObject(before)
+	// validate words a malformed shape before managedFragment decodes the lists.
 	if err = file.validate(data); err != nil {
 		return nil, nil, err
 	}
@@ -172,11 +174,11 @@ func (config nativeMCPConfig) remove(before []byte) ([]byte, bool, error) {
 }
 
 func (config nativeMCPConfig) surface(content []byte) (manifestSurface, bool, error) {
-	recorded := manifestSurface{Path: config.path, Kind: config.kind}
-	if config.agent == "antigravity" {
-		recorded.ServerName = config.server
-	}
-	return manifestSurfaceFromContent(recorded, content)
+	return manifestSurfaceFromContent(
+		manifestSurface{Path: config.path, Kind: config.kind},
+		content,
+		config.server,
+	)
 }
 
 func generatedNativeMCPSurface(
@@ -212,6 +214,8 @@ func planNativeMCPConfigs(
 	scope string,
 	selected map[string]struct{},
 	options Options,
+	recorded managedManifest,
+	previousAntigravityName string,
 ) ([]plannedEdit, []manifestSurface, error) {
 	var edits []plannedEdit
 	var surfaces []manifestSurface
@@ -233,7 +237,13 @@ func planNativeMCPConfigs(
 		}
 		original := before
 		if config.agent == "antigravity" {
-			before, err = planAntigravityIdentity(scope, before, options)
+			before, err = planAntigravityIdentity(
+				config,
+				before,
+				options,
+				recorded,
+				previousAntigravityName,
+			)
 			if err != nil {
 				return nil, nil, fmt.Errorf("plan %s: %w", config.path, err)
 			}

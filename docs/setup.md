@@ -23,7 +23,10 @@ The fixed task surface does not sandbox the agent; use `write_scope` to enforce
 JMW's outer write boundary on macOS.
 `init` writes Grok's instructions to its supported `AGENT.md` filename and
 Antigravity's instructions to `GEMINI.md`. Their native MCP configurations are
-`.grok/config.toml` and `.agents/mcp_config.json`. Cursor uses
+`.grok/config.toml` and `.agents/mcp_config.json`; the Antigravity entry's name
+is `just-mcp-work` unless `--antigravity-server-name` chooses another, which
+later runs keep, `--keep-recorded` included (see
+[the agent guide](agent-guide.md)). Cursor uses
 `.cursor/rules/just-mcp-work.mdc` with `alwaysApply: true`, and its native MCP
 configuration is `.cursor/mcp.json`. Cursor CLI's workspace tool grants are
 managed `allow` entries in `.cursor/cli.json`. These configurations are

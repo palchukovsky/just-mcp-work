@@ -287,10 +287,10 @@ rejected before any write; unowned entries are never adopted or removed for a
 rename. Unrelated servers, authentication and client settings are preserved.
 Removing MCP configuration removes only the recorded entry; deselecting
 Antigravity preserves its entry and verification. Renaming requires Antigravity
-in `--agents` and cannot be combined with removal. Missing or contradictory
-recorded identity is an error. Pre-identity manifests describe only the
-canonical entry and remain supported. Manually renaming a generated key still
-fails startup verification; choose the name through `init` instead.
+in `--agents` and cannot be combined with removal. Missing or invalid recorded
+identity is an error. Pre-identity manifests describe only the canonical entry
+and remain supported. Manually renaming a generated key still fails startup
+verification; choose the name through `init` instead.
 
 With `--write-mcp-config=false` and Cursor selected, `init` removes its
 `Mcp(just-mcp-work:...)` allow entries and deletes `.cursor/cli.json` if only
@@ -792,15 +792,24 @@ delegated build that pours a full log into its own context defeats the purpose.
 
 ## Failure modes
 
-If `init` or `serve` reports missing, invalid or contradictory recorded
-Antigravity identity, rerunning `init` alone cannot repair it. Restore known-good
-identity metadata in `.just-mcp-work/managed.json` from a backup, or repair only
-the identity metadata using known-good values. Keep `schema_version`,
-`antigravity_server_name` and any Antigravity surface's `server_name` consistent;
-new manifests use schema 2 and retain the name after MCP removal. Do not downgrade
-the schema or guess a name to bypass the refusal. Preserve unrelated configuration
-and recorded answers, then rerun `init`. Genuine pre-identity schema 1 manifests
-have neither name field and retain their canonical meaning.
+If `init` or `serve` reports missing or invalid recorded Antigravity identity
+and the manifest records no Antigravity MCP surface - after
+`--write-mcp-config=false`, for example - rerun
+`init --agents antigravity --antigravity-server-name <name>` with the entry name
+to use. `init` refuses a name whose entry already exists in
+`.agents/mcp_config.json` and does not belong to it. The repair selects
+Antigravity, so in a workspace that did not use it `init` also writes
+`GEMINI.md`; add `--write-mcp-config=false` to leave `.agents/mcp_config.json`
+untouched, and both stay recorded after Antigravity is deselected. While an
+Antigravity surface is recorded, `init` cannot know which name it was given:
+restore `antigravity_server_name` in `.just-mcp-work/managed.json` from a
+known-good backup, then rerun `init`. Do not guess a name or downgrade the schema
+to bypass the refusal, and do not edit the name in `managed.json` by hand: `init`
+writes the entry under the recorded name and replaces whatever entry already
+holds it. New manifests use schema 2 and keep the name after MCP removal;
+genuine pre-identity schema 1 manifests have no name and mean the canonical
+entry. A manifest of a newer schema that records a name is too new for this
+release; use the release that wrote it.
 
 An `init` in the recovery commands below asks whether the workspace takes part
 in the JMW beta test unless `--beta-test` answers it. It offers the mode a

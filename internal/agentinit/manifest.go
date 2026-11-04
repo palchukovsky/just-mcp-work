@@ -60,10 +60,12 @@ type managedManifest struct {
 	Surfaces              []manifestSurface  `json:"surfaces"`
 }
 
-// Version 1 predates recorded native identity; version 2 requires it even
-// after the corresponding MCP surface has been intentionally removed.
+// supportedManifestSchema names every schema this binary reads, independently of
+// the one it writes. Version 1 predates recorded native identity; version 2
+// requires it even after the corresponding MCP surface has been intentionally
+// removed.
 func supportedManifestSchema(schema int) bool {
-	return schema == 1 || schema == manifestSchemaVersion
+	return schema == 1 || schema == 2
 }
 
 //nolint:govet // Field order follows the stable on-disk schema.
@@ -78,10 +80,9 @@ type agentInstructions struct {
 }
 
 type manifestSurface struct {
-	Path       string `json:"path"`
-	Kind       string `json:"kind"`
-	SHA256     string `json:"sha256"`
-	ServerName string `json:"server_name,omitempty"`
+	Path   string `json:"path"`
+	Kind   string `json:"kind"`
+	SHA256 string `json:"sha256"`
 }
 
 // ManagedSurfaces reports the modes verified from a workspace's managed manifest.
@@ -155,14 +156,13 @@ func planManifest(
 				for _, config := range nativeMCPConfigs() {
 					if _, isSelected := selected[config.agent]; !isSelected &&
 						surface.Kind == config.kind {
-						if config.agent == "antigravity" &&
-							nativeSurfaceServerName(surface) != antigravityServerName {
-							return nil, nil, fmt.Errorf(
-								"cannot rename Antigravity server outside --agents; select antigravity",
-							)
-						}
+						// An unselected Antigravity keeps its recorded name: only a
+						// selected one takes --antigravity-server-name.
 						expected, generationErr := generatedNativeMCPSurface(
-							config.kind, scope, families, nativeSurfaceServerName(surface),
+							config.kind,
+							scope,
+							families,
+							antigravityServerName,
 						)
 						if generationErr != nil {
 							return nil, nil, generationErr
@@ -174,9 +174,6 @@ func planManifest(
 								config.path,
 								strings.Join(append(selectedInstructionAgentNames(selected), config.agent), ","),
 							)
-						}
-						if config.agent == "antigravity" {
-							surface.ServerName = antigravityServerName
 						}
 						surfaces = append(surfaces, surface)
 					}
@@ -609,14 +606,13 @@ var ErrUnrecognizedBetaTest = errors.New("recorded beta-test mode is not recogni
 
 // decodeManagedManifest decodes the one document every reader of the manifest
 // works from. A document this binary cannot decode is a hard error everywhere:
-// neither init nor serve may act on recorded state it cannot see.
+// neither init nor serve may act on recorded state it cannot see. Decoding does
+// not judge the recorded Antigravity identity: that needs a supported schema,
+// and only the readers that use the identity validate it.
 func decodeManagedManifest(path string, data []byte) (managedManifest, error) {
 	var manifest managedManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return managedManifest{}, fmt.Errorf("decode managed manifest %s: %w", path, err)
-	}
-	if _, err := recordedAntigravityIdentity(manifest); err != nil {
-		return managedManifest{}, fmt.Errorf("managed manifest %s: %w", path, err)
 	}
 	return manifest, nil
 }
@@ -875,7 +871,7 @@ func (file permissionFile) managedFragment(content []byte) ([]byte, bool, error)
 		managed[name] = entries
 		count += len(entries)
 	}
-	fragment, err := marshalManagedPermissionFragment(managed, file.path)
+	fragment, err := marshalManagedPermissionFragment(managed)
 	if err != nil {
 		return nil, count > 0,
 			fmt.Errorf("encode managed permissions in %s: %w", file.path, err)
@@ -883,17 +879,10 @@ func (file permissionFile) managedFragment(content []byte) ([]byte, bool, error)
 	return fragment, count > 0, nil
 }
 
-func marshalClaudeManagedFragment(permissions map[string][]string) ([]byte, error) {
-	return marshalManagedPermissionFragment(permissions, "Claude")
-}
-
-func marshalManagedPermissionFragment(
-	permissions map[string][]string,
-	name string,
-) ([]byte, error) {
+func marshalManagedPermissionFragment(permissions map[string][]string) ([]byte, error) {
 	fragment, err := json.Marshal(permissions)
 	if err != nil {
-		return nil, fmt.Errorf("marshal managed %s entries: %w", name, err)
+		return nil, fmt.Errorf("marshal managed permission entries: %w", err)
 	}
 	return fragment, nil
 }
@@ -1087,10 +1076,13 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			managedManifestRecovery(root),
 		)
 	}
-	if _, identityErr := recordedAntigravityIdentity(manifest); identityErr != nil {
-		return ManagedSurfaces{}, fmt.Errorf("managed manifest %s: %w", manifestPath, identityErr)
-	}
 	if !supportedManifestSchema(manifest.SchemaVersion) {
+		if manifest.AntigravityServerName != nil {
+			return ManagedSurfaces{}, unsupportedIdentityManifestError(
+				manifestPath,
+				manifest.SchemaVersion,
+			)
+		}
 		description := fmt.Sprintf("has unsupported schema version %d", manifest.SchemaVersion)
 		if manifest.SchemaVersion > manifestSchemaVersion {
 			description = fmt.Sprintf("is too new (schema version %d)", manifest.SchemaVersion)
@@ -1101,6 +1093,10 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			description,
 			managedManifestRecovery(root),
 		)
+	}
+	antigravityName, err := recordedAntigravityIdentity(manifest)
+	if err != nil {
+		return ManagedSurfaces{}, fmt.Errorf("managed manifest %s: %w", manifestPath, err)
 	}
 	families, err := manifest.families()
 	if err != nil {
@@ -1178,6 +1174,7 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 			shellPermission,
 			families,
 			recorded,
+			antigravityName,
 		)
 		if err != nil {
 			return ManagedSurfaces{}, fmt.Errorf(
@@ -1236,7 +1233,7 @@ func VerifyManagedSurfaces(root string) (ManagedSurfaces, error) {
 				managedManifestRecovery(root),
 			)
 		}
-		actual, found, err := manifestSurfaceFromContent(recorded, content)
+		actual, found, err := manifestSurfaceFromContent(recorded, content, antigravityName)
 		if err != nil {
 			return ManagedSurfaces{}, fmt.Errorf(
 				"managed configuration in %s is malformed: %w; %s",
@@ -1300,6 +1297,7 @@ func generatedManifestSurface(
 	shellPermission ShellPermission,
 	families aiprofile.Selection,
 	recorded manifestSurface,
+	antigravityServerName string,
 ) (manifestSurface, error) {
 	switch recorded.Kind {
 	case manifestKindAgentInstructions:
@@ -1315,9 +1313,7 @@ func generatedManifestSurface(
 			[]byte(promptText+"\n"),
 		), nil
 	case manifestKindGrokConfig, manifestKindAntigravityConfig, manifestKindCursorConfig:
-		return generatedNativeMCPSurface(
-			recorded.Kind, root, families, nativeSurfaceServerName(recorded),
-		)
+		return generatedNativeMCPSurface(recorded.Kind, root, families, antigravityServerName)
 	case manifestKindCodexConfig:
 		content, err := mergeCodexConfig(
 			nil,
@@ -1358,7 +1354,7 @@ func generatedManifestSurface(
 		if len(permissions.Ask) > 0 {
 			managed["ask"] = permissions.Ask
 		}
-		fragment, err := marshalClaudeManagedFragment(managed)
+		fragment, err := marshalManagedPermissionFragment(managed)
 		if err != nil {
 			return manifestSurface{}, fmt.Errorf("encode managed permissions: %w", err)
 		}
@@ -1372,9 +1368,12 @@ func generatedManifestSurface(
 	}
 }
 
+// manifestSurfaceFromContent reads a surface's managed fragment from its file.
+// antigravityServerName selects the Antigravity entry; other kinds ignore it.
 func manifestSurfaceFromContent(
 	recorded manifestSurface,
 	content []byte,
+	antigravityServerName string,
 ) (manifestSurface, bool, error) {
 	var (
 		fragment []byte
@@ -1389,7 +1388,7 @@ func manifestSurfaceFromContent(
 	case manifestKindCodexConfig, manifestKindGrokConfig:
 		fragment, found, err = managedBlockFragment(content, codexBlockRange)
 	case manifestKindAntigravityConfig:
-		fragment, found, err = namedMCPManagedFragment(content, nativeSurfaceServerName(recorded))
+		fragment, found, err = namedMCPManagedFragment(content, antigravityServerName)
 	case manifestKindMCPConfig, manifestKindCursorConfig:
 		fragment, found, err = mcpManagedFragment(content)
 	case manifestKindClaudeSettings:
@@ -1405,9 +1404,7 @@ func manifestSurfaceFromContent(
 	if err != nil || !found {
 		return manifestSurface{}, found, err
 	}
-	surface := newManifestSurface(recorded.Path, recorded.Kind, fragment)
-	surface.ServerName = recorded.ServerName
-	return surface, true, nil
+	return newManifestSurface(recorded.Path, recorded.Kind, fragment), true, nil
 }
 
 func managedManifestRecovery(root string) string {
