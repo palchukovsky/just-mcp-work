@@ -148,8 +148,9 @@ build-all:
 package: build-all
     {{ python }} scripts/dev.py package
 
-# Verify, create, and push the next semantic-version tag.
-release kind: verify
+# Verify, commit release notes from an absolute path, then tag and push that commit.
+release kind notes_file: verify
+    {{ python }} scripts/release_notes.py prepare {{ kind }} "{{ notes_file }}"
     {{ python }} scripts/dev.py release {{ kind }}
 
 # Run the release pipeline for a prospective version without creating a tag.

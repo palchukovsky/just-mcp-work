@@ -51,6 +51,12 @@ jobs:
       - name: Set up just
         uses: extractions/setup-just@v3
 
+      - name: Check committed release notes
+        if: github.event_name == 'push'
+        run: |
+          python scripts/release_notes.py check "$GITHUB_REF_NAME"
+          tail -n +2 RELEASE_NOTES.md > "$RUNNER_TEMP/release-notes.md"
+
       - name: Package
         run: just package
 
@@ -68,3 +74,4 @@ jobs:
         with:
           files: dist/*
           fail_on_unmatched_files: true
+          body_path: ${{ runner.temp }}/release-notes.md
